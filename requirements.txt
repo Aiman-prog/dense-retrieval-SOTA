@@ -1,0 +1,28 @@
+# Core ML Libraries
+torch>=2.0.0
+transformers>=4.30.0,<4.36.0  # Pin to version compatible with Tevatron (avoids API changes)
+sentence-transformers>=2.2.0,<3.0.0  # Pin to version compatible with transformers 4.30-4.35 (v3.x requires transformers>=4.38)
+datasets>=2.14.0
+accelerate>=0.20.0,<0.25.0  # Pin to version compatible with transformers 4.30-4.35 (avoids dispatch_batches issue)
+
+# Tevatron for ANCE training
+tevatron>=0.1.0
+# Grad Cache for --grad_cache flag (install from GitHub)
+# Install with: pip install git+https://github.com/luyug/GradCache.git
+git+https://github.com/luyug/GradCache.git  # Required for --grad_cache flag in RocketQA training
+
+# FAISS for vector indexing
+faiss-cpu>=1.7.4  # Use faiss-gpu if GPU available
+
+# Evaluation tools
+pyserini>=0.22.0
+
+# Utilities
+numpy>=1.24.0
+pandas>=2.0.0
+pyyaml>=6.0
+tqdm>=4.65.0
+
+# For TREC eval (if using command-line tool)
+# Note: trec_eval needs to be compiled separately from source
+

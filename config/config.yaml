@@ -1,0 +1,54 @@
+# Model Configuration
+model:
+  base_model: "sentence-transformers/msmarco-bert-base-dot-v5"
+  max_length: 512
+  output_dir: "data/models"
+
+# Dataset Configuration
+dataset:
+  name: "xlangai/BRIGHT"  # BRIGHT dataset on HuggingFace
+  examples_config: "Gemini-1.0_reason"  # Config name for queries/qrels
+  cache_dir: "data/bright"
+  train_domain: "biology"
+  eval_domains:
+    - "earth_science"
+    - "economics"
+    - "psychology"
+    - "robotics"
+
+# Training Configuration
+training:
+  # ANCE training (via tevatron)
+  ance:
+    batch_size: 32
+    learning_rate: 1e-5
+    num_epochs: 3
+    num_iterations: 3  # Number of continuous update iterations
+    hard_negatives_depth: 100  # Depth for hard negative mining
+    save_steps: 10000
+    fp16: true
+  
+  # In-batch negatives training
+  inbatch:
+    batch_size: 32
+    learning_rate: 2e-5
+    num_epochs: 3
+    warmup_steps: 1000
+
+# Evaluation Configuration
+evaluation:
+  metrics:
+    - "MRR"
+    - "NDCG@10"
+    - "Recall@10"
+    - "Recall@100"
+  top_k: 100
+  trec_eval_path: "trec_eval"  # Path to trec_eval binary
+
+# Paths
+paths:
+  data_dir: "data"
+  models_dir: "data/models"
+  indices_dir: "data/indices"
+  results_dir: "results/bright_benchmark"
+

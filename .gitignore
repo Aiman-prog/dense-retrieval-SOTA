@@ -1,0 +1,71 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Data files (generated)
+data/processed/*.jsonl
+data/processed/*.txt
+data/processed/*/
+data/models/
+data/indices/
+data/bright/
+
+# Dataset cache files (HuggingFace datasets cache)
+**/data/bright/
+**/*.arrow
+**/*.lock
+**/dataset_info.json
+
+# Model checkpoints and outputs
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+checkpoints/
+outputs/
+results/
+
+# Logs
+*.log
+logs/
+wandb/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.lock
+
+# Keep directory structure but ignore contents
+!data/processed/.gitkeep
+!data/models/.gitkeep
+!data/indices/.gitkeep
+!data/bright/.gitkeep
+
