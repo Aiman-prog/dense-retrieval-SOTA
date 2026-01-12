@@ -24,3 +24,25 @@ def ensure_dir(path: str) -> None:
     """Ensure directory exists, create if it doesn't."""
     os.makedirs(path, exist_ok=True)
 
+
+def get_data_base_dir() -> str:
+    """
+    Get base directory for all data (datasets, processed files, models).
+    
+    Uses environment variable DATA_BASE_DIR if set, otherwise defaults to
+    DelftBlue structure: /scratch/${USER}/dense-retrieval-SOTA
+    
+    To override (e.g., on macOS):
+        export DATA_BASE_DIR="/path/to/your/data"
+    
+    Returns:
+        Base directory path
+    """
+    # Allow override via environment variable (professional standard)
+    if 'DATA_BASE_DIR' in os.environ:
+        return os.environ['DATA_BASE_DIR']
+    
+    # Default to DelftBlue structure
+    user = os.environ.get('USER', os.environ.get('USERNAME', 'user'))
+    return f'/scratch/{user}/dense-retrieval-SOTA'
+
