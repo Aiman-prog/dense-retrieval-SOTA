@@ -2,26 +2,69 @@
 
 import os
 import sys
+from contextlib import contextmanager
 from typing import Dict, List, Optional, Union
 from pathlib import Path
 from datasets import load_dataset, DatasetDict
 import pandas as pd
 import yaml
-# Import helper function (handle both package and direct import)
-try:
-    from utils.helpers import get_data_base_dir
-except ImportError:
-    # Fallback for relative import
-    project_root = Path(__file__).parent.parent.parent
+
+# Simplified import handling
+project_root = Path(__file__).parent.parent.parent
+if str(project_root / 'src') not in sys.path:
     sys.path.insert(0, str(project_root / 'src'))
-    from utils.helpers import get_data_base_dir
+from utils.helpers import get_data_base_dir
+
+
+@contextmanager
+def hf_cache_context(cache_dir: str, disable_offline: bool = False):
+    """
+    Context manager for HuggingFace cache environment variables.
+    Ensures datasets are cached to the specified directory and optionally disables offline mode.
+    
+    Args:
+        cache_dir: Directory to cache datasets
+        disable_offline: If True, temporarily disables HF_HUB_OFFLINE for downloading
+    """
+    os.makedirs(cache_dir, exist_ok=True)
+    
+    # Store original values
+    original_hf_cache = os.environ.get('HF_DATASETS_CACHE')
+    original_hf_home = os.environ.get('HF_HOME')
+    original_offline = os.environ.get('HF_HUB_OFFLINE')
+    
+    # Temporarily disable offline mode if needed
+    if disable_offline and original_offline:
+        print("⚠️  Warning: HF_HUB_OFFLINE is set. Temporarily disabling for download...")
+        del os.environ['HF_HUB_OFFLINE']
+    
+    # Set cache directory
+    os.environ['HF_DATASETS_CACHE'] = cache_dir
+    os.environ['HF_HOME'] = cache_dir
+    
+    try:
+        yield
+    finally:
+        # Restore original environment variables
+        if original_hf_cache is not None:
+            os.environ['HF_DATASETS_CACHE'] = original_hf_cache
+        elif 'HF_DATASETS_CACHE' in os.environ:
+            del os.environ['HF_DATASETS_CACHE']
+            
+        if original_hf_home is not None:
+            os.environ['HF_HOME'] = original_hf_home
+        elif 'HF_HOME' in os.environ:
+            del os.environ['HF_HOME']
+        
+        if original_offline:
+            os.environ['HF_HUB_OFFLINE'] = original_offline
+
 
 class BRIGHTLoader:
     """Loader for BRIGHT dataset from HuggingFace."""
     
     def __init__(self, config_path: str):
         """Initialize BRIGHT loader."""
-        project_root = Path(__file__).parent.parent.parent
         config_file = project_root / config_path
         
         with open(config_file, 'r') as f:
@@ -44,19 +87,8 @@ class BRIGHTLoader:
             Dictionary with 'documents' and 'examples' DatasetDict objects
         """
         cache = cache_dir or self.cache_dir
-        os.makedirs(cache, exist_ok=True)
         
-        # CRITICAL: Set HuggingFace cache environment variables to ensure
-        # datasets are downloaded to the specified cache_dir, not ~/.cache/huggingface/
-        # This is needed because load_dataset() respects HF_DATASETS_CACHE env var
-        original_hf_cache = os.environ.get('HF_DATASETS_CACHE')
-        original_hf_home = os.environ.get('HF_HOME')
-        
-        # Set to our custom cache directory
-        os.environ['HF_DATASETS_CACHE'] = cache
-        os.environ['HF_HOME'] = cache
-        
-        try:
+        with hf_cache_context(cache):
             print(f"Loading BRIGHT 'documents' from: {self.dataset_name}")
             print(f"Using cache directory: {cache}")
             # 'documents' subset contains the corpus for all domains
@@ -73,17 +105,6 @@ class BRIGHTLoader:
                 self.examples_config,
                 cache_dir=cache
             )
-        finally:
-            # Restore original environment variables if they existed
-            if original_hf_cache is not None:
-                os.environ['HF_DATASETS_CACHE'] = original_hf_cache
-            elif 'HF_DATASETS_CACHE' in os.environ:
-                del os.environ['HF_DATASETS_CACHE']
-                
-            if original_hf_home is not None:
-                os.environ['HF_HOME'] = original_hf_home
-            elif 'HF_HOME' in os.environ:
-                del os.environ['HF_HOME']
         
         # Verify available domains overlap
         doc_domains = set(self.documents_dataset.keys())
@@ -209,17 +230,12 @@ class BRIGHTLoader:
         if self.documents_dataset is None:
             raise ValueError("Dataset not loaded. Call load_dataset() first.")
         
-        id2doc = {}
-        
-        # Iterate through all domains/tasks in BRIGHT documents
-        for task in self.documents_dataset.keys():
-            domain_data = self.documents_dataset[task]
-            
-            # Extract IDs and texts for this domain
-            for i in range(len(domain_data)):
-                doc_id = str(domain_data[i]['id'])
-                doc_text = domain_data[i]['content']
-                id2doc[doc_id] = doc_text
+        # Dictionary comprehension: single-pass generator for all domains
+        id2doc = {
+            str(domain_data[i]['id']): domain_data[i]['content']
+            for task_name, domain_data in self.documents_dataset.items()
+            for i in range(len(domain_data))
+        }
         
         print(f"Created ID-to-text mapping for {len(id2doc)} documents across {len(self.documents_dataset)} domains")
         return id2doc
@@ -232,26 +248,59 @@ class BRIGHTLoader:
         Cache ReasonIR-HQ dataset (downloads if not already cached).
         Minimal method to pre-download dataset for offline training.
         
+        IMPORTANT: This must be run ONLINE (without HF_HUB_OFFLINE=1) to download the dataset.
+        
         Args:
             dataset_name: ReasonIR dataset name (default: "reasonir/reasonir-data")
             subset: Dataset subset to use (default: "hq")
             cache_dir: Optional cache directory for HuggingFace datasets
         """
-        print(f"Caching ReasonIR dataset: {dataset_name} (subset: {subset})...")
-        load_dataset(dataset_name, subset, cache_dir=cache_dir)
-        print(f"✅ ReasonIR-HQ dataset cached successfully!")
+        # Set cache directory (use same location as BRIGHT for consistency)
+        if cache_dir is None:
+            base_dir = get_data_base_dir()
+            cache_dir = f'{base_dir}/data/bright'  # Use same cache as BRIGHT
+        
+        # Use unified loading logic with context manager
+        with hf_cache_context(cache_dir, disable_offline=True):
+            print(f"Caching ReasonIR dataset: {dataset_name} (subset: {subset})...")
+            print(f"Using cache directory: {cache_dir}")
+            load_dataset(dataset_name, subset, cache_dir=cache_dir)
+            print(f"✅ ReasonIR-HQ dataset cached successfully!")
 
 if __name__ == "__main__":
-    loader = BRIGHTLoader(config_path='config/config.yaml')
-    loader.load_dataset()
+    import argparse
+    from utils.helpers import load_config
     
-    # Example: 'biology' is one of the standard domains in BRIGHT
-    try:
-        data = loader.get_data_split('biology')
-        print(f"\nSuccessfully loaded 'biology' domain:")
-        print(f"- Corpus size: {len(data['corpus'])}")
-        print(f"- Queries size: {len(data['queries'])}")
-        print(f"- Qrels size: {len(data['qrels'])}")
-        print(f"- Sample Query: {data['queries'].iloc[0]['query']}")
-    except Exception as e:
-        print(f"\nError loading domain: {e}")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--cache-reasonir", action="store_true",
+                       help="Cache ReasonIR-HQ dataset for offline training")
+    args = parser.parse_args()
+    
+    if args.cache_reasonir:
+        # Cache ReasonIR-HQ dataset
+        config = load_config('config/config.yaml')
+        reasonir_config = config['dataset']['reasonir']
+        print("=" * 80)
+        print("Caching ReasonIR-HQ dataset for offline training...")
+        print("=" * 80)
+        BRIGHTLoader.cache_reasonir_hq_dataset(
+            dataset_name=reasonir_config['name'],
+            subset=reasonir_config['subset'],
+            cache_dir=reasonir_config.get('cache_dir')
+        )
+        print("\n✅ Dataset cached! You can now run training offline.")
+    else:
+        # Default: Example usage for BRIGHT dataset
+        loader = BRIGHTLoader(config_path='config/config.yaml')
+        loader.load_dataset()
+        
+        # Example: 'biology' is one of the standard domains in BRIGHT
+        try:
+            data = loader.get_data_split('biology')
+            print(f"\nSuccessfully loaded 'biology' domain:")
+            print(f"- Corpus size: {len(data['corpus'])}")
+            print(f"- Queries size: {len(data['queries'])}")
+            print(f"- Qrels size: {len(data['qrels'])}")
+            print(f"- Sample Query: {data['queries'].iloc[0]['query']}")
+        except Exception as e:
+            print(f"\nError loading domain: {e}")
