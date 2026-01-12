@@ -1,4 +1,4 @@
-"""Train RocketQA on ReasonIR-HQ dataset (Cluster Optimized)."""
+"""Train In-Batch Negatives model on ReasonIR-HQ dataset (Single GPU, Simple)."""
 
 import sys
 import subprocess
@@ -16,7 +16,6 @@ from utils.helpers import load_config, get_data_base_dir
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num_gpus", type=int, default=1, help="Number of GPUs (default: 1)")
     parser.add_argument("--train_file", type=str, default=None, help="Path to training file (default: auto-generate)")
     args = parser.parse_args()
 
@@ -58,7 +57,7 @@ def main():
         print(f"✅ Generated training file: {train_file_path}")
     
     # Tevatron needs a directory, so we isolate the file
-    train_dir = Path(preprocessor.output_dir) / 'reasonir_rocketqa_train'
+    train_dir = Path(preprocessor.output_dir) / 'reasonir_inbatch_train'
     if train_dir.exists(): 
         shutil.rmtree(train_dir)
     train_dir.mkdir(parents=True, exist_ok=True)
@@ -66,68 +65,35 @@ def main():
     print(f"✅ Training directory prepared: {train_dir}")
     
     # ---------------------------------------------------------
-    # Step 3: Train (Cluster Configuration)
+    # Step 3: Train (Single GPU, In-Batch Negatives)
     # ---------------------------------------------------------
-    # Always use DelftBlue structure: /scratch/${USER}/dense-retrieval-SOTA/models/rocketqa_reasonir
+    # Always use DelftBlue structure: /scratch/${USER}/dense-retrieval-SOTA/models/inbatch_reasonir
     base_dir = get_data_base_dir()
-    output_dir = Path(f'{base_dir}/models/rocketqa_reasonir')
+    output_dir = Path(f'{base_dir}/models/inbatch_reasonir')
     output_dir.mkdir(parents=True, exist_ok=True)
     
     print("\n" + "=" * 80)
-    print("Step 3: Training RocketQA on ReasonIR-HQ...")
+    print("Step 3: Training In-Batch Negatives model on ReasonIR-HQ...")
     print("=" * 80)
     print(f"Output directory: {output_dir}")
     print(f"Training data: {train_dir}")
-    print(f"Number of GPUs: {args.num_gpus}")
+    print(f"Batch size: 128 (single GPU, in-batch negatives)")
         
-    # Build training command
-    # Effective batch size = per_device_train_batch_size * gradient_accumulation_steps * num_gpus
-    # Target: 1024 effective batch size (mimicking 8 GPUs with batch_size=128)
-    
-    if args.num_gpus > 1:
-        # Multi-GPU mode (distributed training)
-        cmd = [
-            'torchrun',
-            '--nproc_per_node', str(args.num_gpus),
-            '-m', 'tevatron.driver.train',
-            '--output_dir', str(output_dir),
-            '--model_name_or_path', config['model']['base_model'],
-            '--train_dir', str(train_dir),
-            '--do_train',
-            
-            # RocketQA Hyperparameters
-            '--per_device_train_batch_size', '128', 
-            '--learning_rate', '1e-5',
-            '--num_train_epochs', '3',
-            '--train_n_passages', '1',              
-            
-            # Performance & Scale Flags
-            '--grad_cache',                         # Enables gradient caching
-            '--gradient_accumulation_steps', '8',   # Hardcoded: mimics 8 GPUs (128 * 8 = 1024 effective batch)
-            '--dataloader_num_workers', '4',
-            '--fp16',                               
-
-        ]
-        print(f"Running in multi-GPU mode ({args.num_gpus} GPUs)...")
-    else:
-        # Single GPU mode with grad_cache to simulate 8 GPUs
-        # Effective batch size = 128 * 8 = 1024
-        cmd = [
-            sys.executable, '-m', 'tevatron.driver.train',
-            '--output_dir', str(output_dir),
-            '--model_name_or_path', config['model']['base_model'],
-            '--train_dir', str(train_dir),
-            '--do_train',
-            '--per_device_train_batch_size', '128',
-            '--learning_rate', '1e-5',
-            '--num_train_epochs', '3',
-            '--train_n_passages', '1',
-            '--grad_cache',                          # Enables gradient caching to simulate larger batch
-            '--gradient_accumulation_steps', '8',   # Hardcoded: mimics 8 GPUs (128 * 8 = 1024 effective batch)
-            '--dataloader_num_workers', '4',
-            '--fp16'
-        ]
-        print(f"Running in single-GPU mode with grad_cache (effective batch size: 1024)...")
+    # Single GPU mode - simple in-batch negatives (no grad_cache, no gradient accumulation)
+    cmd = [
+        sys.executable, '-m', 'tevatron.driver.train',
+        '--output_dir', str(output_dir),
+        '--model_name_or_path', config['model']['base_model'],
+        '--train_dir', str(train_dir),
+        '--do_train',
+        '--per_device_train_batch_size', '128',  # Simple batch size
+        '--learning_rate', '1e-5',
+        '--num_train_epochs', '3',
+        '--train_n_passages', '1',
+        '--dataloader_num_workers', '4',
+        '--fp16'
+    ]
+    print(f"Running in single-GPU mode (in-batch negatives, batch size: 128)...")
 
     try:
         subprocess.run(cmd, check=True)

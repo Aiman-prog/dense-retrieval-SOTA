@@ -6,15 +6,22 @@ model:
 
 # Dataset Configuration
 dataset:
+  # BRIGHT dataset (used for evaluation and document lookup for ReasonIR)
   name: "xlangai/BRIGHT"  # BRIGHT dataset on HuggingFace
   examples_config: "Gemini-1.0_reason"  # Config name for queries/qrels
   cache_dir: "data/bright"
-  train_domain: "biology"
+  train_domain: "biology"  # Legacy: no longer used for training
   eval_domains:
     - "earth_science"
     - "economics"
     - "psychology"
     - "robotics"
+  
+  # ReasonIR dataset (used for training/fine-tuning)
+  reasonir:
+    name: "reasonir/reasonir-data"  # ReasonIR dataset on HuggingFace
+    subset: "hq"  # Hard-query subset (not "vl" for varied-length)
+    cache_dir: "data/reasonir"
 
 # Training Configuration
 training:

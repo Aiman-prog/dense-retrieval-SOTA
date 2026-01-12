@@ -1,11 +1,20 @@
 """Load BRIGHT dataset from HuggingFace and extract subsets."""
 
 import os
+import sys
 from typing import Dict, List, Optional, Union
 from pathlib import Path
 from datasets import load_dataset, DatasetDict
 import pandas as pd
 import yaml
+# Import helper function (handle both package and direct import)
+try:
+    from utils.helpers import get_data_base_dir
+except ImportError:
+    # Fallback for relative import
+    project_root = Path(__file__).parent.parent.parent
+    sys.path.insert(0, str(project_root / 'src'))
+    from utils.helpers import get_data_base_dir
 
 class BRIGHTLoader:
     """Loader for BRIGHT dataset from HuggingFace."""
@@ -20,32 +29,61 @@ class BRIGHTLoader:
         
         self.dataset_name = self.config['dataset']['name']
         self.examples_config = self.config['dataset'].get('examples_config', 'Gemini-1.0_reason')
-        self.cache_dir = self.config['dataset'].get('cache_dir', 'data/bright')
+        # Always use DelftBlue structure: /scratch/${USER}/dense-retrieval-SOTA/data/bright
+        # Can override with BRIGHT_CACHE_DIR env var if needed
+        base_dir = get_data_base_dir()
+        self.cache_dir = os.environ.get('BRIGHT_CACHE_DIR') or f'{base_dir}/data/bright'
         self.documents_dataset = None
         self.examples_dataset = None
     
     def load_dataset(self, cache_dir: Optional[str] = None) -> Dict[str, DatasetDict]:
         """
         Load BRIGHT dataset from HuggingFace.
+        
+        Returns:
+            Dictionary with 'documents' and 'examples' DatasetDict objects
         """
         cache = cache_dir or self.cache_dir
         os.makedirs(cache, exist_ok=True)
         
-        print(f"Loading BRIGHT 'documents' from: {self.dataset_name}")
-        # 'documents' subset contains the corpus for all domains
-        self.documents_dataset = load_dataset(
-            self.dataset_name,
-            'documents',
-            cache_dir=cache
-        )
+        # CRITICAL: Set HuggingFace cache environment variables to ensure
+        # datasets are downloaded to the specified cache_dir, not ~/.cache/huggingface/
+        # This is needed because load_dataset() respects HF_DATASETS_CACHE env var
+        original_hf_cache = os.environ.get('HF_DATASETS_CACHE')
+        original_hf_home = os.environ.get('HF_HOME')
         
-        print(f"Loading BRIGHT '{self.examples_config}' (queries/qrels) from: {self.dataset_name}")
-        # 'examples' (or reasoning subsets) contains queries and gold_ids
-        self.examples_dataset = load_dataset(
-            self.dataset_name,
-            self.examples_config,
-            cache_dir=cache
-        )
+        # Set to our custom cache directory
+        os.environ['HF_DATASETS_CACHE'] = cache
+        os.environ['HF_HOME'] = cache
+        
+        try:
+            print(f"Loading BRIGHT 'documents' from: {self.dataset_name}")
+            print(f"Using cache directory: {cache}")
+            # 'documents' subset contains the corpus for all domains
+            self.documents_dataset = load_dataset(
+                self.dataset_name,
+                'documents',
+                cache_dir=cache
+            )
+            
+            print(f"Loading BRIGHT '{self.examples_config}' (queries/qrels) from: {self.dataset_name}")
+            # 'examples' (or reasoning subsets) contains queries and gold_ids
+            self.examples_dataset = load_dataset(
+                self.dataset_name,
+                self.examples_config,
+                cache_dir=cache
+            )
+        finally:
+            # Restore original environment variables if they existed
+            if original_hf_cache is not None:
+                os.environ['HF_DATASETS_CACHE'] = original_hf_cache
+            elif 'HF_DATASETS_CACHE' in os.environ:
+                del os.environ['HF_DATASETS_CACHE']
+                
+            if original_hf_home is not None:
+                os.environ['HF_HOME'] = original_hf_home
+            elif 'HF_HOME' in os.environ:
+                del os.environ['HF_HOME']
         
         # Verify available domains overlap
         doc_domains = set(self.documents_dataset.keys())
@@ -156,6 +194,35 @@ class BRIGHTLoader:
             'queries': self.get_queries(domain),
             'qrels': self.get_qrels(domain)
         }
+    
+    def get_all_documents_id_map(self) -> Dict[str, str]:
+        """
+        Create a mapping from document ID to document text for ALL domains.
+        
+        This is used to map ReasonIR-HQ document IDs to their corresponding texts.
+        Based on the approach from ReasonIR dataset card:
+        https://huggingface.co/datasets/reasonir/reasonir-data
+        
+        Returns:
+            Dictionary mapping doc_id -> doc_text
+        """
+        if self.documents_dataset is None:
+            raise ValueError("Dataset not loaded. Call load_dataset() first.")
+        
+        id2doc = {}
+        
+        # Iterate through all domains/tasks in BRIGHT documents
+        for task in self.documents_dataset.keys():
+            domain_data = self.documents_dataset[task]
+            
+            # Extract IDs and texts for this domain
+            for i in range(len(domain_data)):
+                doc_id = str(domain_data[i]['id'])
+                doc_text = domain_data[i]['content']
+                id2doc[doc_id] = doc_text
+        
+        print(f"Created ID-to-text mapping for {len(id2doc)} documents across {len(self.documents_dataset)} domains")
+        return id2doc
 
 if __name__ == "__main__":
     loader = BRIGHTLoader(config_path='config/config.yaml')

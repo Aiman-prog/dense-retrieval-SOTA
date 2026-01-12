@@ -12,16 +12,19 @@ tevatron>=0.1.0
 git+https://github.com/luyug/GradCache.git  # Required for --grad_cache flag in RocketQA training
 
 # FAISS for vector indexing
-faiss-cpu>=1.7.4  # Use faiss-gpu if GPU available
+faiss-cpu>=1.7.0,<1.7.5  # Use faiss-gpu if GPU available (latest is 1.7.2)
 
 # Evaluation tools
 pyserini>=0.22.0
+pytrec-eval  # Python bindings for trec_eval
 
 # Utilities
 numpy>=1.24.0
 pandas>=2.0.0
 pyyaml>=6.0
 tqdm>=4.65.0
+importlib_metadata  # Required by transformers
+safetensors>=0.4.0  # For loading model checkpoints
 
 # For TREC eval (if using command-line tool)
 # Note: trec_eval needs to be compiled separately from source

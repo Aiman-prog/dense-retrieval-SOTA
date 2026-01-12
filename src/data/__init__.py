@@ -1,2 +1,2 @@
-"""Data loading and preprocessing modules for BRIGHT dataset."""
+"""Data loading and preprocessing modules."""
 
