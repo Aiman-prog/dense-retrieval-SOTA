@@ -50,8 +50,8 @@ echo "=========================================="
 export PYTHONPATH=/home/aimanabdulwaha/dense-retrieval-SOTA:${PYTHONPATH}
 
 # --- Configuration ---
-MODEL_PATH=${MODEL_PATH:-/home/aimanabdulwaha/dense-retrieval-SOTA/data/models/rocketqa_biology}
-DOMAIN=${DOMAIN:-earth_science}
+MODEL_PATH=${MODEL_PATH:-/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_reasonir}
+DOMAIN=${DOMAIN:-biology}
 BATCH_SIZE=${BATCH_SIZE:-512}
 K=${K:-10}
 

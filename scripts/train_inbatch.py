@@ -78,6 +78,21 @@ def main():
     print(f"Output directory: {output_dir}")
     print(f"Training data: {train_dir}")
     print(f"Batch size: 128 (single GPU, in-batch negatives)")
+    
+    # Verify CUDA is available before training (GPU job requirement)
+    import torch
+    import os
+    if not torch.cuda.is_available():
+        print("⚠️  ERROR: CUDA not detected by PyTorch!")
+        print(f"   CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'not set')}")
+        print(f"   PyTorch version: {torch.__version__}")
+        print(f"   CUDA version (PyTorch): {torch.version.cuda}")
+        print("   This is a GPU job - CUDA should be available")
+        print("   Check: module list, nvidia-smi, PyTorch CUDA installation")
+        sys.exit(1)
+    
+    print(f"✅ CUDA detected: {torch.cuda.get_device_name(0)}")
+    print(f"   CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'not set')}")
         
     # Single GPU mode - simple in-batch negatives (no grad_cache, no gradient accumulation)
     cmd = [
@@ -91,9 +106,9 @@ def main():
         '--num_train_epochs', '3',
         '--train_n_passages', '1',
         '--dataloader_num_workers', '4',
-        '--fp16'
+        '--fp16'  # GPU job - CUDA available
     ]
-    print(f"Running in single-GPU mode (in-batch negatives, batch size: 128)...")
+    print(f"Running in single-GPU mode with FP16 (in-batch negatives, batch size: 128)...")
 
     try:
         subprocess.run(cmd, check=True)

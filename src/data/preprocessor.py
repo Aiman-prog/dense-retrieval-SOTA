@@ -120,7 +120,17 @@ class BRIGHTPreprocessor:
         print(f"Preparing ReasonIR-HQ training data...")
         
         # Load ReasonIR-HQ dataset
+        # ALWAYS use same cache directory as BRIGHT (data/bright) - ReasonIR is cached there
+        # Ignore cache_dir parameter from config - it's cached in data/bright, not data/reasonir
+        cache_dir = os.environ.get('HF_DATASETS_CACHE') or os.environ.get('HF_HOME')
+        if not cache_dir:
+            # Fallback: calculate from base_dir (same as BRIGHT)
+            base_dir = get_data_base_dir()
+            cache_dir = f'{base_dir}/data/bright'
+        
+        os.makedirs(cache_dir, exist_ok=True)
         print(f"Loading ReasonIR dataset: {dataset_name} (subset: {subset})...")
+        print(f"Using cache directory: {cache_dir}")
         hq_dataset = load_dataset(dataset_name, subset, cache_dir=cache_dir)
         
         # Process the dataset to map document IDs to texts

@@ -6,6 +6,7 @@ channels:
 dependencies:
   - python=3.9
   - pytorch>=2.0.0
+  - pytorch-cuda=12.1  # CUDA support for PyTorch (compatible with CUDA 12.9)
   - numpy>=1.24.0
   - pandas>=2.0.0
   - pyyaml>=6.0

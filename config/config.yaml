@@ -21,7 +21,7 @@ dataset:
   reasonir:
     name: "reasonir/reasonir-data"  # ReasonIR dataset on HuggingFace
     subset: "hq"  # Hard-query subset (not "vl" for varied-length)
-    cache_dir: "data/reasonir"
+    cache_dir: "data/bright"  # Same cache as BRIGHT (ReasonIR is cached there)
 
 # Training Configuration
 training:
