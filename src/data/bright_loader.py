@@ -223,6 +223,23 @@ class BRIGHTLoader:
         
         print(f"Created ID-to-text mapping for {len(id2doc)} documents across {len(self.documents_dataset)} domains")
         return id2doc
+    
+    @staticmethod
+    def cache_reasonir_hq_dataset(dataset_name: str = "reasonir/reasonir-data",
+                                  subset: str = "hq",
+                                  cache_dir: Optional[str] = None) -> None:
+        """
+        Cache ReasonIR-HQ dataset (downloads if not already cached).
+        Minimal method to pre-download dataset for offline training.
+        
+        Args:
+            dataset_name: ReasonIR dataset name (default: "reasonir/reasonir-data")
+            subset: Dataset subset to use (default: "hq")
+            cache_dir: Optional cache directory for HuggingFace datasets
+        """
+        print(f"Caching ReasonIR dataset: {dataset_name} (subset: {subset})...")
+        load_dataset(dataset_name, subset, cache_dir=cache_dir)
+        print(f"✅ ReasonIR-HQ dataset cached successfully!")
 
 if __name__ == "__main__":
     loader = BRIGHTLoader(config_path='config/config.yaml')
