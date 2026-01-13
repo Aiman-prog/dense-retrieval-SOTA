@@ -20,8 +20,16 @@ class BRIGHTLoader:
     
     def __init__(self, config_path: str):
         """Initialize BRIGHT loader."""
-        project_root = Path(__file__).parent.parent.parent
-        config_file = project_root / config_path
+        # Handle both absolute and relative paths
+        config_path_obj = Path(config_path)
+        if config_path_obj.is_absolute():
+            config_file = config_path_obj
+        else:
+            project_root = Path(__file__).parent.parent.parent
+            config_file = project_root / config_path
+        
+        if not config_file.exists():
+            raise FileNotFoundError(f"Config file not found at: {config_file}. Tried: {config_path}")
         
         with open(config_file, 'r') as f:
             self.config = yaml.safe_load(f)

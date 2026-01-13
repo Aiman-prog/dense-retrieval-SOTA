@@ -46,8 +46,13 @@ echo "  Datasets must be pre-downloaded to cache"
 echo "  Cache location: ${HF_CACHE_DIR}"
 echo "=========================================="
 
-# --- Set PYTHONPATH to project root ---
-export PYTHONPATH=/home/aimanabdulwaha/dense-retrieval-SOTA:${PYTHONPATH}
+# --- Set PYTHONPATH to project root (check both scratch and home) ---
+# evaluate_bright.sh will also set PYTHONPATH, but set it here for any imports before that
+if [ -d "${SCRATCH_DIR}/src" ]; then
+    export PYTHONPATH="${SCRATCH_DIR}:${PYTHONPATH}"
+else
+    export PYTHONPATH=/home/aimanabdulwaha/dense-retrieval-SOTA:${PYTHONPATH}
+fi
 
 # --- Configuration ---
 MODEL_PATH=${MODEL_PATH:-/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_reasonir}
@@ -63,12 +68,33 @@ echo "  Batch Size: ${BATCH_SIZE}"
 echo "  Top-K: ${K}"
 echo "=========================================="
 
-# --- Run evaluation ---
-python -m src.evaluation.evaluate \
-  --model_path "${MODEL_PATH}" \
-  --domain "${DOMAIN}" \
-  --batch_size "${BATCH_SIZE}" \
-  --k "${K}"
+# --- Run evaluation using bash script ---
+echo "=========================================="
+echo "Running evaluate_bright.sh..."
+echo "=========================================="
+
+# Check if script exists
+if [ ! -f "scripts/evaluate_bright.sh" ]; then
+    echo "ERROR: scripts/evaluate_bright.sh not found!"
+    echo "Current directory: $(pwd)"
+    echo "Looking for: $(pwd)/scripts/evaluate_bright.sh"
+    ls -lah scripts/ 2>/dev/null || echo "scripts/ directory does not exist"
+    exit 1
+fi
+
+# Make script executable
+chmod +x scripts/evaluate_bright.sh
+
+# Run with error handling
+bash scripts/evaluate_bright.sh "${MODEL_PATH}" "${DOMAIN}"
+EXIT_CODE=$?
+
+if [ $EXIT_CODE -ne 0 ]; then
+    echo "=========================================="
+    echo "ERROR: evaluate_bright.sh failed with exit code $EXIT_CODE"
+    echo "=========================================="
+    exit $EXIT_CODE
+fi
 
 echo "=========================================="
 echo "Evaluation completed!"

@@ -93,34 +93,31 @@ def main():
     corpus_emb_dir = eval_dir / 'corpus_emb'
     corpus_emb_dir.mkdir(exist_ok=True)
     
+    corpus_emb_file = corpus_emb_dir / 'corpus.pkl'
     encode_corpus_cmd = [
         sys.executable, '-m', 'tevatron.driver.encode',
         '--output_dir', str(corpus_emb_dir),
         '--model_name_or_path', args.model_path,
         '--fp16',
         '--per_device_eval_batch_size', str(args.batch_size),
-        '--encode_in_path', corpus_file
+        '--encode_in_path', corpus_file,
+        '--encoded_save_path', str(corpus_emb_file)
     ]
     
     print(f"Running: {' '.join(encode_corpus_cmd)}")
-    result = subprocess.run(encode_corpus_cmd, check=True, capture_output=True, text=True)
+    result = subprocess.run(encode_corpus_cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print("ERROR: Corpus encoding failed!")
+        print("STDOUT:", result.stdout)
+        print("STDERR:", result.stderr)
+        raise subprocess.CalledProcessError(result.returncode, encode_corpus_cmd, result.stdout, result.stderr)
     print(result.stdout)
     if result.stderr:
         print("STDERR:", result.stderr)
     
-    # Find the generated embedding file (Tevatron saves with specific naming)
-    corpus_emb_file = None
-    for emb_file in corpus_emb_dir.glob('*.pkl'):
-        corpus_emb_file = emb_file
-        break
-    if not corpus_emb_file:
-        # Try .pt format
-        for emb_file in corpus_emb_dir.glob('*.pt'):
-            corpus_emb_file = emb_file
-            break
-    
-    if not corpus_emb_file:
-        raise FileNotFoundError(f"Could not find encoded corpus embeddings in {corpus_emb_dir}")
+    # Check if embedding file was created
+    if not corpus_emb_file.exists():
+        raise FileNotFoundError(f"Corpus embeddings file not created: {corpus_emb_file}")
     
     print(f"✅ Corpus embeddings saved to: {corpus_emb_file}")
     
@@ -131,33 +128,31 @@ def main():
     query_emb_dir = eval_dir / 'query_emb'
     query_emb_dir.mkdir(exist_ok=True)
     
+    query_emb_file = query_emb_dir / 'query.pkl'
     encode_query_cmd = [
         sys.executable, '-m', 'tevatron.driver.encode',
         '--output_dir', str(query_emb_dir),
         '--model_name_or_path', args.model_path,
         '--fp16',
         '--per_device_eval_batch_size', str(args.batch_size),
-        '--encode_in_path', queries_file
+        '--encode_in_path', queries_file,
+        '--encoded_save_path', str(query_emb_file)
     ]
     
     print(f"Running: {' '.join(encode_query_cmd)}")
-    result = subprocess.run(encode_query_cmd, check=True, capture_output=True, text=True)
+    result = subprocess.run(encode_query_cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print("ERROR: Query encoding failed!")
+        print("STDOUT:", result.stdout)
+        print("STDERR:", result.stderr)
+        raise subprocess.CalledProcessError(result.returncode, encode_query_cmd, result.stdout, result.stderr)
     print(result.stdout)
     if result.stderr:
         print("STDERR:", result.stderr)
     
-    # Find the generated query embedding file
-    query_emb_file = None
-    for emb_file in query_emb_dir.glob('*.pkl'):
-        query_emb_file = emb_file
-        break
-    if not query_emb_file:
-        for emb_file in query_emb_dir.glob('*.pt'):
-            query_emb_file = emb_file
-            break
-    
-    if not query_emb_file:
-        raise FileNotFoundError(f"Could not find encoded query embeddings in {query_emb_dir}")
+    # Check if embedding file was created
+    if not query_emb_file.exists():
+        raise FileNotFoundError(f"Query embeddings file not created: {query_emb_file}")
     
     print(f"✅ Query embeddings saved to: {query_emb_file}")
     
@@ -177,7 +172,12 @@ def main():
     ]
     
     print(f"Running: {' '.join(retrieve_cmd)}")
-    result = subprocess.run(retrieve_cmd, check=True, capture_output=True, text=True)
+    result = subprocess.run(retrieve_cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print("ERROR: Retrieval failed!")
+        print("STDOUT:", result.stdout)
+        print("STDERR:", result.stderr)
+        raise subprocess.CalledProcessError(result.returncode, retrieve_cmd, result.stdout, result.stderr)
     print(result.stdout)
     if result.stderr:
         print("STDERR:", result.stderr)
@@ -185,28 +185,51 @@ def main():
     if not ranking_file.exists():
         raise FileNotFoundError(f"Ranking file not created: {ranking_file}")
     
-    print(f"✅ Rankings saved to: {ranking_file}")
+    # Check file size and format
+    file_size = ranking_file.stat().st_size
+    print(f"✅ Rankings saved to: {ranking_file} (size: {file_size} bytes)")
+    
+    if file_size == 0:
+        raise ValueError(f"Ranking file is empty: {ranking_file}")
+    
+    # Check if file is text or binary
+    try:
+        with open(ranking_file, 'r', encoding='utf-8') as f:
+            first_line = f.readline()
+            print(f"First line preview: {first_line[:100]}")
+    except UnicodeDecodeError:
+        print("⚠️  Warning: Ranking file appears to be binary or non-UTF-8 encoded")
     
     # Evaluate using trec_eval (via pyserini or direct trec_eval)
     print(f"\n{'='*80}")
     print(f"Step 6: Evaluating retrieval results")
     print(f"{'='*80}")
     
-    # Parse Tevatron TSV output and convert to format expected by trec_eval_wrapper
-    import pandas as pd
+    # Parse Tevatron ranking output (saved as pickle file)
+    import pickle
     
-    # Read Tevatron ranking TSV (format: query_id, doc_id, score)
-    ranking_df = pd.read_csv(ranking_file, sep='\t', header=None, names=['query_id', 'doc_id', 'score'])
+    # Tevatron saves rankings as pickle file, not TSV
+    with open(ranking_file, 'rb') as f:
+        rankings = pickle.load(f)
     
     # Convert to dict format: {query_id: {doc_id: score}}
     run_results = {}
-    for _, row in ranking_df.iterrows():
-        qid = str(row['query_id'])
-        doc_id = str(row['doc_id'])
-        score = float(row['score'])
-        if qid not in run_results:
-            run_results[qid] = {}
-        run_results[qid][doc_id] = score
+    if isinstance(rankings, list):
+        # Format: [(qid, doc_id, score), ...]
+        for item in rankings:
+            if len(item) >= 3:
+                qid = str(item[0])
+                doc_id = str(item[1])
+                score = float(item[2])
+                if qid not in run_results:
+                    run_results[qid] = {}
+                run_results[qid][doc_id] = score
+    elif isinstance(rankings, dict):
+        # Already in dict format or different structure
+        run_results = rankings
+    
+    if not run_results:
+        raise ValueError(f"Could not parse ranking file: {ranking_file}. Unexpected format.")
     
     # Use trec_eval wrapper
     from src.evaluation.trec_eval_wrapper import TrecEvalWrapper
