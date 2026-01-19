@@ -194,14 +194,39 @@ class BRIGHTLoader:
         if self.documents_dataset is None:
             raise ValueError("Dataset not loaded. Call load_dataset() first.")
         
-        # Dictionary comprehension: single-pass generator for all domains
-        id2doc = {
-            str(domain_data[i]['id']): domain_data[i]['content']
-            for task_name, domain_data in self.documents_dataset.items()
-            for i in range(len(domain_data))
-        }
+        print(f"DEBUG: Creating ID mapping for {len(self.documents_dataset)} domains...", flush=True)
+        id2doc = {}
         
-        print(f"Created ID-to-text mapping for {len(id2doc)} documents across {len(self.documents_dataset)} domains")
+        try:
+            for task_name, domain_data in self.documents_dataset.items():
+                print(f"DEBUG: Processing domain '{task_name}' with {len(domain_data)} documents...", flush=True)
+                domain_count_before = len(id2doc)
+                for i in range(len(domain_data)):
+                    try:
+                        doc_id = str(domain_data[i]['id'])
+                        doc_content = domain_data[i]['content']
+                        id2doc[doc_id] = doc_content
+                    except KeyError as e:
+                        print(f"ERROR: Missing key '{e}' in domain '{task_name}', document {i}", flush=True)
+                        print(f"DEBUG: Available keys: {domain_data[i].keys() if i < len(domain_data) else 'N/A'}", flush=True)
+                        raise
+                    except Exception as e:
+                        print(f"ERROR: Failed to process domain '{task_name}', document {i}: {e}", flush=True)
+                        import traceback
+                        traceback.print_exc()
+                        raise
+                
+                domain_count_after = len(id2doc)
+                documents_added = domain_count_after - domain_count_before
+                print(f"DEBUG: Completed domain '{task_name}': {documents_added} documents added (total: {domain_count_after})", flush=True)
+            
+            print(f"✅ Created ID-to-text mapping for {len(id2doc)} documents across {len(self.documents_dataset)} domains", flush=True)
+        except Exception as e:
+            print(f"FATAL ERROR in get_all_documents_id_map: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            raise
+        
         return id2doc
     
     @staticmethod

@@ -99,10 +99,11 @@ class BRIGHTPreprocessor:
                                        cache_dir: Optional[str] = None,
                                        filename: str = "train_reasonir.jsonl") -> str:
         """
-        Prepare ReasonIR-HQ training data for Tevatron.
+        Prepare ReasonIR-HQ training data for GitHub Tevatron.
+        Standard format: {"query_id": "...", "query": "...", "positive_passages": [{"docid": "...", "text": "..."}], "negative_passages": []}
         """
         output_path = os.path.join(self.output_dir, filename)
-        print(f"Preparing ReasonIR-HQ training data...")
+        print(f"Preparing ReasonIR-HQ training data for GitHub Tevatron...")
         
         # Use consistent cache directory
         cache_dir = os.environ.get('HF_DATASETS_CACHE') or os.environ.get('HF_HOME')
@@ -114,7 +115,7 @@ class BRIGHTPreprocessor:
         print(f"Loading ReasonIR dataset: {dataset_name} (subset: {subset})...")
         hq_dataset = load_dataset(dataset_name, subset, cache_dir=cache_dir)
         
-        # Format into Tevatron JSONL format
+        # Format into Tevatron JSONL format with positive_passages (full text)
         print(f"Formatting training data to {output_path}...")
         count = 0
         skipped = 0
@@ -133,27 +134,35 @@ class BRIGHTPreprocessor:
                     skipped += 1
                     continue
                 
-                # Extract positive documents
+                # Extract positive passages (as list of dicts with docid and text)
                 pos_docs = entry.get("pos", [])
-                pos_texts = []
+                positive_passages = []
                 for pos in pos_docs:
                     if isinstance(pos, list) and len(pos) >= 2:
-                        doc_id = pos[1]
+                        doc_id = str(pos[1])
                         if doc_id in id2doc:
-                            pos_texts.append(id2doc[doc_id])
+                            positive_passages.append({
+                                "docid": doc_id,
+                                "text": id2doc[doc_id]
+                            })
                     elif isinstance(pos, str):
-                         pos_texts.append(pos)
+                        # If it's already a string, treat as docid
+                        if pos in id2doc:
+                            positive_passages.append({
+                                "docid": pos,
+                                "text": id2doc[pos]
+                            })
                 
-                if not pos_texts:
+                if not positive_passages:
                     skipped += 1
                     continue
                 
-                # Create record
+                # Standard Tevatron format: positive_passages and negative_passages
                 record = {
                     "query_id": f"reasonir_{count}",
                     "query": query_text,
-                    "positives": pos_texts,
-                    "negatives": []
+                    "positive_passages": positive_passages,  # List of dicts: [{"docid": "...", "text": "..."}]
+                    "negative_passages": []  # Empty for in-batch negatives
                 }
                 
                 f.write(json.dumps(record, ensure_ascii=False) + '\n')
@@ -198,4 +207,4 @@ if __name__ == "__main__":
         preprocessor.prepare_trec_qrels(data['qrels'], 'qrels.txt')
         print("✅ Done!")
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error: {e}")(dense-retrieval)

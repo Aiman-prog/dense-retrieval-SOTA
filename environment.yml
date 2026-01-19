@@ -1,33 +1,43 @@
 name: dense-retrieval
 channels:
-  - conda-forge
   - pytorch
+  - nvidia
   - defaults
 dependencies:
-  - python=3.9
-  - pytorch>=2.0.0
-  - pytorch-cuda=12.1  # CUDA support for PyTorch (compatible with CUDA 12.9)
-  - numpy>=1.24.0
-  - pandas>=2.0.0
-  - pyyaml>=6.0
-  - tqdm>=4.65.0
-  - spacy  # Install via conda to avoid build issues
+  # CORE SYSTEM LIBRARIES (Install via Conda)
+  - python=3.10
+  - pytorch=2.1.2
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=12.1
   - pip
+  
+  # EVERYTHING ELSE (Install via Pip - Instant resolution)
   - pip:
-    # Core ML Libraries (pin versions for Tevatron compatibility)
-    - importlib_metadata  # Required by transformers
-    - transformers>=4.30.0,<4.36.0
+    # Basic Utilities
+    - numpy>=1.24.0,<1.26.0
+    - pandas>=2.0.0
+    - pyyaml>=6.0
+    - tqdm>=4.65.0
+    - spacy>=3.5.0
+    
+    # Core ML Libraries
+    - importlib_metadata
+    - transformers>=4.36.0  # peft requires Cache class from transformers 4.36.0+
     - sentence-transformers>=2.2.0,<3.0.0
     - datasets>=2.14.0
-    - accelerate>=0.20.0,<0.25.0
-    # Tevatron and GradCache (only available via pip/GitHub)
-    - tevatron>=0.1.0
-    - git+https://github.com/luyug/GradCache.git
-    # FAISS (use faiss-gpu if GPU available, otherwise faiss-cpu)
-    - faiss-gpu>=1.7.0,<1.7.5  # Latest available is 1.7.2
-    # Evaluation tools
+    - accelerate>=0.25.0  # GitHub Tevatron requires clear_device_cache (added in 0.25.0+)
+    - safetensors>=0.4.0
+    # Tevatron additional dependencies
+    - peft  # Parameter-Efficient Fine-Tuning (required by Tevatron)
+    - deepspeed  # Optional but recommended for distributed training
+    
+    # Dense Retrieval Tools
+    - faiss-gpu>=1.7.0  # Pip wheels for FAISS are stable now
     - pyserini>=0.22.0
-    - pytrec-eval  # Python bindings for trec_eval
-    # Utilities
-    - safetensors>=0.4.0  # For loading model checkpoints
-
+    - pytrec-eval
+    
+    # GitHub Installs (Tevatron & GradCache)
+    - qwen-omni-utils  # Required dependency for GitHub Tevatron
+    - git+https://github.com/texttron/tevatron.git
+    - git+https://github.com/luyug/GradCache.git
