@@ -42,6 +42,20 @@ class BRIGHTLoader:
         self.cache_dir = os.environ.get('BRIGHT_CACHE_DIR') or f'{base_dir}/data/bright'
         self.documents_dataset = None
         self.examples_dataset = None
+        
+        # Automatically cache ReasonIR-HQ dataset if configured
+        if 'reasonir' in self.config.get('dataset', {}):
+            reasonir_config = self.config['dataset']['reasonir']
+            try:
+                self.cache_reasonir_hq_dataset(
+                    dataset_name=reasonir_config.get('name', 'reasonir/reasonir-data'),
+                    subset=reasonir_config.get('subset', 'hq'),
+                    cache_dir=self.cache_dir
+                )
+            except Exception as e:
+                # Don't fail initialization if caching fails (might be offline mode)
+                print(f"⚠️ Warning: Could not cache ReasonIR-HQ dataset: {e}")
+                print("   This is OK if you're in offline mode or dataset is already cached.")
     
     def load_dataset(self, cache_dir: Optional[str] = None) -> Dict[str, DatasetDict]:
         """
@@ -229,67 +243,52 @@ class BRIGHTLoader:
         
         return id2doc
     
-    @staticmethod
-    def cache_reasonir_hq_dataset(dataset_name: str = "reasonir/reasonir-data",
+    def cache_reasonir_hq_dataset(self, dataset_name: str = "reasonir/reasonir-data",
                                   subset: str = "hq",
                                   cache_dir: Optional[str] = None) -> None:
         """
         Cache ReasonIR-HQ dataset (downloads if not already cached).
-        Minimal method to pre-download dataset for offline training.
+        Automatically called during initialization.
         
         IMPORTANT: This must be run ONLINE (without HF_HUB_OFFLINE=1) to download the dataset.
+        If offline, it will skip caching (dataset should already be cached).
         
         Args:
             dataset_name: ReasonIR dataset name (default: "reasonir/reasonir-data")
             subset: Dataset subset to use (default: "hq")
-            cache_dir: Optional cache directory for HuggingFace datasets (if None, uses same as BRIGHT)
+            cache_dir: Optional cache directory for HuggingFace datasets (if None, uses self.cache_dir)
         """
-        # Set cache directory (use same location as BRIGHT for consistency)
-        # This ensures it matches run_inbatch_delftblue.sh expectations
-        # Always use data/bright regardless of config to match script expectations
-        base_dir = Path(get_data_base_dir())
-        cache_dir = str(base_dir / 'data' / 'bright')  # Use same cache as BRIGHT
+        cache = cache_dir or self.cache_dir
+        os.makedirs(cache, exist_ok=True)
         
-        os.makedirs(cache_dir, exist_ok=True)
+        # Check if dataset is already cached (skip if offline mode)
+        if os.environ.get('HF_HUB_OFFLINE') == '1' or os.environ.get('TRANSFORMERS_OFFLINE') == '1':
+            print(f"⚠️ Offline mode detected - skipping ReasonIR-HQ caching (assuming already cached)")
+            return
+        
         print(f"Caching ReasonIR dataset: {dataset_name} (subset: {subset})...")
-        print(f"Using cache directory: {cache_dir}")
-        load_dataset(dataset_name, subset, cache_dir=cache_dir)
-        print(f"✅ ReasonIR-HQ dataset cached successfully!")
+        print(f"Using cache directory: {cache}")
+        try:
+            load_dataset(dataset_name, subset, cache_dir=cache)
+            print(f"✅ ReasonIR-HQ dataset cached successfully!")
+        except Exception as e:
+            # If caching fails, it might be because dataset is already cached or offline
+            print(f"⚠️ Could not cache ReasonIR-HQ dataset: {e}")
+            print("   This is OK if dataset is already cached or you're in offline mode.")
 
 if __name__ == "__main__":
-    import argparse
-    from utils.helpers import load_config
+    # Example usage for BRIGHT dataset
+    # ReasonIR-HQ will be automatically cached during initialization
+    loader = BRIGHTLoader(config_path='config/config.yaml')
+    loader.load_dataset()
     
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--cache-reasonir", action="store_true",
-                       help="Cache ReasonIR-HQ dataset for offline training")
-    args = parser.parse_args()
-    
-    if args.cache_reasonir:
-        # Cache ReasonIR-HQ dataset
-        config = load_config(str(project_root / 'config' / 'config.yaml'))
-        reasonir_config = config['dataset']['reasonir']
-        print("=" * 80)
-        print("Caching ReasonIR-HQ dataset for offline training...")
-        print("=" * 80)
-        BRIGHTLoader.cache_reasonir_hq_dataset(
-            dataset_name=reasonir_config['name'],
-            subset=reasonir_config['subset'],
-            cache_dir=reasonir_config.get('cache_dir')
-        )
-        print("\n✅ Dataset cached! You can now run training offline.")
-    else:
-        # Default: Example usage for BRIGHT dataset
-        loader = BRIGHTLoader(config_path='config/config.yaml')
-        loader.load_dataset()
-        
-        # Example: 'biology' is one of the standard domains in BRIGHT
-        try:
-            data = loader.get_data_split('biology')
-            print(f"\nSuccessfully loaded 'biology' domain:")
-            print(f"- Corpus size: {len(data['corpus'])}")
-            print(f"- Queries size: {len(data['queries'])}")
-            print(f"- Qrels size: {len(data['qrels'])}")
-            print(f"- Sample Query: {data['queries'].iloc[0]['query']}")
-        except Exception as e:
-            print(f"\nError loading domain: {e}")
+    # Example: 'biology' is one of the standard domains in BRIGHT
+    try:
+        data = loader.get_data_split('biology')
+        print(f"\nSuccessfully loaded 'biology' domain:")
+        print(f"- Corpus size: {len(data['corpus'])}")
+        print(f"- Queries size: {len(data['queries'])}")
+        print(f"- Qrels size: {len(data['qrels'])}")
+        print(f"- Sample Query: {data['queries'].iloc[0]['query']}")
+    except Exception as e:
+        print(f"\nError loading domain: {e}")

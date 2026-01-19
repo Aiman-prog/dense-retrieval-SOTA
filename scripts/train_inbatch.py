@@ -56,13 +56,9 @@ def main():
         ))
         print(f"✅ Generated training file: {train_file_path}")
     
-    # Tevatron needs a directory, so we isolate the file
-    train_dir = Path(preprocessor.output_dir) / 'reasonir_inbatch_train'
-    if train_dir.exists(): 
-        shutil.rmtree(train_dir)
-    train_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(train_file_path, train_dir / 'train_reasonir.jsonl')
-    print(f"✅ Training directory prepared: {train_dir}")
+    # GitHub Tevatron uses dataset_path pointing directly to the file
+    # No need to create a directory - just use the file path directly
+    print(f"✅ Training file ready: {train_file_path}")
     
     # ---------------------------------------------------------
     # Step 3: Train (Single GPU, In-Batch Negatives)
@@ -75,13 +71,18 @@ def main():
     print("\n" + "=" * 80)
     print("Step 3: Training In-Batch Negatives model on ReasonIR-HQ...")
     print("=" * 80)
+    # Get batch size from environment variable (default: 32 for gpu-v100 with FP32)
+    # Using gradient accumulation to achieve effective batch size 64
+    import os
+    batch_size = int(os.environ.get('BATCH_SIZE', '32'))
+    gradient_accumulation_steps = int(os.environ.get('GRADIENT_ACCUMULATION_STEPS', '2'))
+    
     print(f"Output directory: {output_dir}")
-    print(f"Training data: {train_dir}")
-    print(f"Batch size: 128 (single GPU, in-batch negatives)")
+    print(f"Training data: {train_file_path}")
+    print(f"Batch size: {batch_size} (single GPU, in-batch negatives)")
     
     # Verify CUDA is available before training (GPU job requirement)
     import torch
-    import os
     if not torch.cuda.is_available():
         print("⚠️  ERROR: CUDA not detected by PyTorch!")
         print(f"   CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'not set')}")
@@ -95,20 +96,29 @@ def main():
     print(f"   CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'not set')}")
         
     # Single GPU mode - simple in-batch negatives (no grad_cache, no gradient accumulation)
+    # GitHub Tevatron uses dataset_name and dataset_path instead of train_dir
     cmd = [
-        sys.executable, '-m', 'tevatron.driver.train',
+        sys.executable, '-m', 'tevatron.retriever.driver.train',
         '--output_dir', str(output_dir),
         '--model_name_or_path', config['model']['base_model'],
-        '--train_dir', str(train_dir),
+        '--attn_implementation', 'eager',  # BERT doesn't support Flash Attention 2
+        '--dataset_name', 'json',  # GitHub Tevatron: specify dataset format
+        '--dataset_path', str(train_file_path),  # GitHub Tevatron: direct file path
+        '--dataset_split', 'train',  # GitHub Tevatron: specify split
         '--do_train',
-        '--per_device_train_batch_size', '128',  # Simple batch size
+        '--per_device_train_batch_size', str(batch_size),  # Configurable batch size (default: 64 for gpu-a100-small)
         '--learning_rate', '1e-5',
         '--num_train_epochs', '3',
-        '--train_n_passages', '1',
-        '--dataloader_num_workers', '4',
-        '--fp16'  # GPU job - CUDA available
+        '--train_group_size', '1',  # GitHub Tevatron: number of positive passages per query
+        '--query_max_len', '128',  # Standard query length (required by Tevatron)
+        '--passage_max_len', '512',  # Standard passage length (required by Tevatron)
+        '--gradient_accumulation_steps', str(gradient_accumulation_steps),  # Accumulate gradients to simulate larger batch
+        '--dataloader_num_workers', '4',  # 4 workers for gpu-v100 (4 CPUs available)
+        '--fp16', 'False',  # FP16 causes scaler errors - using FP32 instead
+        '--bf16', 'False'  # BF16 not tested - using FP32 for stability
     ]
-    print(f"Running in single-GPU mode with FP16 (in-batch negatives, batch size: 128)...")
+    effective_batch_size = batch_size * gradient_accumulation_steps
+    print(f"Running in single-GPU mode with FP32 (in-batch negatives, physical batch: {batch_size}, accumulation: {gradient_accumulation_steps}, effective batch: {effective_batch_size})...")
 
     try:
         subprocess.run(cmd, check=True)
