@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 
 #SBATCH --job-name=inbatch_train
-#SBATCH --partition=gpu-a100
-#SBATCH --time=00:30:00
+#SBATCH --partition=gpu-v100   # Switch to the small partition
+#SBATCH --time=04:00:00  # 
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --gpus-per-task=1
-#SBATCH --mem-per-cpu=4G
+#SBATCH --cpus-per-task=4  # 4 CPUs: 1 main process + 4 dataloader workers
+#SBATCH --gpus-per-task=1  # V100 GPU with 32 GB video RAM
+#SBATCH --mem-per-cpu=5G  # gpu-v100: max 5G per CPU
 #SBATCH --account=Education-EEMCS-MSc-DSAIT
 #SBATCH --output=inbatch_train_%j.out
 #SBATCH --error=inbatch_train_%j.err
@@ -31,9 +31,33 @@ mkdir -p "${SCRATCH_DIR}/data/bright"
 # Note: Processed data directory is now auto-detected
 # Code will automatically use /scratch/${USER}/dense-retrieval-SOTA/data/processed on DelftBlue
 
-# --- Set Hugging Face cache location (use scratch space) ---
-# Match bright_loader.py cache location: /scratch/${USER}/dense-retrieval-SOTA/data/bright
-SCRATCH_DIR="/scratch/${USER}/dense-retrieval-SOTA"
+# --- CRITICAL: Redirect ALL caches to /scratch to save /home space ---
+# This prevents future cache growth in ~/.cache (~9GB) and ~/.conda (~17GB)
+# Existing caches remain in /home but won't grow further.
+# To clean up existing caches manually:
+#   rm -rf ~/.cache/pip ~/.cache/torch ~/.cache/huggingface
+#   conda clean --all  # Cleans conda cache (but keeps environments)
+# Note: Conda environments (~/.conda/envs) are NOT moved - only package cache is redirected
+SCRATCH_CACHE_DIR="${SCRATCH_DIR}/cache"
+mkdir -p "${SCRATCH_CACHE_DIR}"
+
+# Conda package cache (saves ~17GB in ~/.conda)
+export CONDA_PKGS_DIRS="${SCRATCH_CACHE_DIR}/conda-pkgs"
+mkdir -p "${CONDA_PKGS_DIRS}"
+
+# Pip cache (saves ~7.7GB in ~/.cache/pip)
+export PIP_CACHE_DIR="${SCRATCH_CACHE_DIR}/pip"
+mkdir -p "${PIP_CACHE_DIR}"
+
+# PyTorch cache (saves ~759MB in ~/.cache/torch)
+export TORCH_HOME="${SCRATCH_CACHE_DIR}/torch"
+mkdir -p "${TORCH_HOME}"
+
+# General cache directory (redirects ~/.cache to /scratch)
+export XDG_CACHE_HOME="${SCRATCH_CACHE_DIR}/xdg"
+mkdir -p "${XDG_CACHE_HOME}"
+
+# Hugging Face caches (saves ~589MB in ~/.cache/huggingface)
 HF_CACHE_DIR="${SCRATCH_DIR}/data/bright"
 mkdir -p "${HF_CACHE_DIR}"
 export HF_HOME="${HF_CACHE_DIR}"
@@ -54,10 +78,15 @@ echo "  Datasets must be pre-downloaded to cache"
 echo "  Cache location: ${HF_CACHE_DIR}"
 echo "=========================================="
 
-# Debug: show cache location and contents
-echo "DEBUG: HF_HOME=${HF_HOME}"
-echo "DEBUG: Cache contents:"
-ls -la "${HF_CACHE_DIR}/" 2>/dev/null | head -10 || echo "   Cache directory empty or not accessible"
+# Debug: show cache locations
+echo "DEBUG: Cache directories redirected to /scratch:"
+echo "  CONDA_PKGS_DIRS=${CONDA_PKGS_DIRS}"
+echo "  PIP_CACHE_DIR=${PIP_CACHE_DIR}"
+echo "  TORCH_HOME=${TORCH_HOME}"
+echo "  XDG_CACHE_HOME=${XDG_CACHE_HOME}"
+echo "  HF_HOME=${HF_HOME}"
+echo "DEBUG: Cache directory sizes:"
+du -sh "${SCRATCH_CACHE_DIR}"/* 2>/dev/null | head -5 || echo "   Cache directories empty or not accessible"
 
 # --- Set PYTHONPATH to project root ---
 export PYTHONPATH=/home/aimanabdulwaha/dense-retrieval-SOTA:${PYTHONPATH}
@@ -67,14 +96,24 @@ export PYTHONPATH=/home/aimanabdulwaha/dense-retrieval-SOTA:${PYTHONPATH}
 # and uses scratch space: /scratch/${USER}/dense-retrieval-SOTA/data/
 # No need to set BRIGHT_CACHE_DIR or PROCESSED_DATA_DIR manually
 
+# --- PyTorch CUDA memory management ---
+# Reduce memory fragmentation (helps with OOM errors)
+export PYTORCH_ALLOC_CONF="expandable_segments:True,max_split_size_mb:256"  # Reduce fragmentation, limit max split size
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:256"  # For compatibility
+
 # --- Configuration (can be overridden via environment variables) ---
-BATCH_SIZE=${BATCH_SIZE:-128} 
+# Batch size for gpu-v100 (32GB GPU memory, FP32 mode)
+# Using gradient accumulation to achieve effective batch size 64
+BATCH_SIZE=${BATCH_SIZE:-64}  # Physical batch size 32, effective batch size 64 with gradient accumulation
 LEARNING_RATE=${LEARNING_RATE:-1e-5}
 NUM_EPOCHS=${NUM_EPOCHS:-3}
 
+# Export for Python script
+export BATCH_SIZE
+
 echo "=========================================="
 echo "In-Batch Negatives Training Configuration:"
-echo "  GPUs: 1 (single GPU, in-batch negatives)"
+echo "  GPU: V100 (32 GB video RAM, 4 CPUs)"
 echo "  Batch Size: ${BATCH_SIZE}"
 echo "  Learning Rate: ${LEARNING_RATE}"
 echo "  Epochs: ${NUM_EPOCHS}"

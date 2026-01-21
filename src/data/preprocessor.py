@@ -48,7 +48,7 @@ class BRIGHTPreprocessor:
                 # TRICK: Include BOTH keys!
                 doc = {
                     "text_id": str(row['doc_id']),  # REQUIRED by Tevatron to avoid crash
-                    "docid": str(row['doc_id']),    # REQUIRED for clarity/mapping
+                    "docid": str(row['doc_id']),    # REQUIRED: Tevatron looks for 'docid'
                     "text": row['text'] if pd.notna(row['text']) else "" 
                 }
                 f.write(json.dumps(doc, ensure_ascii=False) + '\n')
@@ -65,13 +65,19 @@ class BRIGHTPreprocessor:
         
         with open(output_path, 'w', encoding='utf-8') as f:
             for _, row in queries.iterrows():
+                content = row['query'] if pd.notna(row['query']) else ""
+                
                 # TRICK: Include BOTH keys!
-                query = {
-                    "text_id": str(row['query_id']), # REQUIRED by Tevatron
-                    "query_id": str(row['query_id']), # REQUIRED for clarity
-                    "text": row['query'] if pd.notna(row['query']) else ""
+                query_item = {
+                    "docid": str(row['query_id']),    # Legacy trick
+                    "text_id": str(row['query_id']),  # Legacy support
+                    "query_id": str(row['query_id']), # Clarity
+                    
+                    # --- THE FIX ---
+                    "query": content,  # <--- CRITICAL: Tevatron encoder looks for 'query'
+                    "text": content    # Fallback: Keep 'text' just in case
                 }
-                f.write(json.dumps(query, ensure_ascii=False) + '\n')
+                f.write(json.dumps(query_item, ensure_ascii=False) + '\n')
                 
         return output_path
 
@@ -157,12 +163,22 @@ class BRIGHTPreprocessor:
                     skipped += 1
                     continue
                 
+                neg_docs = entry.get("neg", []) # Get the hard negatives from the dataset
+                negative_passages = []
+                for neg in neg_docs:
+                    if isinstance(neg, list) and len(neg) >= 2:
+                        doc_id = str(neg[1])
+                        if doc_id in id2doc:
+                            negative_passages.append({
+                                "docid": doc_id,
+                                "text": id2doc[doc_id]
+                            })
                 # Standard Tevatron format: positive_passages and negative_passages
                 record = {
                     "query_id": f"reasonir_{count}",
                     "query": query_text,
                     "positive_passages": positive_passages,  # List of dicts: [{"docid": "...", "text": "..."}]
-                    "negative_passages": []  # Empty for in-batch negatives
+                    "negative_passages": negative_passages
                 }
                 
                 f.write(json.dumps(record, ensure_ascii=False) + '\n')
@@ -180,31 +196,29 @@ if __name__ == "__main__":
     project_root = Path(__file__).resolve().parent.parent.parent
     config = load_config(str(project_root / 'config' / 'config.yaml'))
     
-    # 1. Load BRIGHT
+    print("=" * 80)
+    print("Generating ReasonIR-HQ Training Data")
+    print("=" * 80)
+    
+    # 1. Load BRIGHT dataset and create ID mapping (needed for ReasonIR-HQ)
+    print("Step 1: Loading BRIGHT dataset for document ID mapping...")
     loader = BRIGHTLoader(config_path='config/config.yaml')
     loader.load_dataset()
+    id2doc = loader.get_all_documents_id_map()
+    print(f"✅ Created ID-to-text mapping for {len(id2doc)} documents")
     
-    # 2. Example: Prepare Biology
-    domain = 'biology'
-    # Auto-detect scratch space on DelftBlue, otherwise use project root
-    user = os.environ.get('USER', '')
-    scratch_path = Path(f'/scratch/{user}/dense-retrieval-SOTA')
-    if scratch_path.exists() and scratch_path.is_dir():
-        # On DelftBlue: use scratch space (faster, more space)
-        output_dir = str(scratch_path / 'data' / 'processed' / 'eval' / domain)
-        print(f"Using scratch space: {output_dir}")
-    else:
-        # Local: use project root
-        output_dir = str(project_root / 'data' / 'processed' / 'eval' / domain)
-        print(f"Using project root: {output_dir}")
-    preprocessor = BRIGHTPreprocessor(output_dir=output_dir)
+    # 2. Prepare ReasonIR-HQ training data
+    print("\nStep 2: Preparing ReasonIR-HQ training data...")
+    preprocessor = BRIGHTPreprocessor()
+    reasonir_config = config['dataset']['reasonir']
     
-    try:
-        data = loader.get_data_split(domain)
-        print(f"Preparing data for {domain}...")
-        preprocessor.prepare_tevatron_corpus(data['corpus'], 'corpus.jsonl')
-        preprocessor.prepare_tevatron_queries(data['queries'], 'queries.jsonl')
-        preprocessor.prepare_trec_qrels(data['qrels'], 'qrels.txt')
-        print("✅ Done!")
-    except Exception as e:
-        print(f"Error: {e}")(dense-retrieval)
+    train_file_path = preprocessor.prepare_reasonir_hq_train_data(
+        id2doc=id2doc,
+        dataset_name=reasonir_config['name'],
+        subset=reasonir_config['subset'],
+        cache_dir=reasonir_config.get('cache_dir'),
+        filename='train_reasonir.jsonl'
+    )
+    
+    print(f"\n✅ Training data generated: {train_file_path}")
+    print("=" * 80)

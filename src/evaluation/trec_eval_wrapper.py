@@ -26,8 +26,11 @@ class TrecEvalWrapper:
         
         if isinstance(qrels_source, pd.DataFrame):
             for _, row in qrels_source.iterrows():
+                # --- FIX: Force String Cast ---
                 qid = str(row['query_id'])
                 doc_id = str(row['doc_id'])
+                # ------------------------------
+                
                 # Default relevance to 1 if column missing
                 rel = int(row.get('relevance', 1)) 
                 
@@ -58,11 +61,22 @@ class TrecEvalWrapper:
         if not run_results:
             return {m: 0.0 for m in metrics}
 
-        # Initialize Evaluator
+        # --- NEW FIX: Sanitize Run Results ---
+        # Ensure all IDs are strict Python strings before passing to pytrec_eval.
+        # This solves the "0 vs '0'" mismatch permanently.
+        clean_results = {}
+        for qid, doc_scores in run_results.items():
+            str_qid = str(qid)
+            clean_results[str_qid] = {}
+            for doc_id, score in doc_scores.items():
+                clean_results[str_qid][str(doc_id)] = float(score)
+        # -------------------------------------
+
+        # Initialize Evaluator with CLEAN qrels and metrics
         evaluator = pytrec_eval.RelevanceEvaluator(self.qrels, metrics)
 
-        # Compute metrics per query
-        results_per_query = evaluator.evaluate(run_results)
+        # Compute metrics per query using CLEAN results
+        results_per_query = evaluator.evaluate(clean_results)
 
         # Aggregate (Average) results
         final_metrics = {}
