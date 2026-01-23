@@ -9,53 +9,43 @@ import pandas as pd
 import yaml
 
 # Simplified import handling
-project_root = Path(__file__).parent.parent.parent
-if str(project_root / 'src') not in sys.path:
-    sys.path.insert(0, str(project_root / 'src'))
-from utils.helpers import get_data_base_dir
+project_root = Path(__file__).resolve().parent.parent.parent
+sys.path.append(str(project_root / 'src'))
+
+from utils.helpers import get_data_base_dir, load_config
 
 
 class BRIGHTLoader:
     """Loader for BRIGHT dataset from HuggingFace."""
     
-    def __init__(self, config_path: str):
-        """Initialize BRIGHT loader."""
-        # Handle both absolute and relative paths
-        config_path_obj = Path(config_path)
-        if config_path_obj.is_absolute():
-            config_file = config_path_obj
-        else:
-            project_root = Path(__file__).parent.parent.parent
-            config_file = project_root / config_path
-        
-        if not config_file.exists():
-            raise FileNotFoundError(f"Config file not found at: {config_file}. Tried: {config_path}")
-        
-        with open(config_file, 'r') as f:
-            self.config = yaml.safe_load(f)
-        
-        self.dataset_name = self.config['dataset']['name']
-        self.examples_config = self.config['dataset'].get('examples_config', 'Gemini-1.0_reason')
-        # Always use DelftBlue structure: /scratch/${USER}/dense-retrieval-SOTA/data/bright
-        # Can override with BRIGHT_CACHE_DIR env var if needed
-        base_dir = get_data_base_dir()
-        self.cache_dir = os.environ.get('BRIGHT_CACHE_DIR') or f'{base_dir}/data/bright'
-        self.documents_dataset = None
-        self.examples_dataset = None
-        
-        # Automatically cache ReasonIR-HQ dataset if configured
-        if 'reasonir' in self.config.get('dataset', {}):
-            reasonir_config = self.config['dataset']['reasonir']
-            try:
-                self.cache_reasonir_hq_dataset(
-                    dataset_name=reasonir_config.get('name', 'reasonir/reasonir-data'),
-                    subset=reasonir_config.get('subset', 'hq'),
-                    cache_dir=self.cache_dir
-                )
-            except Exception as e:
-                # Don't fail initialization if caching fails (might be offline mode)
-                print(f"⚠️ Warning: Could not cache ReasonIR-HQ dataset: {e}")
-                print("   This is OK if you're in offline mode or dataset is already cached.")
+    def __init__(self, config_path: str = "config/config.yaml"):
+            """Initialize BRIGHT loader using unified config."""
+            self.config = load_config(config_path)
+            
+            # 1. FIXED PATHS: Navigating the new nested YAML structure
+            bright_cfg = self.config['data']['bright']
+            self.dataset_name = bright_cfg['name']
+            self.examples_config = bright_cfg.get('examples_config', 'Gemini-1.0_reason')
+            
+            # 2. RESOLVED PATHS: Using get_data_base_dir for scratch/local compatibility
+            base_dir = get_data_base_dir()
+            # Paths from config are relative to the scratch base
+            self.cache_dir = Path(base_dir) / bright_cfg.get('cache_dir', 'data/bright')
+            
+            self.documents_dataset = None
+            self.examples_dataset = None
+            
+            # 3. FIXED PATHS: ReasonIR caching block
+            if 'reasonir' in self.config.get('data', {}):
+                reasonir_cfg = self.config['data']['reasonir']
+                try:
+                    self.cache_reasonir_hq_dataset(
+                        dataset_name=reasonir_cfg.get('name', 'reasonir/reasonir-data'),
+                        subset=reasonir_cfg.get('subset', 'hq'),
+                        cache_dir=str(self.cache_dir)
+                    )
+                except Exception as e:
+                    print(f"⚠️ Warning: Could not cache ReasonIR-HQ dataset: {e}")
     
     def load_dataset(self, cache_dir: Optional[str] = None) -> Dict[str, DatasetDict]:
         """
@@ -277,18 +267,16 @@ class BRIGHTLoader:
             print("   This is OK if dataset is already cached or you're in offline mode.")
 
 if __name__ == "__main__":
-    # Example usage for BRIGHT dataset
-    # ReasonIR-HQ will be automatically cached during initialization
-    loader = BRIGHTLoader(config_path='config/config.yaml')
+    loader = BRIGHTLoader()
     loader.load_dataset()
     
-    # Example: 'biology' is one of the standard domains in BRIGHT
+    test_domain = 'biology'
     try:
-        data = loader.get_data_split('biology')
-        print(f"\nSuccessfully loaded 'biology' domain:")
-        print(f"- Corpus size: {len(data['corpus'])}")
-        print(f"- Queries size: {len(data['queries'])}")
-        print(f"- Qrels size: {len(data['qrels'])}")
-        print(f"- Sample Query: {data['queries'].iloc[0]['query']}")
+        data = loader.get_data_split(test_domain)
+        print(f"\n--- {test_domain.upper()} SANITY CHECK ---")
+        print(f"Corpus size:  {len(data['corpus']):,}") # Adds commas for readability
+        print(f"Queries size: {len(data['queries'])}")
+        print(f"Qrels size:   {len(data['qrels'])}")
+        print(f"Sample Query: {data['queries'].iloc[0]['query'][:100]}...") # Truncates long queries
     except Exception as e:
-        print(f"\nError loading domain: {e}")
+        print(f"\nError loading {test_domain}: {e}")

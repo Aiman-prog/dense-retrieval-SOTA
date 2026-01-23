@@ -1,61 +1,63 @@
-# Model Configuration
+# --- Global Model Settings ---
 model:
   base_model: "sentence-transformers/msmarco-bert-base-dot-v5"
-  max_length: 512
-  output_dir: "data/models"
+  query_max_len: 128
+  passage_max_len: 512
 
-# Dataset Configuration
-dataset:
-  # BRIGHT dataset (used for evaluation and document lookup for ReasonIR)
-  name: "xlangai/BRIGHT"  # BRIGHT dataset on HuggingFace
-  examples_config: "Gemini-1.0_reason"  # Config name for queries/qrels
-  cache_dir: "data/bright"
-  train_domain: "biology"  # Legacy: no longer used for training
+# --- Paths Configuration ---
+paths:
+  data_dir: "data"
+  processed_dir: "data/processed"
+  bright_cache: "data/bright"
+  models_dir: "models"
+  results_dir: "results/bright_benchmark"
+  
+  # Static Filenames
+  train_file: "train_reasonir.jsonl"  # Created by your preprocessor
+
+# --- Data Sources ---
+data:
+  bright:
+    name: "xlangai/BRIGHT"
+    examples_config: "Gemini-1.0_reason"
+    cache_dir: "data/bright"
+  reasonir:
+    name: "reasonir/reasonir-data"
+    subset: "hq"
+    train_file: "train_reasonir.jsonl"
+
+# --- Training Recipes ---
+training:
+  logging_steps: 10
+  overwrite_output_dir: true
+  dataloader_num_workers: 2
+  inbatch:
+    model_name: "inbatch_reasonir"
+    batch_size: 16
+    learning_rate: 1e-5
+    num_epochs: 2
+    train_group_size: 1
+    bf16: true
+  crossbatch:
+    model_name: "reasonir_hq_2048_v100"
+    batch_size: 16
+    target_batch_size: 2048
+    learning_rate: 1e-5
+    num_epochs: 2
+    train_group_size: 1
+    grad_cache: true
+
+# --- Evaluation Settings (Restored & Cleaned) ---
+evaluation:
   eval_domains:
+    - "biology"
     - "earth_science"
     - "economics"
     - "psychology"
     - "robotics"
-  
-  # ReasonIR dataset (used for training/fine-tuning)
-  reasonir:
-    name: "reasonir/reasonir-data"  # ReasonIR dataset on HuggingFace
-    subset: "hq"  # Hard-query subset (not "vl" for varied-length)
-    cache_dir: "data/bright"  # Same cache as BRIGHT (ReasonIR is cached there)
-
-# Training Configuration
-training:
-  # ANCE training (via tevatron)
-  ance:
-    batch_size: 32
-    learning_rate: 1e-5
-    num_epochs: 3
-    num_iterations: 3  # Number of continuous update iterations
-    hard_negatives_depth: 100  # Depth for hard negative mining
-    save_steps: 10000
-    fp16: true
-  
-  # In-batch negatives training
-  inbatch:
-    batch_size: 32
-    learning_rate: 2e-5
-    num_epochs: 3
-    warmup_steps: 1000
-
-# Evaluation Configuration
-evaluation:
   metrics:
     - "MRR"
     - "NDCG@10"
     - "Recall@10"
-    - "Recall@100"
-  top_k: 100
-  trec_eval_path: "trec_eval"  # Path to trec_eval binary
-
-# Paths
-paths:
-  data_dir: "data"
-  models_dir: "data/models"
-  indices_dir: "data/indices"
-  results_dir: "results/bright_benchmark"
-
+  top_k: 10
+  trec_eval_path: "trec_eval"

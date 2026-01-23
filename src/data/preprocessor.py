@@ -8,59 +8,41 @@ from pathlib import Path
 from typing import Optional, Dict, List
 from datasets import load_dataset
 
-# Import helper function (handle both package and direct import)
-try:
-    from utils.helpers import get_data_base_dir
-except ImportError:
-    # Fallback for relative import
-    project_root = Path(__file__).resolve().parent.parent.parent
-    if str(project_root / 'src') not in sys.path:
-        sys.path.insert(0, str(project_root / 'src'))
-    from utils.helpers import get_data_base_dir
+project_root = Path(__file__).resolve().parent.parent.parent
+sys.path.append(str(project_root / 'src'))
+
+from utils.helpers import get_data_base_dir, load_config, get_path
 
 class BRIGHTPreprocessor:
     """Preprocess BRIGHT data for Tevatron training and evaluation."""
     
     def __init__(self, output_dir: Optional[str] = None):
-        """
-        Initialize preprocessor.
-        Args:
-            output_dir: Optional override. Defaults to DATA_BASE_DIR/data/processed
-        """
-        if output_dir:
-            self.output_dir = output_dir
-        else:
-            base_dir = get_data_base_dir()
-            self.output_dir = os.environ.get('PROCESSED_DATA_DIR') or f'{base_dir}/data/processed'
-        
-        os.makedirs(self.output_dir, exist_ok=True)
+        """Initialize preprocessor."""
+        # 2. KEY CHANGE: Use get_path to resolve the processed directory automatically
+        self.output_dir = Path(output_dir) if output_dir else get_path("processed")
+        self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def prepare_tevatron_corpus(self, corpus: pd.DataFrame, filename: str = "corpus.jsonl") -> str:
-        """
-        Save corpus in Tevatron JSONL format for encoding.
-        INCLUDES BOTH KEYS: 'text_id' (for Tevatron) and 'docid' (for reference).
-        """
-        output_path = os.path.join(self.output_dir, filename)
+        """Save corpus in Tevatron JSONL format for encoding."""
+        output_path = self.output_dir / filename
         print(f"Processing {len(corpus)} documents for {filename}...")
         
         with open(output_path, 'w', encoding='utf-8') as f:
             for _, row in corpus.iterrows():
-                # TRICK: Include BOTH keys!
                 doc = {
-                    "text_id": str(row['doc_id']),  # REQUIRED by Tevatron to avoid crash
-                    "docid": str(row['doc_id']),    # REQUIRED: Tevatron looks for 'docid'
+                    "text_id": str(row['doc_id']),
+                    "docid": str(row['doc_id']),
                     "text": row['text'] if pd.notna(row['text']) else "" 
                 }
                 f.write(json.dumps(doc, ensure_ascii=False) + '\n')
-        
-        return output_path
+        return str(output_path)
 
     def prepare_tevatron_queries(self, queries: pd.DataFrame, filename: str = "queries.jsonl") -> str:
         """
         Save queries in Tevatron JSONL format for encoding.
         INCLUDES BOTH KEYS: 'text_id' (for Tevatron) and 'query_id' (for reference).
         """
-        output_path = os.path.join(self.output_dir, filename)
+        output_path = self.output_dir / filename
         print(f"Processing {len(queries)} queries for {filename}...")
         
         with open(output_path, 'w', encoding='utf-8') as f:
@@ -86,7 +68,7 @@ class BRIGHTPreprocessor:
         Save QRELS in TREC format for evaluation (trec_eval).
         Format: query_id Q0 doc_id relevance
         """
-        output_path = os.path.join(self.output_dir, filename)
+        output_path = self.output_dir / filename
         
         with open(output_path, 'w', encoding='utf-8') as f:
             for _, row in qrels.iterrows():
@@ -104,25 +86,15 @@ class BRIGHTPreprocessor:
                                        subset: str = "hq",
                                        cache_dir: Optional[str] = None,
                                        filename: str = "train_reasonir.jsonl") -> str:
-        """
-        Prepare ReasonIR-HQ training data for GitHub Tevatron.
-        Standard format: {"query_id": "...", "query": "...", "positive_passages": [{"docid": "...", "text": "..."}], "negative_passages": []}
-        """
-        output_path = os.path.join(self.output_dir, filename)
-        print(f"Preparing ReasonIR-HQ training data for GitHub Tevatron...")
+        """Prepare ReasonIR-HQ training data for GitHub Tevatron."""
+        output_path = self.output_dir / filename
         
-        # Use consistent cache directory
-        cache_dir = os.environ.get('HF_DATASETS_CACHE') or os.environ.get('HF_HOME')
-        if not cache_dir:
-            base_dir = get_data_base_dir()
-            cache_dir = f'{base_dir}/data/bright'
+        # 3. KEY CHANGE: Use get_path('bright') to find the cache consistently
+        cache = Path(cache_dir) if cache_dir else get_path("bright")
+        cache.mkdir(parents=True, exist_ok=True)
         
-        os.makedirs(cache_dir, exist_ok=True)
-        print(f"Loading ReasonIR dataset: {dataset_name} (subset: {subset})...")
-        hq_dataset = load_dataset(dataset_name, subset, cache_dir=cache_dir)
-        
-        # Format into Tevatron JSONL format with positive_passages (full text)
-        print(f"Formatting training data to {output_path}...")
+        print(f"Loading ReasonIR dataset from: {cache}")
+        hq_dataset = load_dataset(dataset_name, subset, cache_dir=str(cache))
         count = 0
         skipped = 0
         
@@ -183,41 +155,34 @@ class BRIGHTPreprocessor:
                 
                 f.write(json.dumps(record, ensure_ascii=False) + '\n')
                 count += 1
-        
-        print(f"Saved {count} training examples to {output_path}")
-        if skipped > 0:
-            print(f"Skipped {skipped} examples (missing docs or bad format)")
-        return output_path
+
+        return str(output_path)
 
 if __name__ == "__main__":
     from data.bright_loader import BRIGHTLoader
-    from utils.helpers import load_config
     
-    project_root = Path(__file__).resolve().parent.parent.parent
-    config = load_config(str(project_root / 'config' / 'config.yaml'))
+    # 4. CLEANER BOILERPLATE: Just call load_config()
+    config = load_config()
     
     print("=" * 80)
     print("Generating ReasonIR-HQ Training Data")
     print("=" * 80)
     
-    # 1. Load BRIGHT dataset and create ID mapping (needed for ReasonIR-HQ)
-    print("Step 1: Loading BRIGHT dataset for document ID mapping...")
-    loader = BRIGHTLoader(config_path='config/config.yaml')
+    loader = BRIGHTLoader() # Uses config/config.yaml by default now
     loader.load_dataset()
     id2doc = loader.get_all_documents_id_map()
-    print(f"✅ Created ID-to-text mapping for {len(id2doc)} documents")
     
-    # 2. Prepare ReasonIR-HQ training data
-    print("\nStep 2: Preparing ReasonIR-HQ training data...")
     preprocessor = BRIGHTPreprocessor()
-    reasonir_config = config['dataset']['reasonir']
+    
+    # 5. KEY CHANGE: Match the new 'data' structure in YAML
+    reasonir_cfg = config['data']['reasonir']
     
     train_file_path = preprocessor.prepare_reasonir_hq_train_data(
         id2doc=id2doc,
-        dataset_name=reasonir_config['name'],
-        subset=reasonir_config['subset'],
-        cache_dir=reasonir_config.get('cache_dir'),
-        filename='train_reasonir.jsonl'
+        dataset_name=reasonir_cfg['name'],
+        subset=reasonir_cfg['subset'],
+        # cache_dir is handled internally by preprocessor using get_path("bright")
+        filename=reasonir_cfg.get('train_file', 'train_reasonir.jsonl')
     )
     
     print(f"\n✅ Training data generated: {train_file_path}")

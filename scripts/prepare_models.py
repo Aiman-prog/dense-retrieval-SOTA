@@ -2,76 +2,79 @@
 
 import os
 import sys
+import shutil
 from pathlib import Path
 
-# Add src to path (same pattern as train_rocketqa.py)
+# Add src to path
 project_root = Path(__file__).parent.parent
 sys.path.append(str(project_root / 'src'))
 
 from utils.helpers import load_config
 
-# Try to import get_data_base_dir, define it locally if not available
-try:
-    from utils.helpers import get_data_base_dir
-except ImportError:
-    # Fallback: define get_data_base_dir if it's not in helpers.py
-    def get_data_base_dir() -> str:
-        """Get base directory for all data (datasets, processed files, models)."""
-        if 'DATA_BASE_DIR' in os.environ:
-            return os.environ['DATA_BASE_DIR']
-        user = os.environ.get('USER', os.environ.get('USERNAME', 'user'))
-        return f'/scratch/{user}/dense-retrieval-SOTA'
+def get_data_base_dir() -> str:
+    if 'DATA_BASE_DIR' in os.environ:
+        return os.environ['DATA_BASE_DIR']
+    user = os.environ.get('USER', os.environ.get('USERNAME', 'user'))
+    return f'/scratch/{user}/dense-retrieval-SOTA'
 
 def main():
-    """Download models to cache for offline training."""
-    # Load config
+    # 1. Setup Paths
     config_path = project_root / 'config' / 'config.yaml'
     config = load_config(str(config_path))
-    
     model_name = config['model']['base_model']
     
-    # Set cache location (matches bright_loader.py and run_rocketqa_delftblue.sh)
     base_dir = get_data_base_dir()
-    cache_dir = f'{base_dir}/data/bright'
+    cache_dir = Path(base_dir) / 'data' / 'bright'
+
+    # 2. CLEANUP: If flat files exist, they block the hub creation.
+    # We check for config.json in the root. If it's there, we wipe the folder.
+    if (cache_dir / "config.json").exists():
+        print(f"🧹 Cleaning up legacy flat files in {cache_dir}...")
+        shutil.rmtree(cache_dir)
+    
     os.makedirs(cache_dir, exist_ok=True)
+
+    # 3. ENVIRONMENT: Only set HF_HOME to force modern Hub structure
+    # We explicitly UNSET the old deprecated ones to avoid confusion
+    os.environ.pop('TRANSFORMERS_CACHE', None)
+    os.environ.pop('HF_DATASETS_CACHE', None)
+    os.environ['HF_HOME'] = str(cache_dir)
     
-    # Set HuggingFace cache environment variables
-    os.environ['HF_HOME'] = cache_dir
-    os.environ['HF_DATASETS_CACHE'] = cache_dir
-    os.environ['TRANSFORMERS_CACHE'] = cache_dir
-    os.environ['SENTENCE_TRANSFORMERS_HOME'] = cache_dir
-    
+    # Ensure we aren't in offline mode while downloading!
+    os.environ['HF_HUB_OFFLINE'] = '0'
+    os.environ['TRANSFORMERS_OFFLINE'] = '0'
+
     print("=" * 80)
     print("Pre-downloading Models for Offline Training")
-    print("=" * 80)
     print(f"Model: {model_name}")
-    print(f"Cache directory: {cache_dir}")
-    print()
-    
+    print(f"Target HF_HOME: {cache_dir}")
+    print("=" * 80)
+
     try:
-        print(f"Downloading {model_name}...")
-        from sentence_transformers import SentenceTransformer
+        from transformers import AutoTokenizer, AutoModel
         
-        # Download the model (this will cache it)
-        model = SentenceTransformer(model_name)
-        print(f"✅ Model '{model_name}' downloaded successfully!")
+        print(f"📥 Downloading {model_name}...")
+        # Note: No cache_dir= argument! We rely on os.environ['HF_HOME']
+        AutoTokenizer.from_pretrained(model_name)
+        AutoModel.from_pretrained(model_name)
         
-        # Verify it's cached
-        model_cache_path = f"{cache_dir}/hub/models--{model_name.replace('/', '--')}"
-        if os.path.exists(model_cache_path):
-            print(f"✅ Model cached at: {model_cache_path}")
+        print(f"✅ Download successful!")
+
+        # 4. VERIFICATION: Look for the specific Hub snapshots folder
+        repo_id = model_name.replace("/", "--")
+        hub_path = cache_dir / "hub" / f"models--{repo_id}" / "snapshots"
+        
+        if hub_path.exists() and any(hub_path.iterdir()):
+            actual_snapshot = list(hub_path.iterdir())[0]
+            print(f"✨ SUCCESS: Hub structure created!")
+            print(f"📍 Snapshot Path: {actual_snapshot}")
         else:
-            print(f"⚠️  Warning: Model cache path not found at expected location")
+            print(f"❌ ERROR: Hub structure still missing in {cache_dir}/hub")
+            sys.exit(1)
             
     except Exception as e:
-        print(f"❌ Error downloading model: {e}")
+        print(f"❌ Download failed: {e}")
         sys.exit(1)
-    
-    print("\n" + "=" * 80)
-    print("✅ Model preparation complete!")
-    print("You can now run training in offline mode.")
-    print("=" * 80)
 
 if __name__ == "__main__":
     main()
-
