@@ -7,6 +7,7 @@ import pandas as pd
 from pathlib import Path
 from typing import Optional, Dict, List
 from datasets import load_dataset
+import numpy as np
 
 project_root = Path(__file__).resolve().parent.parent.parent
 sys.path.append(str(project_root / 'src'))
@@ -187,3 +188,36 @@ if __name__ == "__main__":
     
     print(f"\n✅ Training data generated: {train_file_path}")
     print("=" * 80)
+
+    print("\n" + "=" * 80)
+    print("Generating BRIGHT Evaluation Data (Domains)")
+    print("=" * 80)
+
+    # Pull domains from the evaluation section of config
+    eval_domains = config['evaluation'].get('eval_domains', [])
+    
+    for domain in eval_domains:
+        print(f"\n🌐 Processing Domain: {domain}")
+        
+        # 1. Get raw data from loader
+        domain_data = loader.get_data_split(domain)
+        
+        # 2. Create the Corpus JSONL (What evaluate.py was missing!)
+        preprocessor.prepare_tevatron_corpus(
+            domain_data['corpus'], 
+            filename=f"{domain}_corpus.jsonl"
+        )
+        
+        # 3. Create the Queries JSONL
+        preprocessor.prepare_tevatron_queries(
+            domain_data['queries'], 
+            filename=f"{domain}_queries.jsonl"
+        )
+        
+        # 4. Create the Qrels TXT
+        preprocessor.prepare_trec_qrels(
+            domain_data['qrels'], 
+            filename=f"{domain}_qrels.txt"
+        )
+
+    print(f"\n✅ All preprocessing complete! Files are in: {preprocessor.output_dir}")

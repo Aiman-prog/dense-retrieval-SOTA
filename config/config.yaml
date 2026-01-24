@@ -37,7 +37,7 @@ training:
     learning_rate: 1e-5
     num_epochs: 2
     train_group_size: 1
-    bf16: true
+    bf16: false
   crossbatch:
     model_name: "reasonir_hq_2048_v100"
     batch_size: 16
@@ -61,3 +61,4 @@ evaluation:
     - "Recall@10"
   top_k: 10
   trec_eval_path: "trec_eval"
+  bf16: False
