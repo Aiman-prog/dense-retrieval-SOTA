@@ -36,25 +36,28 @@ logger = logging.getLogger(__name__)
 
 def main():
     # 1. Configuration & Paths via Centralized Context
-    # Resolves paths to /scratch and identifies the crossbatch recipe
     ctx = get_training_context("crossbatch")
     recipe = ctx['args'] 
     config_yaml = load_config()
     
-    train_file = str(ctx['train_file'])
+    # --- PATH FIX: Resolve the mixture directory ---
+    processed_dir = Path(ctx['train_file']).parent.resolve()
+    mixture_dir = processed_dir / "training_mixture"
     output_dir = str(ctx['output_dir'])
 
-    if not Path(train_file).exists():
-        print(f"❌ ERROR: Training file not found: {train_file}")
+    # Use the glob pattern to load all files in the mixture
+    training_data_path = str(mixture_dir / "*.jsonl")
+
+    if not mixture_dir.exists():
+        print(f"❌ ERROR: Training mixture directory not found: {mixture_dir}")
         sys.exit(1)
 
-    # 2. Argument Construction (Stable String List Method)
-    # Maps config.yaml values to the formal flags Tevatron expects
+    # 2. Argument Construction
     args_list = [
         '--output_dir', output_dir,
         '--model_name_or_path', config_yaml['model']['base_model'],
         '--dataset_name', 'json',
-        '--dataset_path', train_file,
+        '--dataset_path', training_data_path,
         '--dataset_split', 'train',
         '--do_train',
         '--per_device_train_batch_size', str(recipe['batch_size']),
@@ -66,7 +69,7 @@ def main():
         '--query_max_len', str(config_yaml['model']['query_max_len']),
         '--passage_max_len', str(config_yaml['model']['passage_max_len']),
         '--grad_cache', 'True',
-        '--dataloader_num_workers', str(config_yaml['training'].get('dataloader_num_workers')),  # Reduced to 2 to prevent kernel hangs
+        '--dataloader_num_workers', str(config_yaml['training'].get('dataloader_num_workers', 2)),
         '--fp16', 'False',
         '--bf16', str(recipe.get('bf16', False)),
         '--overwrite_output_dir', str(config_yaml['training'].get('overwrite_output_dir', True)),
@@ -142,7 +145,6 @@ def main():
         GradCacheTrainer.__init__ = original_init
     
     # 9. --- CRITICAL: LINK TRAINER TO DATASET ---
-    # Fixes: AttributeError: 'NoneType' object has no attribute 'state'
     train_dataset.trainer = trainer
     if hasattr(train_dataset, 'set_epoch'):
         train_dataset.set_epoch(0)

@@ -2,19 +2,20 @@
 
 #SBATCH --job-name=eval_reasonir
 #SBATCH --partition=gpu-a100-small   
-#SBATCH --time=01:00:00              
+#SBATCH --time=04:00:00              
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2            
 #SBATCH --gpus-per-task=1            
-#SBATCH --mem-per-cpu=5G             
+#SBATCH --mem-per-cpu=8000M           
 #SBATCH --account=Education-EEMCS-MSc-DSAIT
-#SBATCH --output=logs/eval_reasonir_%j.out
-#SBATCH --error=logs/eval_reasonir_%j.err
+#SBATCH --output=logs/eval_crossbatch_%j.out
+#SBATCH --error=logs/eval_crossbatch_%j.err
 #SBATCH --chdir=/home/aimanabdulwaha/dense-retrieval-SOTA
 
 # --- Load modules ---
 module purge
 module load 2025
+module load gcc          # This will load GCC 13.x (modern C++)
 module load cuda/12.9
 module load miniconda3/4.12.0
 
@@ -40,11 +41,11 @@ export HF_HOME="${HF_CACHE_DIR}"
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export PYTHONPATH=/home/aimanabdulwaha/dense-retrieval-SOTA:${PYTHONPATH}
-
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 
 
 # --- CONFIGURATION ---
-MODEL_PATH="/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/crossbatch_reasonir"
+MODEL_PATH="/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_reasonir"
 DOMAIN="biology"
 K=10
 BATCH_SIZE=128

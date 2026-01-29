@@ -87,137 +87,102 @@ class BRIGHTPreprocessor:
                                        subset: str = "hq",
                                        cache_dir: Optional[str] = None,
                                        filename: str = "train_reasonir.jsonl") -> str:
-        """Prepare ReasonIR-HQ training data for GitHub Tevatron."""
+        """Prepare ReasonIR training data. Automatically handles text extraction for VL."""
         output_path = self.output_dir / filename
-        
-        # 3. KEY CHANGE: Use get_path('bright') to find the cache consistently
         cache = Path(cache_dir) if cache_dir else get_path("bright")
-        cache.mkdir(parents=True, exist_ok=True)
         
-        print(f"Loading ReasonIR dataset from: {cache}")
-        hq_dataset = load_dataset(dataset_name, subset, cache_dir=str(cache))
+        print(f"📥 Loading ReasonIR {subset.upper()} dataset...")
+        dataset = load_dataset(dataset_name, subset, cache_dir=str(cache))
+        
         count = 0
         skipped = 0
         
         with open(output_path, 'w', encoding='utf-8') as f:
-            for entry in hq_dataset['train']:
-                # Extract query text
+            for entry in dataset['train']:
+                # 1. Query Extraction (Shape-Agnostic)
                 query_seq = entry.get("query", [])
-                if isinstance(query_seq, list) and len(query_seq) >= 2:
-                    query_text = query_seq[1]
-                elif isinstance(query_seq, list) and len(query_seq) == 1:
-                    query_text = query_seq[0]
-                elif isinstance(query_seq, str):
-                    query_text = query_seq
-                else:
-                    skipped += 1
-                    continue
+                query_text = query_seq[-1] if isinstance(query_seq, list) else query_seq
                 
-                # Extract positive passages (as list of dicts with docid and text)
-                pos_docs = entry.get("pos", [])
+                # 2. Passage Extraction Logic
                 positive_passages = []
-                for pos in pos_docs:
-                    if isinstance(pos, list) and len(pos) >= 2:
-                        doc_id = str(pos[1])
-                        if doc_id in id2doc:
-                            positive_passages.append({
-                                "docid": doc_id,
-                                "text": id2doc[doc_id]
-                            })
-                    elif isinstance(pos, str):
-                        # If it's already a string, treat as docid
-                        if pos in id2doc:
-                            positive_passages.append({
-                                "docid": pos,
-                                "text": id2doc[pos]
-                            })
-                
+                # ReasonIR format: pos is a list of [instruction, content/id]
+                for pos in entry.get("pos", []):
+                    content_or_id = pos[1] if isinstance(pos, list) else pos
+                    
+                    if subset == "hq":
+                        # HQ needs mapping from BRIGHT
+                        if content_or_id in id2doc:
+                            positive_passages.append({"docid": str(content_or_id), "text": id2doc[content_or_id]})
+                    else:
+                        # VL HAS THE TEXT ALREADY! Just use it.
+                        # We use a dummy ID 'vl_doc_{count}' since Tevatron needs an ID
+                        positive_passages.append({"docid": f"vl_pos_{count}", "text": str(content_or_id)})
+
                 if not positive_passages:
                     skipped += 1
                     continue
                 
-                neg_docs = entry.get("neg", []) # Get the hard negatives from the dataset
+                # 3. Negatives (Optional - set to [] for now as requested)
                 negative_passages = []
-                for neg in neg_docs:
-                    if isinstance(neg, list) and len(neg) >= 2:
-                        doc_id = str(neg[1])
-                        if doc_id in id2doc:
-                            negative_passages.append({
-                                "docid": doc_id,
-                                "text": id2doc[doc_id]
-                            })
-                # Standard Tevatron format: positive_passages and negative_passages
+
                 record = {
-                    "query_id": f"reasonir_{count}",
+                    "query_id": f"reasonir_{subset}_{count}",
                     "query": query_text,
-                    "positive_passages": positive_passages,  # List of dicts: [{"docid": "...", "text": "..."}]
+                    "positive_passages": positive_passages,
                     "negative_passages": negative_passages
                 }
-                
                 f.write(json.dumps(record, ensure_ascii=False) + '\n')
                 count += 1
 
+        print(f"✅ {subset.upper()} Complete! Processed: {count:,} | Skipped: {skipped:,}")
         return str(output_path)
 
 if __name__ == "__main__":
     from data.bright_loader import BRIGHTLoader
     
-    # 4. CLEANER BOILERPLATE: Just call load_config()
     config = load_config()
-    
-    print("=" * 80)
-    print("Generating ReasonIR-HQ Training Data")
-    print("=" * 80)
-    
-    loader = BRIGHTLoader() # Uses config/config.yaml by default now
+    loader = BRIGHTLoader() 
     loader.load_dataset()
     id2doc = loader.get_all_documents_id_map()
     
     preprocessor = BRIGHTPreprocessor()
     
-    # 5. KEY CHANGE: Match the new 'data' structure in YAML
-    reasonir_cfg = config['data']['reasonir']
+    # 1. TRAINING DATA GENERATION
+    # ReasonIR-8B is trained on a mixture of HQ and VL
+    # mixture_dir = preprocessor.output_dir / "training_mixture"
+    # mixture_dir.mkdir(parents=True, exist_ok=True)
     
-    train_file_path = preprocessor.prepare_reasonir_hq_train_data(
-        id2doc=id2doc,
-        dataset_name=reasonir_cfg['name'],
-        subset=reasonir_cfg['subset'],
-        # cache_dir is handled internally by preprocessor using get_path("bright")
-        filename=reasonir_cfg.get('train_file', 'train_reasonir.jsonl')
-    )
-    
-    print(f"\n✅ Training data generated: {train_file_path}")
-    print("=" * 80)
-
-    print("\n" + "=" * 80)
-    print("Generating BRIGHT Evaluation Data (Domains)")
-    print("=" * 80)
-
-    # Pull domains from the evaluation section of config
-    eval_domains = config['evaluation'].get('eval_domains', [])
-    
-    for domain in eval_domains:
-        print(f"\n🌐 Processing Domain: {domain}")
+    # for subset_type in ['hq', 'vl']:
+    #     print("=" * 80)
+    #     print(f"🚀 Generating ReasonIR-{subset_type.upper()} Training Data")
+    #     print("=" * 80)
         
-        # 1. Get raw data from loader
+    #     reasonir_cfg = config['data']['reasonir']
+        
+    #     # Point the filename to the new subdirectory
+    #     filename = f"training_mixture/train_reasonir_{subset_type}.jsonl"
+        
+    #     train_file_path = preprocessor.prepare_reasonir_hq_train_data(
+    #         id2doc=id2doc,
+    #         dataset_name=reasonir_cfg['name'],
+    #         subset=subset_type, 
+    #         filename=filename
+    #     )
+        
+    #     print(f"\n✅ {subset_type.upper()} Data generated: {train_file_path}")
+
+    # 2. EVALUATION DATA GENERATION
+    print("\n" + "=" * 80)
+    print("🌐 Generating BRIGHT Evaluation Data (Domains)")
+    print("=" * 80)
+
+    eval_domains = config['evaluation'].get('eval_domains', [])
+    for domain in eval_domains:
+        print(f"Processing Domain: {domain}")
         domain_data = loader.get_data_split(domain)
         
-        # 2. Create the Corpus JSONL (What evaluate.py was missing!)
-        preprocessor.prepare_tevatron_corpus(
-            domain_data['corpus'], 
-            filename=f"{domain}_corpus.jsonl"
-        )
-        
-        # 3. Create the Queries JSONL
-        preprocessor.prepare_tevatron_queries(
-            domain_data['queries'], 
-            filename=f"{domain}_queries.jsonl"
-        )
-        
-        # 4. Create the Qrels TXT
-        preprocessor.prepare_trec_qrels(
-            domain_data['qrels'], 
-            filename=f"{domain}_qrels.txt"
-        )
+        preprocessor.prepare_tevatron_corpus(domain_data['corpus'], filename=f"{domain}_corpus.jsonl")
+        preprocessor.prepare_tevatron_queries(domain_data['queries'], filename=f"{domain}_queries.jsonl")
+        preprocessor.prepare_trec_qrels(domain_data['qrels'], filename=f"{domain}_qrels.txt")
 
     print(f"\n✅ All preprocessing complete! Files are in: {preprocessor.output_dir}")

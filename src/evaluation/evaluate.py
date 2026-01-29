@@ -66,7 +66,9 @@ def main():
 
     # --- STEP 1: ENCODE ---
     print(f"🚀 Step 1: Encoding with Tevatron Driver...", flush=True)
-    bf16_arg = str(config['evaluation'].get('bf16', False))
+
+    # FORCE THIS TO TRUE for A100 MIG slices to avoid Sgemm crashes
+    bf16_arg = "True" 
 
     for input_f, output_p, is_q in [(corpus_file, corpus_pkl, False), (queries_file, query_pkl, True)]:
         output_p.parent.mkdir(parents=True, exist_ok=True)
@@ -74,7 +76,8 @@ def main():
             sys.executable, '-m', 'tevatron.retriever.driver.encode',
             '--output_dir', str(output_p.parent),
             '--model_name_or_path', args.model_path,
-            '--bf16', bf16_arg,
+            '--bf16', bf16_arg,        # MUST BE TRUE
+            '--fp16', 'False',
             '--per_device_eval_batch_size', str(args.batch_size),
             '--dataset_name', 'json',
             '--dataset_path', str(input_f),
