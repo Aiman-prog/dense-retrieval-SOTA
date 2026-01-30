@@ -2,14 +2,14 @@
 
 #SBATCH --job-name=inbatch_128
 #SBATCH --partition=gpu-a100
-#SBATCH --time=05:00:00               # Increased to 8h for HQ+VL mixture
+#SBATCH --time=04:00:00               # Increased to 8h for HQ+VL mixture
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --gpus-per-task=1
 #SBATCH --mem-per-cpu=8000M                     # Simplified memory request
 #SBATCH --account=Education-EEMCS-MSc-DSAIT
-#SBATCH --output=logs/inbatch_%j.out
-#SBATCH --error=logs/inbatch_%j.err
+#SBATCH --output=logs/inbatchNeg_%j.out
+#SBATCH --error=logs/inbatchNeg_%j.err
 #SBATCH --chdir=/home/aimanabdulwaha/dense-retrieval-SOTA
 
 # --- 1. Load Modules ---

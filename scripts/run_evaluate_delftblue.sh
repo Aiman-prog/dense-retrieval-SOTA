@@ -8,8 +8,8 @@
 #SBATCH --gpus-per-task=1            
 #SBATCH --mem-per-cpu=8000M           
 #SBATCH --account=Education-EEMCS-MSc-DSAIT
-#SBATCH --output=logs/eval_crossbatch_%j.out
-#SBATCH --error=logs/eval_crossbatch_%j.err
+#SBATCH --output=logs/eval_inbatchneg_%j.out
+#SBATCH --error=logs/eval_inbatchneg_%j.err
 #SBATCH --chdir=/home/aimanabdulwaha/dense-retrieval-SOTA
 
 # --- Load modules ---

@@ -48,6 +48,7 @@ training:
     grad_cache: true
     bf16: true
   ance:
+    base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_reasonir_Neg"
     model_name: "ance_reasonir_v1"
     num_episodes: 3
     mining_depth: 200
