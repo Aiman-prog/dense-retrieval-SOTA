@@ -32,11 +32,11 @@ training:
   overwrite_output_dir: true
   dataloader_num_workers: 4
   inbatch:
-    model_name: "inbatch_reasonir"
-    batch_size: 128
+    model_name: "inbatch_reasonir_Neg"
+    batch_size: 64
     learning_rate: 1e-5
     num_epochs: 1
-    train_group_size: 1
+    train_group_size: 2
     bf16: true
   crossbatch:
     model_name: "reasonir_hq_2048_v100"
@@ -47,6 +47,17 @@ training:
     train_group_size: 1
     grad_cache: true
     bf16: true
+  ance:
+    model_name: "ance_reasonir_v1"
+    num_episodes: 3
+    mining_depth: 200
+    learning_rate: 2e-6
+    batch_size: 64                # For training
+    per_device_eval_batch_size: 512 # For encoding (from your evaluate.py logic)
+    num_epochs: 1
+    bf16: true
+    train_group_size: 2
+
 
 # --- Evaluation Settings (Restored & Cleaned) ---
 evaluation:

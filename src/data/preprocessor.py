@@ -99,41 +99,46 @@ class BRIGHTPreprocessor:
         
         with open(output_path, 'w', encoding='utf-8') as f:
             for entry in dataset['train']:
-                # 1. Query Extraction (Shape-Agnostic)
+                # 1. Query Extraction
                 query_seq = entry.get("query", [])
                 query_text = query_seq[-1] if isinstance(query_seq, list) else query_seq
                 
-                # 2. Passage Extraction Logic
-                positive_passages = []
-                # ReasonIR format: pos is a list of [instruction, content/id]
-                for pos in entry.get("pos", []):
-                    content_or_id = pos[1] if isinstance(pos, list) else pos
-                    
-                    if subset == "hq":
-                        # HQ needs mapping from BRIGHT
-                        if content_or_id in id2doc:
-                            positive_passages.append({"docid": str(content_or_id), "text": id2doc[content_or_id]})
-                    else:
-                        # VL HAS THE TEXT ALREADY! Just use it.
-                        # We use a dummy ID 'vl_doc_{count}' since Tevatron needs an ID
-                        positive_passages.append({"docid": f"vl_pos_{count}", "text": str(content_or_id)})
+                # 2. Restructured Unified Extraction Logic (No enumerate)
+                passages = {"pos": [], "neg": []}
+                
+                for key in ["pos", "neg"]:
+                    raw_list = entry.get(key, [])
+                    for item in raw_list:
+                        content_or_id = item[1] if isinstance(item, list) else item
+                        
+                        if subset == "hq" and key == "pos":
+                            # HQ Logic: Map ID to BRIGHT Text
+                            if content_or_id in id2doc:
+                                passages[key].append({
+                                    "docid": str(content_or_id), 
+                                    "text": id2doc[content_or_id]
+                                })
+                        else:
+                            # VL Logic: Use raw text directly, matching old ID style
+                            passages[key].append({
+                                "docid": f"vl_{key}_{count}", 
+                                "text": str(content_or_id)
+                            })
 
-                if not positive_passages:
+                # 3. Validation: Tevatron MUST have at least one positive
+                # Replace your previous validation check with this:
+                if not passages["pos"] or not passages["neg"]:
                     skipped += 1
                     continue
                 
-                # 3. Negatives (Optional - set to [] for now as requested)
-                negative_passages = []
-
                 record = {
                     "query_id": f"reasonir_{subset}_{count}",
                     "query": query_text,
-                    "positive_passages": positive_passages,
-                    "negative_passages": negative_passages
+                    "positive_passages": passages["pos"],
+                    "negative_passages": passages["neg"]
                 }
                 f.write(json.dumps(record, ensure_ascii=False) + '\n')
                 count += 1
-
         print(f"✅ {subset.upper()} Complete! Processed: {count:,} | Skipped: {skipped:,}")
         return str(output_path)
 
@@ -149,27 +154,27 @@ if __name__ == "__main__":
     
     # 1. TRAINING DATA GENERATION
     # ReasonIR-8B is trained on a mixture of HQ and VL
-    # mixture_dir = preprocessor.output_dir / "training_mixture"
-    # mixture_dir.mkdir(parents=True, exist_ok=True)
+    mixture_dir = preprocessor.output_dir / "training_mixture"
+    mixture_dir.mkdir(parents=True, exist_ok=True)
     
-    # for subset_type in ['hq', 'vl']:
-    #     print("=" * 80)
-    #     print(f"🚀 Generating ReasonIR-{subset_type.upper()} Training Data")
-    #     print("=" * 80)
+    for subset_type in ['hq', 'vl']:
+        print("=" * 80)
+        print(f"🚀 Generating ReasonIR-{subset_type.upper()} Training Data")
+        print("=" * 80)
         
-    #     reasonir_cfg = config['data']['reasonir']
+        reasonir_cfg = config['data']['reasonir']
         
-    #     # Point the filename to the new subdirectory
-    #     filename = f"training_mixture/train_reasonir_{subset_type}.jsonl"
+        # Point the filename to the new subdirectory
+        filename = f"training_mixture/train_reasonir_{subset_type}.jsonl"
         
-    #     train_file_path = preprocessor.prepare_reasonir_hq_train_data(
-    #         id2doc=id2doc,
-    #         dataset_name=reasonir_cfg['name'],
-    #         subset=subset_type, 
-    #         filename=filename
-    #     )
+        train_file_path = preprocessor.prepare_reasonir_hq_train_data(
+            id2doc=id2doc,
+            dataset_name=reasonir_cfg['name'],
+            subset=subset_type, 
+            filename=filename
+        )
         
-    #     print(f"\n✅ {subset_type.upper()} Data generated: {train_file_path}")
+        print(f"\n✅ {subset_type.upper()} Data generated: {train_file_path}")
 
     # 2. EVALUATION DATA GENERATION
     print("\n" + "=" * 80)

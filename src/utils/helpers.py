@@ -45,7 +45,8 @@ def get_path(key: str, model_name: str = None) -> Path:
         "bright": base / p_cfg['bright_cache'],
         "models": base / p_cfg['models_dir'],
         "results": base / p_cfg['results_dir'],
-        "train_jsonl": base / p_cfg['processed_dir'] / p_cfg['train_file']
+        "train_jsonl": base / p_cfg['processed_dir'] / p_cfg['train_file'],
+        "temp_ance": base / "temp_ance_workdir"
     }
     
     if model_name:

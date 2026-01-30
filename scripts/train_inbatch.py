@@ -36,6 +36,16 @@ def main():
     if not mixture_dir.exists():
         print(f"❌ ERROR: Training mixture directory not found: {mixture_dir}")
         sys.exit(1)
+
+    # --- CONFIG PARAMETER PRINTS ---
+    print("\n" + "="*40)
+    print("🛠️  VERIFYING CONFIGURATION PARAMETERS")
+    print(f"▶️  Train Group Size:   {ctx['args'].get('train_group_size')}")
+    print(f"▶️  Batch Size:         {ctx['args'].get('batch_size')}")
+    print(f"▶️  Learning Rate:      {ctx['args'].get('learning_rate')}")
+    print(f"▶️  Num Epochs:         {ctx['args'].get('num_epochs')}")
+    print(f"📂 Training Data:      {training_data_path}")
+    print("="*40 + "\n")
     
     # 2. Map YAML/Context to Tevatron Arguments
     training_args = [
