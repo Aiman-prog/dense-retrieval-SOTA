@@ -147,7 +147,11 @@ def main():
             '--corpus_path', str(corpus_file), '--per_device_train_batch_size', str(ctx['args']['batch_size']),
             '--train_group_size', str(ctx['args']['train_group_size']), '--learning_rate', str(ctx['args']['learning_rate']),
             '--num_train_epochs', '1', '--bf16', 'True', '--dtype', 'bfloat16',
-            '--gradient_checkpointing', 'True', '--overwrite_output_dir', 'True',
+            '--gradient_checkpointing', 'True', 
+            '--overwrite_output_dir', 'True',   # Clears "toxic" old settings
+            '--save_strategy', 'no',            # Stops 100GB checkpoint spike
+            '--save_total_limit', '1',          # Safety: only keep 1 model copy
+            '--ignore_data_skip', 'True',       # Forces batch size 64 (resets counter)
             '--attn_implementation', 'eager', '--optim', 'adamw_torch_fused', '--logging_steps', '100'
         ]
         sys.argv = ['train.py'] + training_args
@@ -176,7 +180,14 @@ def main():
             s_e, i_e = idx_e.search(dq[0].astype(np.float32), 10)
             
             results = {str(dq[1][j]): {str(dc[1][i_e[j][k]]): float(s_e[j][k]) for k in range(len(i_e[j])) if i_e[j][k] >= 0} for j in range(len(dq[1]))}
-            evaluator = TrecEvalWrapper(pd.read_csv(d_qrels, sep=' ', names=['query_id', 'ignore', 'doc_id', 'relevance'], dtype=str))
+            eval_qrels_data = []
+            with open(d_qrels, 'r') as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) >= 4:
+                        eval_qrels_data.append({'query_id': parts[0], 'doc_id': parts[2], 'relevance': parts[3]})
+            eval_eval_df = pd.DataFrame(eval_qrels_data)
+            evaluator = TrecEvalWrapper(eval_eval_df)
             metrics = evaluator.evaluate(results, {'recip_rank', 'ndcg_cut_10'})
             eval_summary.append({'domain': domain, 'ndcg10': metrics.get('ndcg_cut_10', 0)})
         

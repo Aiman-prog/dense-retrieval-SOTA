@@ -86,8 +86,11 @@ class BRIGHTPreprocessor:
                                        dataset_name: str = "reasonir/reasonir-data",
                                        subset: str = "hq",
                                        cache_dir: Optional[str] = None,
-                                       filename: str = "train_reasonir.jsonl") -> str:
-        """Prepare ReasonIR training data. Automatically handles text extraction for VL."""
+                                       filename: str = "train_reasonir.jsonl",
+                                       limit: Optional[int] = None) -> str:
+        """
+        Prepare ReasonIR training data with an optional row limit.
+        """
         output_path = self.output_dir / filename
         cache = Path(cache_dir) if cache_dir else get_path("bright")
         
@@ -97,40 +100,46 @@ class BRIGHTPreprocessor:
         count = 0
         skipped = 0
         
+        # Open file in write mode
         with open(output_path, 'w', encoding='utf-8') as f:
             for entry in dataset['train']:
+                
+                # --- START OF LIMIT LOGIC ---
+                if limit is not None and count >= limit:
+                    break
+                # --- END OF LIMIT LOGIC ---
+
                 # 1. Query Extraction
                 query_seq = entry.get("query", [])
                 query_text = query_seq[-1] if isinstance(query_seq, list) else query_seq
                 
-                # 2. Restructured Unified Extraction Logic (No enumerate)
+                # 2. Extract Passages
                 passages = {"pos": [], "neg": []}
-                
                 for key in ["pos", "neg"]:
                     raw_list = entry.get(key, [])
                     for item in raw_list:
                         content_or_id = item[1] if isinstance(item, list) else item
                         
                         if subset == "hq" and key == "pos":
-                            # HQ Logic: Map ID to BRIGHT Text
+                            # HQ Mapping
                             if content_or_id in id2doc:
                                 passages[key].append({
                                     "docid": str(content_or_id), 
                                     "text": id2doc[content_or_id]
                                 })
                         else:
-                            # VL Logic: Use raw text directly, matching old ID style
+                            # VL direct content
                             passages[key].append({
                                 "docid": f"vl_{key}_{count}", 
                                 "text": str(content_or_id)
                             })
 
-                # 3. Validation: Tevatron MUST have at least one positive
-                # Replace your previous validation check with this:
+                # 3. Validation: Only save if we have both pos and neg
                 if not passages["pos"] or not passages["neg"]:
                     skipped += 1
                     continue
                 
+                # 4. Construct and Write Record
                 record = {
                     "query_id": f"reasonir_{subset}_{count}",
                     "query": query_text,
@@ -138,8 +147,11 @@ class BRIGHTPreprocessor:
                     "negative_passages": passages["neg"]
                 }
                 f.write(json.dumps(record, ensure_ascii=False) + '\n')
+                
+                # Update processed count
                 count += 1
-        print(f"✅ {subset.upper()} Complete! Processed: {count:,} | Skipped: {skipped:,}")
+                
+        print(f"✅ {subset.upper()} Complete! Saved: {count:,} | Skipped: {skipped:,}")
         return str(output_path)
 
 if __name__ == "__main__":
@@ -157,21 +169,23 @@ if __name__ == "__main__":
     mixture_dir = preprocessor.output_dir / "training_mixture"
     mixture_dir.mkdir(parents=True, exist_ok=True)
     
+    # 1. Define your target counts
+    target_counts = {
+        'hq': 100521,
+        'vl': 122000
+    }
+    
     for subset_type in ['hq', 'vl']:
         print("=" * 80)
-        print(f"🚀 Generating ReasonIR-{subset_type.upper()} Training Data")
-        print("=" * 80)
-        
-        reasonir_cfg = config['data']['reasonir']
-        
-        # Point the filename to the new subdirectory
+        # Point the filename to the correct directory
         filename = f"training_mixture/train_reasonir_{subset_type}.jsonl"
         
         train_file_path = preprocessor.prepare_reasonir_hq_train_data(
             id2doc=id2doc,
-            dataset_name=reasonir_cfg['name'],
+            dataset_name=config['data']['reasonir']['name'],
             subset=subset_type, 
-            filename=filename
+            filename=filename,
+            limit=target_counts[subset_type] # Use the specific limit for each subset
         )
         
         print(f"\n✅ {subset_type.upper()} Data generated: {train_file_path}")

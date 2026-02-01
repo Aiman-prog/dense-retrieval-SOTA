@@ -50,11 +50,11 @@ training:
   ance:
     base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_reasonir_Neg"
     model_name: "ance_reasonir_v1"
-    num_episodes: 3
-    mining_depth: 200
+    num_episodes: 3 #change to 3 once u know its working
+    mining_depth: 200 #change to 200 once u know its working
     learning_rate: 2e-6
-    batch_size: 64                # For training
-    per_device_eval_batch_size: 512 # For encoding (from your evaluate.py logic)
+    batch_size: 64                # For training, change to 64 for gpu-a100
+    per_device_eval_batch_size: 512  # For encoding (from your evaluate.py logic), change to 512 for  gpu-a100
     num_epochs: 1
     bf16: true
     train_group_size: 2
