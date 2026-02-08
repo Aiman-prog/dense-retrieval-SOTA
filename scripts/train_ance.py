@@ -104,7 +104,7 @@ def main():
                 '--per_device_eval_batch_size', str(ctx['args']['per_device_eval_batch_size']),
                 '--dataset_name', 'json', '--dataset_path', str(inp),
                 '--encode_output_path', str(outp), '--attn_implementation', 'eager',
-                '--dataloader_num_workers', '2'
+                '--dataloader_num_workers', str(ctx['args']['dataloader_num_workers'])
             ]
             if is_q:
                 q_len = str(config['model'].get('query_max_len', 128))
@@ -146,13 +146,13 @@ def main():
             '--dataset_name', 'json', '--dataset_path', str(mix_out / "*.jsonl"),
             '--corpus_path', str(corpus_file), '--per_device_train_batch_size', str(ctx['args']['batch_size']),
             '--train_group_size', str(ctx['args']['train_group_size']), '--learning_rate', str(ctx['args']['learning_rate']),
-            '--num_train_epochs', '1', '--bf16', 'True', '--dtype', 'bfloat16',
-            '--gradient_checkpointing', 'True', 
+            '--num_train_epochs', str(ctx['args']['num_epochs']), '--bf16', 'True', '--dtype', 'bfloat16',
+            '--gradient_checkpointing', str(ctx['args']['gradient_checkpointing']),
             '--overwrite_output_dir', 'True',   # Clears "toxic" old settings
-            '--save_strategy', 'no',            # Stops 100GB checkpoint spike
-            '--save_total_limit', '1',          # Safety: only keep 1 model copy
+            '--save_strategy', ctx['args']['save_strategy'],            # Stops 100GB checkpoint spike
+            '--save_total_limit', str(ctx['args']['save_total_limit']),          # Safety: only keep 1 model copy
             '--ignore_data_skip', 'True',       # Forces batch size 64 (resets counter)
-            '--attn_implementation', 'eager', '--optim', 'adamw_torch_fused', '--logging_steps', '100'
+            '--attn_implementation', 'eager', '--optim', 'adamw_torch_fused', '--logging_steps', str(ctx['args']['logging_steps'])
         ]
         sys.argv = ['train.py'] + training_args
         tevatron_train_main()
@@ -177,7 +177,8 @@ def main():
             with open(d_eval/"c.pkl", 'rb') as f: dc = pickle.load(f)
             with open(d_eval/"q.pkl", 'rb') as f: dq = pickle.load(f)
             idx_e = faiss.IndexFlatIP(dc[0].shape[1]); idx_e.add(dc[0].astype(np.float32))
-            s_e, i_e = idx_e.search(dq[0].astype(np.float32), 10)
+            eval_top_k = ctx['args'].get('eval_top_k', 10)
+            s_e, i_e = idx_e.search(dq[0].astype(np.float32), eval_top_k)
             
             results = {str(dq[1][j]): {str(dc[1][i_e[j][k]]): float(s_e[j][k]) for k in range(len(i_e[j])) if i_e[j][k] >= 0} for j in range(len(dq[1]))}
             eval_qrels_data = []

@@ -24,11 +24,11 @@ def main():
         sys.exit(1)
 
     # 2. Argument Construction
-    # RocketQA uses massive batch sizes (up to 4096). [cite: 237]
+    # RocketQA uses massive batch sizes (up to 4096).
     # A100 PRODUCTION MODE: 64 per device * 2 GPUs * 16 steps = 2048 Virtual Batch
-    per_device_batch = 64
-    acc_steps = 16
-    chunk_size = 16  # A100s have 80GB VRAM - larger chunks
+    per_device_batch = recipe['per_device_batch_size']
+    acc_steps = recipe['gradient_accumulation_steps']
+    chunk_size = recipe['gc_q_chunk_size']  # A100s have 80GB VRAM - larger chunks
 
     args_list = [
         '--output_dir', str(ctx['output_dir']),
@@ -55,15 +55,15 @@ def main():
         # Core Hyperparameters [cite: 244, 245]
         '--learning_rate', str(recipe['learning_rate']),
         '--num_train_epochs', str(recipe['num_epochs']),
-        '--train_group_size', '1',       # 1 positive + in-batch negatives [cite: 39, 40]
+        '--train_group_size', str(recipe['train_group_size']),       # 1 positive + in-batch negatives
         '--query_max_len', str(ctx['max_q']),
         '--passage_max_len', str(ctx['max_p']),
 
         # Stability & Debugging
-        '--max_grad_norm', '1.0',        # Prevent gradient explosion → NaN/Inf → SIGFPE
-        '--logging_steps', '10',
+        '--max_grad_norm', str(recipe['max_grad_norm']),        # Prevent gradient explosion → NaN/Inf → SIGFPE
+        '--logging_steps', str(recipe['logging_steps']),
         '--overwrite_output_dir', 'True',
-        '--dataloader_num_workers', '4',  # A100 production mode
+        '--dataloader_num_workers', str(recipe['dataloader_num_workers']),  # A100 production mode
     ]
 
     sys.argv = ['train.py'] + args_list

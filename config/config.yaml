@@ -30,7 +30,7 @@ data:
 training:
   logging_steps: 100
   overwrite_output_dir: true
-  dataloader_num_workers: 4
+  dataloader_num_workers: 2
   inbatch:
     model_name: "inbatch_reasonir_Neg"
     batch_size: 64
@@ -40,13 +40,20 @@ training:
     bf16: true
   crossbatch:
     model_name: "reasonir_hq_2048_v100"
-    batch_size: 128
+    batch_size: 16
     target_batch_size: 2048
+    per_device_batch_size: 64
+    gradient_accumulation_steps: 16
+    gc_q_chunk_size: 16
+    gc_p_chunk_size: 16
     learning_rate: 1e-5
-    num_epochs: 1
+    num_epochs: 2
     train_group_size: 1
     grad_cache: true
     bf16: true
+    max_grad_norm: 1.0
+    logging_steps: 10
+    dataloader_num_workers: 4
   ance:
     base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_reasonir_Neg"
     model_name: "ance_reasonir_v1"
@@ -58,6 +65,12 @@ training:
     num_epochs: 1
     bf16: true
     train_group_size: 2
+    dataloader_num_workers: 2
+    gradient_checkpointing: true
+    save_strategy: "no"
+    save_total_limit: 1
+    logging_steps: 100
+    eval_top_k: 10
 
 
 # --- Evaluation Settings (Restored & Cleaned) ---

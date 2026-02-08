@@ -31,7 +31,7 @@ dependencies:
     # Tevatron additional dependencies
     - peft  # Parameter-Efficient Fine-Tuning (required by Tevatron)
     - deepspeed  # Optional but recommended for distributed training
-    
+
     # Dense Retrieval Tools
     - faiss-gpu>=1.7.0  # Pip wheels for FAISS are stable now
     - pyserini>=0.22.0
