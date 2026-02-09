@@ -9,13 +9,7 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.append(str(project_root / 'src'))
 
-from utils.helpers import load_config
-
-def get_data_base_dir() -> str:
-    if 'DATA_BASE_DIR' in os.environ:
-        return os.environ['DATA_BASE_DIR']
-    user = os.environ.get('USER', os.environ.get('USERNAME', 'user'))
-    return f'/scratch/{user}/dense-retrieval-SOTA'
+from utils.helpers import load_config, get_data_base_dir
 
 def main():
     # 1. Setup Paths
