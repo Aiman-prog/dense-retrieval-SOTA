@@ -80,6 +80,30 @@ Edit `config/config.yaml` to adjust:
 - **Tevatron**: Patched version from commit `8f31cd8`
 - **Data**: BRIGHT benchmark + ReasonIR training data
 
+## Clean Reset (DelftBlue)
+
+If setup breaks or you want to start fresh, run these commands to wipe everything and re-run `setup.sh`:
+
+```bash
+# Remove all user-installed Python packages (tevatron, transformers, etc.)
+rm -rf ~/.local/lib/python3.10/site-packages/*
+
+# Remove the Singularity container (will be re-downloaded by setup.sh)
+rm -f /scratch/${USER}/containers/pytorch_2.1.sif
+
+# Remove downloaded models and processed data
+rm -rf /scratch/${USER}/dense-retrieval-SOTA/data
+
+# Then re-run setup
+./setup.sh
+```
+
+To only reset Python packages (most common fix):
+```bash
+rm -rf ~/.local/lib/python3.10/site-packages/*
+./setup.sh
+```
+
 ## Notes
 
 - All scratch paths resolve via `DATA_BASE_DIR` environment variable

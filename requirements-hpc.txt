@@ -1,0 +1,20 @@
+# ============================================================================
+# Requirements for HPC (DelftBlue) Singularity Container
+# ============================================================================
+# These are installed INTO ~/.local via: pip install --user -r requirements-hpc.txt
+# The container already provides: torch==2.1.0, numpy, tqdm
+# Tevatron & GradCache are installed separately (from tarballs, no git needed)
+#
+# IMPORTANT: All versions are pinned for PyTorch 2.1.0 compatibility.
+# Newer versions of transformers/accelerate/peft use PyTorch 2.2+ APIs.
+# ============================================================================
+
+# --- Core ML Libraries (pinned for PyTorch 2.1 compatibility) ---
+transformers==4.40.2           # Last version fully compatible with PyTorch 2.1
+accelerate==0.30.1             # 0.31+ uses PyTorch 2.2+ pytree APIs
+datasets==2.19.2
+safetensors==0.4.3
+peft==0.10.0                   # Parameter-efficient fine-tuning
+
+# --- Utilities ---
+pyyaml>=6.0

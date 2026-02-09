@@ -48,22 +48,27 @@ else
     echo "📥 Attempting to pull PyTorch 2.1 container from Docker Hub..."
     echo "This may take 10-15 minutes..."
 
-    # Try to pull from Docker Hub
-    if ${CONTAINER_CMD} pull --dir "${CONTAINER_DIR}" docker://pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime; then
-        # Rename to expected name
-        mv "${CONTAINER_DIR}/pytorch_pytorch_2.1.0-cuda11.8-cudnn8-runtime.sif" "${CONTAINER}" 2>/dev/null || true
+    # Try to pull from Docker Hub (pull directly to target path)
+    if ${CONTAINER_CMD} pull "${CONTAINER}" docker://pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime; then
         echo "✅ Container downloaded successfully"
     else
         echo "❌ Failed to download container automatically"
         echo ""
         echo "Please manually download the container:"
-        echo "  singularity pull --dir ${CONTAINER_DIR} docker://pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime"
-        echo "  mv ${CONTAINER_DIR}/pytorch_pytorch_2.1.0-cuda11.8-cudnn8-runtime.sif ${CONTAINER}"
+        echo "  ${CONTAINER_CMD} pull ${CONTAINER} docker://pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime"
         echo ""
         echo "Or if you have the container elsewhere, copy/symlink it to:"
         echo "  ${CONTAINER}"
         exit 1
     fi
+fi
+
+# Final container verification
+if [ ! -f "${CONTAINER}" ]; then
+    echo "❌ Error: Container not found at ${CONTAINER} after setup"
+    echo "Please download it manually:"
+    echo "  ${CONTAINER_CMD} pull ${CONTAINER} docker://pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime"
+    exit 1
 fi
 echo ""
 
@@ -71,13 +76,16 @@ echo ""
 echo "📚 Installing Tevatron..."
 export PYTHONPATH="${HOME}/dense-retrieval-SOTA/src:${PYTHONPATH}"
 
-# Check if already installed
-if ${CONTAINER_CMD} exec "${CONTAINER}" python -c "import tevatron" 2>/dev/null; then
-    echo "⚠️  Tevatron already installed, reinstalling to ensure correct version..."
-fi
+# Install dependencies from requirements-hpc.txt (pinned for container's PyTorch 2.1)
+${CONTAINER_CMD} exec "${CONTAINER}" \
+    pip install --user -r requirements-hpc.txt
+
+# Install tevatron and GradCache from tarballs (no git required in container)
+${CONTAINER_CMD} exec "${CONTAINER}" \
+    pip install --user --no-deps https://github.com/texttron/tevatron/archive/8f31cd8.tar.gz
 
 ${CONTAINER_CMD} exec "${CONTAINER}" \
-    pip install --user --force-reinstall git+https://github.com/texttron/tevatron.git@8f31cd8
+    pip install --user --no-deps https://github.com/luyug/GradCache/archive/main.tar.gz
 
 if ${CONTAINER_CMD} exec "${CONTAINER}" python -c "import tevatron" 2>/dev/null; then
     echo "✅ Tevatron installed successfully"
