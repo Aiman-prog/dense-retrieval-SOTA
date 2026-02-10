@@ -44,8 +44,6 @@ def main():
     
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=str, help="Path to model")
-    parser.add_argument("--batch_size", type=str, default="128")
-    parser.add_argument("--k", type=str, default=str(config['evaluation'].get('top_k', 1000)))
     args = parser.parse_args()
 
     # 1. Resolve Model Path
@@ -82,8 +80,6 @@ def main():
             sys.executable, str(eval_script),
             "--model_path", str(model_path),
             "--domain", domain,
-            "--k", args.k,
-            "--batch_size", args.batch_size
         ]
         
         try:

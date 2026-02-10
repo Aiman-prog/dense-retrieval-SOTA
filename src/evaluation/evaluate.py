@@ -32,9 +32,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=str, required=True)
     parser.add_argument("--domain", type=str, default="biology")
-    parser.add_argument("--k", type=int, default=config['evaluation'].get('top_k', 1000))
-    parser.add_argument("--batch_size", type=int, default=128)
     args = parser.parse_args()
+
+    # Read k and batch_size from config.yaml
+    args.k = config['evaluation'].get('top_k', 1000)
+    args.batch_size = config['evaluation'].get('batch_size', 128)
 
     # --- HARDWARE DIAGNOSTIC ---
     # Kept this so you can verify the environment in the .out log

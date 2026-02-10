@@ -94,5 +94,6 @@ evaluation:
     - "NDCG@10"
     - "Recall@1000"
   top_k: 1000
+  batch_size: 128
   trec_eval_path: "trec_eval"
   bf16: False

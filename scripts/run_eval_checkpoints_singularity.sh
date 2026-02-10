@@ -2,11 +2,11 @@
 
 #SBATCH --job-name=eval-checkpoints
 #SBATCH --partition=gpu-a100-small
-#SBATCH --time=12:00:00
+#SBATCH --time=04:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
 #SBATCH --gpus-per-task=1
-#SBATCH --mem-per-cpu=8000M
+#SBATCH --mem-per-cpu=5000M
 #SBATCH --account=Education-EEMCS-MSc-DSAIT
 #SBATCH --output=logs/eval_ckpts_%j.out
 #SBATCH --error=logs/eval_ckpts_%j.err
