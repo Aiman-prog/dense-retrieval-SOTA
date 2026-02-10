@@ -27,24 +27,21 @@ CONTAINER="/scratch/${USER}/containers/pytorch_2.1.sif"
 
 # --- CONFIGURATION ---
 MODEL_PATH="/scratch/${USER}/dense-retrieval-SOTA/models/reasonir_hq_2048_v100"
-K=10
-BATCH_SIZE=128  # A100-small can handle larger batch for encoding
 
 # --- Create output directories ---
 mkdir -p logs
 
 # --- Run Evaluation in Container ---
+# K and batch_size are read from config/config.yaml by the Python scripts
 echo "🔍 Starting evaluation for model: ${MODEL_PATH}"
-echo "📊 Evaluating on all BRIGHT domains with k=${K}, batch_size=${BATCH_SIZE}"
+echo "📊 Evaluating on all BRIGHT domains (settings from config.yaml)"
 
 singularity exec --nv \
     --bind /scratch/${USER}:/scratch/${USER} \
     --bind /home/${USER}:/home/${USER} \
     ${CONTAINER} \
     python -u scripts/run_all_evals.py \
-        --model_path "${MODEL_PATH}" \
-        --k "${K}" \
-        --batch_size "${BATCH_SIZE}"
+        --model_path "${MODEL_PATH}"
 
 EXIT_CODE=$?
 

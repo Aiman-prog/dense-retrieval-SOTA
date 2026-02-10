@@ -7,7 +7,7 @@
 
 # --- Core Deep Learning ---
 torch==2.1.0  # Match container: pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime
-transformers>=4.36.0  # REQUIRED: peft needs Cache class from 4.36.0+
+transformers>=4.36.0,<5  # REQUIRED: peft needs Cache class from 4.36.0+; <5 because v5 requires PyTorch>=2.4
 sentence-transformers>=2.2.0,<3.0.0
 datasets>=2.14.0,<3.0.0
 accelerate>=0.25.0  # REQUIRED: Tevatron needs clear_device_cache from 0.25.0+

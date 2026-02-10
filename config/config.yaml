@@ -30,14 +30,15 @@ data:
 training:
   logging_steps: 100
   overwrite_output_dir: true
-  dataloader_num_workers: 2
+  dataloader_num_workers: 4
   inbatch:
-    model_name: "inbatch_reasonir_Neg"
+    model_name: "inbatch_reasonir_neg"
     batch_size: 64
     learning_rate: 1e-5
-    num_epochs: 1
+    num_epochs: 2
     train_group_size: 2
-    bf16: true
+    bf16: True
+    dataloader_num_workers: 4
   crossbatch:
     model_name: "reasonir_hq_2048_v100"
     batch_size: 16
@@ -62,7 +63,7 @@ training:
     learning_rate: 2e-6
     batch_size: 64                # For training, change to 64 for gpu-a100
     per_device_eval_batch_size: 512  # For encoding (from your evaluate.py logic), change to 512 for  gpu-a100
-    num_epochs: 1
+    num_epochs: 2
     bf16: true
     train_group_size: 2
     dataloader_num_workers: 2
@@ -91,7 +92,7 @@ evaluation:
   metrics:
     - "MRR"
     - "NDCG@10"
-    - "Recall@10"
-  top_k: 10
+    - "Recall@1000"
+  top_k: 1000
   trec_eval_path: "trec_eval"
   bf16: False

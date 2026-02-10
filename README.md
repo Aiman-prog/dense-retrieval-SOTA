@@ -24,7 +24,7 @@ singularity exec --nv \
 singularity exec --nv \
     --bind /scratch/${USER}:/scratch/${USER} \
     /scratch/${USER}/containers/pytorch_2.1.sif \
-    python scripts/preprocessor.py
+    python src/data/preprocessor.py
 
 # 4. Submit training jobs
 sbatch scripts/run_inbatch_singularity.sh      # In-batch baseline
@@ -33,6 +33,18 @@ sbatch scripts/run_ance_singularity.sh         # ANCE iterative
 
 # 5. Evaluate trained models
 sbatch scripts/run_evaluate_singularity.sh
+
+# 6. Evaluate all checkpoints (0%-100% training progress)
+sbatch scripts/run_eval_checkpoints_singularity.sh
+
+# 7. Plot Recall@1000 curve (run locally, no GPU needed)
+python scripts/plot_recall_curve.py \
+    --results_file results/inbatch_reasonir_neg/checkpoint_results.json
+
+# Plot all 3 metrics (MRR, NDCG@10, Recall@1000)
+python scripts/plot_recall_curve.py \
+    --results_file results/inbatch_reasonir_neg/checkpoint_results.json \
+    --metrics recall_1000 ndcg_cut_10 recip_rank
 ```
 
 ## Project Structure

@@ -98,44 +98,25 @@ echo ""
 # --- Step 5: Apply Tevatron patches ---
 echo "🔧 Applying Tevatron patches..."
 
+# Define the location of the installed Tevatron package
 TEVATRON_BASE="${HOME}/.local/lib/python3.10/site-packages/tevatron"
 
-# Patch 1: Comment out Qwen import in dense.py (line 3)
-echo "  → Patch 1/4: Removing Qwen import from dense.py..."
-DENSE_FILE="${TEVATRON_BASE}/retriever/modeling/dense.py"
-if [ -f "${DENSE_FILE}" ]; then
-    sed -i.bak '3s/^from transformers import Qwen2_5OmniThinkerForConditionalGeneration/# from transformers import Qwen2_5OmniThinkerForConditionalGeneration/' "${DENSE_FILE}"
-    echo "    ✅ Line 3 patched"
+# Patch 1: Run the external patch script
+echo "  → Patch 1/3: Running patch_tevatron.py script..."
+if [ -f "scripts/patch_tevatron.py" ]; then
+    ${CONTAINER_CMD} exec "${CONTAINER}" python3 scripts/patch_tevatron.py "${TEVATRON_BASE}"
 else
-    echo "    ⚠️  File not found: ${DENSE_FILE}"
+    echo "  ❌ Error: scripts/patch_tevatron.py not found!"
+    exit 1
 fi
 
-# Patch 2: Comment out Qwen assignment in dense.py (line 43)
-echo "  → Patch 2/4: Removing Qwen class assignment from dense.py..."
-if [ -f "${DENSE_FILE}" ]; then
-    sed -i.bak '43s/^TRANSFORMER_CLS = Qwen2_5OmniThinkerForConditionalGeneration/# TRANSFORMER_CLS = Qwen2_5OmniThinkerForConditionalGeneration/' "${DENSE_FILE}"
-    echo "    ✅ Line 43 patched"
-fi
-
-# Patch 3: Remove MultiModalDenseModel from __init__.py
-echo "  → Patch 3/4: Removing MultiModalDenseModel export from __init__.py..."
-INIT_FILE="${TEVATRON_BASE}/retriever/modeling/__init__.py"
-if [ -f "${INIT_FILE}" ]; then
-    sed -i.bak 's/from \.dense import DenseModel, MultiModalDenseModel/from .dense import DenseModel/' "${INIT_FILE}"
-    echo "    ✅ __init__.py patched"
-else
-    echo "    ⚠️  File not found: ${INIT_FILE}"
-fi
-
-# Patch 4: Add torch import to train.py
-echo "  → Patch 4/4: Adding torch import to train.py..."
+# Patch 2: Add torch import to train.py
+echo "  → Patch 2/3: Adding torch import to train.py..."
 TRAIN_FILE="${TEVATRON_BASE}/retriever/driver/train.py"
 if [ -f "${TRAIN_FILE}" ]; then
-    # Check if torch is already imported
     if grep -q "^import torch" "${TRAIN_FILE}"; then
         echo "    ℹ️  torch already imported"
     else
-        # Add import torch at the beginning after shebang/comments
         sed -i.bak '1i\
 import torch
 ' "${TRAIN_FILE}"
@@ -145,19 +126,19 @@ else
     echo "    ⚠️  File not found: ${TRAIN_FILE}"
 fi
 
-echo "✅ All patches applied successfully"
 echo ""
 
 # --- Step 6: Verify patches ---
-echo "🔍 Verifying patches..."
+echo "  → Patch 3/3: Verifying all patches..."
 PATCH_OK=true
 
-# Check that Qwen import is commented
-if grep -q "^# from transformers import Qwen2_5OmniThinkerForConditionalGeneration" "${DENSE_FILE}"; then
-    echo "  ✅ Qwen import commented"
-else
-    echo "  ❌ Qwen import not properly commented"
+# Check that NO active Qwen/multimodal references remain
+REMAINING=$(grep -r --include="*.py" -l "qwen_omni_utils\|Qwen2_5Omni\|MultiModalDenseModel\|encoder\.visual" "${TEVATRON_BASE}" 2>/dev/null | xargs grep -v "^#" 2>/dev/null | grep -c "qwen_omni_utils\|Qwen2_5Omni\|MultiModalDenseModel\|encoder\.visual" 2>/dev/null || echo 0)
+if [ "$REMAINING" -gt 0 ]; then
+    echo "  ❌ ${REMAINING} uncommented Qwen/multimodal references still found"
     PATCH_OK=false
+else
+    echo "  ✅ All Qwen/multimodal references removed"
 fi
 
 # Check that torch is imported
@@ -195,7 +176,7 @@ echo "   singularity exec --nv \\"
 echo "       --bind /scratch/\${USER}:/scratch/\${USER} \\"
 echo "       --bind /home/\${USER}:/home/\${USER} \\"
 echo "       ${CONTAINER} \\"
-echo "       python scripts/preprocessor.py"
+echo "       python src/data/preprocessor.py"
 echo ""
 echo "3️⃣  Submit training jobs:"
 echo "   sbatch scripts/run_inbatch_singularity.sh      # In-batch baseline"

@@ -46,7 +46,7 @@ class TrecEvalWrapper:
 
     def evaluate(self, 
                  run_results: Dict[str, Dict[str, float]], 
-                 metrics={"ndcg_cut_10", "recall_10", "recip_rank"}) -> Dict[str, float]:
+                 metrics={"ndcg_cut_10", "recall_1000", "recip_rank"}) -> Dict[str, float]:
         """
         Calculate metrics for the given run results.
         

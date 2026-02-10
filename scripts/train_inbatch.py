@@ -7,6 +7,8 @@ MODIFIED: Now uses the training_mixture directory for data.
 import sys
 import os
 import logging
+import math
+import glob as glob_module
 from pathlib import Path
 
 # Add src to path so we can import project utils
@@ -37,6 +39,18 @@ def main():
         print(f"❌ ERROR: Training mixture directory not found: {mixture_dir}")
         sys.exit(1)
 
+    # --- Count training examples and calculate checkpoint intervals ---
+    jsonl_files = glob_module.glob(training_data_path)
+    num_examples = 0
+    for f in jsonl_files:
+        with open(f) as fh:
+            num_examples += sum(1 for _ in fh)
+
+    batch_size = ctx['args']['batch_size']
+    num_epochs = ctx['args']['num_epochs']
+    total_steps = math.ceil(num_examples / batch_size) * num_epochs
+    save_steps = max(1, total_steps // 5)  # Save at 20% intervals
+
     # --- CONFIG PARAMETER PRINTS ---
     print("\n" + "="*40)
     print("🛠️  VERIFYING CONFIGURATION PARAMETERS")
@@ -45,6 +59,8 @@ def main():
     print(f"▶️  Learning Rate:      {ctx['args'].get('learning_rate')}")
     print(f"▶️  Num Epochs:         {ctx['args'].get('num_epochs')}")
     print(f"📂 Training Data:      {training_data_path}")
+    print(f"📊 Training examples:  {num_examples}")
+    print(f"📊 Total steps:        {total_steps}, saving every {save_steps} steps")
     print("="*40 + "\n")
     
     # 2. Map YAML/Context to Tevatron Arguments
@@ -61,14 +77,16 @@ def main():
         '--train_group_size', str(ctx['args']['train_group_size']),
         '--query_max_len', str(ctx['max_q']),
         '--passage_max_len', str(ctx['max_p']),
-        '--bf16', 'True',
-        # ADD THIS LINE BELOW to force the model weights to BF16 on load
+        '--bf16', str(ctx['args']['bf16']),
+        '--fp16', 'False',
         '--dtype', 'bfloat16' if ctx['args']['bf16'] else 'float32',
         '--logging_steps', '100',
         '--overwrite_output_dir', 'True',
+        '--save_strategy', 'steps',
+        '--save_steps', str(save_steps),
+        '--save_total_limit', '6',
         '--attn_implementation', 'eager',
-
-        '--gradient_checkpointing', 'True',  # Stops OOM by recomputing activations
+        '--dataloader_num_workers', str(ctx['args']['dataloader_num_workers']),
         '--optim', 'adamw_torch_fused',       # Uses more efficient GPU kernels
     ]
 

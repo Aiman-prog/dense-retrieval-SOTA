@@ -136,12 +136,25 @@ def main():
 
     eval_qrels = pd.read_csv(qrels_file, sep=' ', names=['query_id', 'ignore', 'doc_id', 'relevance'], dtype=str)
     evaluator = TrecEvalWrapper(eval_qrels)
-    metrics = evaluator.evaluate(run_results, {'recip_rank', 'ndcg_cut_10', 'recall_10'})
-    
+    metrics = evaluator.evaluate(run_results, {'recip_rank', 'ndcg_cut_10', 'recall_1000'})
+
     print(f"\nFINAL RESULTS: {args.domain}\n" + "*"*40, flush=True)
-    print(f"MRR:       {metrics.get('recip_rank', 0):.4f}", flush=True)
-    print(f"NDCG@10:   {metrics.get('ndcg_cut_10', 0):.4f}", flush=True)
-    print(f"Recall@10: {metrics.get('recall_10', 0):.4f}\n" + "*"*40, flush=True)
+    print(f"MRR:        {metrics.get('recip_rank', 0):.4f}", flush=True)
+    print(f"NDCG@10:    {metrics.get('ndcg_cut_10', 0):.4f}", flush=True)
+    print(f"Recall@1000: {metrics.get('recall_1000', 0):.4f}\n" + "*"*40, flush=True)
+
+    # Save results to JSON for downstream aggregation
+    results_base = base_dir / config['paths']['results_dir']
+    results_base.mkdir(parents=True, exist_ok=True)
+    result_file = results_base / f"{args.domain}_results.json"
+    result_data = {
+        "domain": args.domain,
+        "model_path": args.model_path,
+        "metrics": metrics
+    }
+    with open(result_file, 'w') as f:
+        json.dump(result_data, f, indent=2)
+    print(f"📄 Results saved to: {result_file}", flush=True)
 
 if __name__ == "__main__":
     main()
