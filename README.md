@@ -37,14 +37,20 @@ sbatch scripts/run_evaluate_singularity.sh
 # 6. Evaluate all checkpoints (0%-100% training progress)
 sbatch scripts/run_eval_checkpoints_singularity.sh
 
-# 7. Plot Recall@1000 curve (run locally, no GPU needed)
-python scripts/plot_recall_curve.py \
-    --results_file results/inbatch_reasonir_neg/checkpoint_results.json
+# 7. Plot Recall@1000 curve (no GPU needed)
+singularity exec \
+    --bind /scratch/${USER}:/scratch/${USER} \
+    /scratch/${USER}/containers/pytorch_2.1.sif \
+    python scripts/plot_recall_curve.py \
+        --results_file /scratch/${USER}/dense-retrieval-SOTA/results/bright_benchmark/inbatch_reasonir_neg/checkpoint_results.json
 
 # Plot all 3 metrics (MRR, NDCG@10, Recall@1000)
-python scripts/plot_recall_curve.py \
-    --results_file results/inbatch_reasonir_neg/checkpoint_results.json \
-    --metrics recall_1000 ndcg_cut_10 recip_rank
+singularity exec \
+    --bind /scratch/${USER}:/scratch/${USER} \
+    /scratch/${USER}/containers/pytorch_2.1.sif \
+    python scripts/plot_recall_curve.py \
+        --results_file /scratch/${USER}/dense-retrieval-SOTA/results/bright_benchmark/inbatch_reasonir_neg/checkpoint_results.json \
+        --metrics recall_1000 ndcg_cut_10 recip_rank
 ```
 
 ## Project Structure

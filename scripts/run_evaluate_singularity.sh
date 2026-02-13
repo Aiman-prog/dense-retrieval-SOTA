@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 
 #SBATCH --job-name=eval-reasonir
-#SBATCH --partition=gpu-a100-small
-#SBATCH --time=04:00:00
+#SBATCH --partition=gpu-a100
+#SBATCH --time=03:00:00
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=2
+#SBATCH --cpus-per-task=4
 #SBATCH --gpus-per-task=1
 #SBATCH --mem-per-cpu=8000M
 #SBATCH --account=Education-EEMCS-MSc-DSAIT
-#SBATCH --output=logs/eval_%j.out
-#SBATCH --error=logs/eval_%j.err
+#SBATCH --output=logs/eval_bge_%j.out
+#SBATCH --error=logs/eval_bge_%j.err
 #SBATCH --chdir=/home/aimanabdulwaha/dense-retrieval-SOTA
 
 # --- Environment Setup ---
@@ -26,7 +26,7 @@ export TRANSFORMERS_OFFLINE=1
 CONTAINER="/scratch/${USER}/containers/pytorch_2.1.sif"
 
 # --- CONFIGURATION ---
-MODEL_PATH="/scratch/${USER}/dense-retrieval-SOTA/models/reasonir_hq_2048_v100"
+MODEL_PATH="/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/crossbatch_bge"
 
 # --- Create output directories ---
 mkdir -p logs

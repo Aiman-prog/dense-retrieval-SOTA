@@ -2,14 +2,14 @@
 
 #SBATCH --job-name=inbatch-reasonir
 #SBATCH --partition=gpu-a100
-#SBATCH --time=04:00:00
+#SBATCH --time=03:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --gpus-per-task=1
 #SBATCH --mem-per-cpu=8000M
 #SBATCH --account=Education-EEMCS-MSc-DSAIT
-#SBATCH --output=logs/inbatch_neg_%j.out
-#SBATCH --error=logs/inbatch_neg_%j.err
+#SBATCH --output=logs/inbatch_pos_%j.out
+#SBATCH --error=logs/inbatch_pos_%j.err
 #SBATCH --chdir=/home/aimanabdulwaha/dense-retrieval-SOTA
 
 # --- Environment Setup ---

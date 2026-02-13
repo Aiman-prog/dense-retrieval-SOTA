@@ -13,9 +13,6 @@ paths:
   bright_cache: "data/bright"
   models_dir: "models"
   results_dir: "results/bright_benchmark"
-  
-  # Static Filenames
-  train_file: "train_reasonir.jsonl"  # Created by your preprocessor
 
 # --- Data Sources ---
 data:
@@ -27,6 +24,14 @@ data:
     name: "reasonir/reasonir-data"
     subset: "hq"
     train_file: "train_reasonir.jsonl"
+  mixed_training:
+    train_file: "train_mixed.jsonl"
+    msmarco_samples: 20000
+    vl_samples: 200000
+    hq_samples: 50000
+  msmarco:
+    name: "sentence-transformers/msmarco-hard-negatives"
+    subset: "triplet"
 
 # --- Training Recipes ---
 training:
@@ -34,25 +39,25 @@ training:
   overwrite_output_dir: true
   dataloader_num_workers: 4
   inbatch:
-    model_name: "inbatch_reasonir_pos"
+    model_name: "inbatch_mixed_bge_large"
     batch_size: 64
-    learning_rate: 1e-5
-    num_epochs: 2
+    learning_rate: 5e-6  # Lower LR for BGE-large continued training
+    num_epochs: 3  # More epochs for better learning
     train_group_size: 1
     bf16: True
     dataloader_num_workers: 4
   crossbatch:
-    model_name: "crossbatch_bge"
+    model_name: "crossbatch_mixed_bge_large"
     batch_size: 16
     target_batch_size: 2048
     per_device_batch_size: 64
     gradient_accumulation_steps: 16
     gc_q_chunk_size: 16
     gc_p_chunk_size: 16
-    learning_rate: 2e-5
+    learning_rate: 1e-5  # Lower LR for BGE-large continued training
     warmup_ratio: 0.1
     weight_decay: 0.01
-    num_epochs: 2
+    num_epochs: 3  # More epochs for better learning
     train_group_size: 2
     grad_cache: true
     bf16: true
@@ -60,14 +65,14 @@ training:
     logging_steps: 10
     dataloader_num_workers: 4
   ance:
-    base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_reasonir_Neg"
-    model_name: "ance_reasonir_v1"
-    num_episodes: 3 #change to 3 once u know its working
-    mining_depth: 200 #change to 200 once u know its working
-    learning_rate: 2e-6
-    batch_size: 64                # For training, change to 64 for gpu-a100
-    per_device_eval_batch_size: 512  # For encoding (from your evaluate.py logic), change to 512 for  gpu-a100
-    num_epochs: 2
+    base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_mixed_bge_large"
+    model_name: "ance_mixed_bge_large"
+    num_episodes: 3
+    mining_depth: 200
+    learning_rate: 1e-6  # Lower LR for BGE-large continued training
+    batch_size: 64
+    per_device_eval_batch_size: 512
+    num_epochs: 3  # More epochs for better learning
     bf16: true
     train_group_size: 2
     dataloader_num_workers: 2

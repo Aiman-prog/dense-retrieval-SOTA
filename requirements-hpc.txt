@@ -16,5 +16,11 @@ datasets==2.19.2
 safetensors==0.4.3
 peft==0.10.0                   # Parameter-efficient fine-tuning
 
+# --- Vector Search & Evaluation ---
+faiss-gpu>=1.7.0                   # FAISS vector search (GPU, CUDA 11.8)
+pytrec-eval-terrier                # TREC evaluation metrics (MRR, NDCG, Recall)
+pandas>=2.0.0                      # Data manipulation (qrels, results, preprocessing)
+matplotlib>=3.7.0                  # Plotting (recall curves)
+
 # --- Utilities ---
 pyyaml>=6.0

@@ -29,7 +29,7 @@ def main():
     
     # --- PATH MODIFICATION: Resolve the mixture directory ---
     # We look for the folder named 'training_mixture' inside the data directory
-    processed_dir = Path(ctx['train_file']).parent.resolve()
+    processed_dir = Path(ctx['processed_dir'])
     mixture_dir = processed_dir / "training_mixture"
     
     # Glob pattern to load all HQ and VL files

@@ -14,7 +14,7 @@ def main():
     recipe = ctx['args'] 
     
     # Resolve the mixture directory path
-    processed_dir = Path(ctx['train_file']).parent.resolve()
+    processed_dir = Path(ctx['processed_dir'])
     mixture_dir = processed_dir / "training_mixture"
     training_data_path = str(mixture_dir / "*.jsonl")
 

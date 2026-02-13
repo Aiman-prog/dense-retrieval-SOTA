@@ -46,13 +46,26 @@ def main():
 
     try:
         from transformers import AutoTokenizer, AutoModel
+        from datasets import load_dataset
         
         print(f"📥 Downloading {model_name}...")
         # Note: No cache_dir= argument! We rely on os.environ['HF_HOME']
         AutoTokenizer.from_pretrained(model_name)
         AutoModel.from_pretrained(model_name)
         
-        print(f"✅ Download successful!")
+        print(f"✅ Model download successful!")
+
+        # Download MS MARCO dataset for training mixture
+        print("\n" + "=" * 80)
+        print("📥 Downloading MS MARCO dataset for training mixture...")
+        msmarco_config = config['data'].get('msmarco', {})
+        msmarco_name = msmarco_config.get('name', 'sentence-transformers/msmarco-hard-negatives')
+        msmarco_subset = msmarco_config.get('subset', 'triplet')
+        
+        print(f"Dataset: {msmarco_name}")
+        print(f"Subset: {msmarco_subset}")
+        load_dataset(msmarco_name, msmarco_subset, split='train', cache_dir=str(cache_dir))
+        print(f"✅ MS MARCO dataset downloaded!")
 
         # 4. VERIFICATION: Look for the specific Hub snapshots folder
         repo_id = model_name.replace("/", "--")
@@ -60,7 +73,7 @@ def main():
         
         if hub_path.exists() and any(hub_path.iterdir()):
             actual_snapshot = list(hub_path.iterdir())[0]
-            print(f"✨ SUCCESS: Hub structure created!")
+            print(f"\n✨ SUCCESS: Hub structure created!")
             print(f"📍 Snapshot Path: {actual_snapshot}")
         else:
             print(f"❌ ERROR: Hub structure still missing in {cache_dir}/hub")

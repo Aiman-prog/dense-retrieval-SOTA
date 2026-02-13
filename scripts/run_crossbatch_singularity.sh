@@ -2,15 +2,15 @@
 
 #SBATCH --job-name=rocketqa-a100-2048
 #SBATCH --partition=gpu-a100
-#SBATCH --time=01:00:00             # 3 hour full run
+#SBATCH --time=07:00:00             # cocodr-large + train_group_size=2 ~6h
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=2         # 2 GPUs (like V100 test)
-#SBATCH --cpus-per-task=2           # 2 CPUs per GPU (for 4 workers)
+#SBATCH --cpus-per-task=4          # 2 CPUs per GPU (for 4 workers)
 #SBATCH --gpus-per-task=1           # 2 GPUs total
-#SBATCH --mem-per-gpu=16G           # 16GB RAM per GPU
+#SBATCH --mem-per-gpu=16GB           # 16GB RAM per GPU
 #SBATCH --account=Education-EEMCS-MSc-DSAIT
-#SBATCH --output=logs/crossbatch_%j.out
-#SBATCH --error=logs/crossbatch_%j.err
+#SBATCH --output=logs/crossbatch_bge_%j.out
+#SBATCH --error=logs/crossbatch_bge_%j.err
 #SBATCH --chdir=/home/aimanabdulwaha/dense-retrieval-SOTA
 
 # --- Environment Setup ---

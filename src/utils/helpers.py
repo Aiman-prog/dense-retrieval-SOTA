@@ -45,7 +45,6 @@ def get_path(key: str, model_name: str = None) -> Path:
         "bright": base / p_cfg['bright_cache'],
         "models": base / p_cfg['models_dir'],
         "results": base / p_cfg['results_dir'],
-        "train_jsonl": base / p_cfg['processed_dir'] / p_cfg['train_file'],
         "temp_ance": base / "temp_ance_workdir"
     }
     
@@ -83,7 +82,7 @@ def get_training_context(training_type: str = "inbatch") -> Dict[str, Any]:
         "max_p": config['model']['passage_max_len'],
         "pooling": config['model'].get('pooling', 'cls'),
         "normalize": config['model'].get('normalize', False),
-        "train_file": get_path("train_jsonl"),
+        "processed_dir": get_path("processed"),
         "output_dir": get_path("models", recipe['model_name']),
         "cache_dir": str(get_path("bright").resolve())
     }
