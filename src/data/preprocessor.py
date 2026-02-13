@@ -81,77 +81,164 @@ class BRIGHTPreprocessor:
         print(f"Saved TREC qrels to {output_path}")
         return output_path
     
-    def prepare_reasonir_hq_train_data(self,
-                                       id2doc: Dict[str, str],
-                                       dataset_name: str = "reasonir/reasonir-data",
-                                       subset: str = "hq",
-                                       cache_dir: Optional[str] = None,
-                                       filename: str = "train_reasonir.jsonl",
-                                       limit: Optional[int] = None) -> str:
+    def prepare_hq_train_data(self,
+                              id2doc: Dict[str, str],
+                              dataset_name: str = "reasonir/reasonir-data",
+                              cache_dir: Optional[str] = None,
+                              filename: str = "train_hq.jsonl",
+                              limit: Optional[int] = None) -> str:
         """
-        Prepare ReasonIR training data with an optional row limit.
+        Prepare HQ (Hard Query) training data from ReasonIR.
+        Positive documents are BRIGHT doc IDs that need mapping via id2doc.
+        
+        Args:
+            id2doc: Dictionary mapping BRIGHT doc IDs to document text
+            dataset_name: HuggingFace dataset name
+            cache_dir: Cache directory for datasets
+            filename: Output filename
+            limit: Maximum number of samples to process
+        
+        Returns:
+            Path to the generated file
         """
         output_path = self.output_dir / filename
         cache = Path(cache_dir) if cache_dir else get_path("bright")
         
-        print(f"📥 Loading ReasonIR {subset.upper()} dataset...")
-        dataset = load_dataset(dataset_name, subset, cache_dir=str(cache))
+        print(f"📥 Loading ReasonIR HQ dataset...")
+        dataset = load_dataset(dataset_name, "hq", cache_dir=str(cache))
         
         count = 0
         skipped = 0
         
-        # Open file in write mode
         with open(output_path, 'w', encoding='utf-8') as f:
             for entry in dataset['train']:
-                
-                # --- START OF LIMIT LOGIC ---
                 if limit is not None and count >= limit:
                     break
-                # --- END OF LIMIT LOGIC ---
 
                 # 1. Query Extraction
                 query_seq = entry.get("query", [])
                 query_text = query_seq[-1] if isinstance(query_seq, list) else query_seq
                 
                 # 2. Extract Passages
-                passages = {"pos": [], "neg": []}
-                for key in ["pos", "neg"]:
-                    raw_list = entry.get(key, [])
-                    for item in raw_list:
-                        content_or_id = item[1] if isinstance(item, list) else item
-                        
-                        if subset == "hq" and key == "pos":
-                            # HQ Mapping
-                            if content_or_id in id2doc:
-                                passages[key].append({
-                                    "docid": str(content_or_id), 
-                                    "text": id2doc[content_or_id]
-                                })
-                        else:
-                            # VL direct content
-                            passages[key].append({
-                                "docid": f"vl_{key}_{count}", 
-                                "text": str(content_or_id)
-                            })
+                positive_passages = []
+                negative_passages = []
+                
+                # Process positive passages (need BRIGHT mapping)
+                for item in entry.get('pos', []):
+                    doc_id = item[1] if isinstance(item, list) else item
+                    if doc_id in id2doc:
+                        positive_passages.append({
+                            "docid": str(doc_id), 
+                            "text": id2doc[doc_id]
+                        })
+                
+                # Process negative passages (direct text)
+                for item in entry.get('neg', []):
+                    text = item[1] if isinstance(item, list) else item
+                    negative_passages.append({
+                        "docid": f"hq_neg_{count}", 
+                        "text": str(text)
+                    })
 
                 # 3. Validation: Only save if we have both pos and neg
-                if not passages["pos"] or not passages["neg"]:
+                if not positive_passages or not negative_passages:
                     skipped += 1
                     continue
                 
                 # 4. Construct and Write Record
                 record = {
-                    "query_id": f"reasonir_{subset}_{count}",
+                    "query_id": f"reasonir_hq_{count}",
                     "query": query_text,
-                    "positive_passages": passages["pos"],
-                    "negative_passages": passages["neg"]
+                    "positive_passages": positive_passages,
+                    "negative_passages": negative_passages
                 }
                 f.write(json.dumps(record, ensure_ascii=False) + '\n')
-                
-                # Update processed count
                 count += 1
                 
-        print(f"✅ {subset.upper()} Complete! Saved: {count:,} | Skipped: {skipped:,}")
+        print(f"✅ HQ Complete! Saved: {count:,} | Skipped: {skipped:,}")
+        return str(output_path)
+
+    def prepare_vl_train_data(self,
+                              dataset_name: str = "reasonir/reasonir-data",
+                              cache_dir: Optional[str] = None,
+                              filename: str = "train_vl.jsonl",
+                              limit: Optional[int] = None,
+                              skip_first_n: int = 95000) -> str:
+        """
+        Prepare VL (Varied-Length) training data from ReasonIR.
+        Documents are direct text (no BRIGHT mapping needed).
+        
+        Args:
+            dataset_name: HuggingFace dataset name
+            cache_dir: Cache directory for datasets
+            filename: Output filename
+            limit: Maximum number of samples to process
+            skip_first_n: Skip first N samples (default 95000 to avoid corrupted data)
+        
+        Returns:
+            Path to the generated file
+        """
+        output_path = self.output_dir / filename
+        cache = Path(cache_dir) if cache_dir else get_path("bright")
+        
+        print(f"📥 Loading ReasonIR VL dataset...")
+        if skip_first_n > 0:
+            print(f"   ⚠️  Skipping first {skip_first_n:,} corrupted samples...")
+        
+        dataset = load_dataset(dataset_name, "vl", cache_dir=str(cache))
+        
+        count = 0
+        skipped = 0
+        
+        with open(output_path, 'w', encoding='utf-8') as f:
+            for idx, entry in enumerate(dataset['train']):
+                # Skip corrupted samples
+                if idx < skip_first_n:
+                    continue
+                
+                if limit is not None and count >= limit:
+                    break
+
+                # 1. Query Extraction
+                query_seq = entry.get("query", [])
+                query_text = query_seq[-1] if isinstance(query_seq, list) else query_seq
+                
+                # 2. Extract Passages (all direct text for VL)
+                positive_passages = []
+                negative_passages = []
+                
+                # Process positive passages (direct text)
+                for item in entry.get('pos', []):
+                    text = item[1] if isinstance(item, list) else item
+                    positive_passages.append({
+                        "docid": f"vl_pos_{count}", 
+                        "text": str(text)
+                    })
+                
+                # Process negative passages (direct text)
+                for item in entry.get('neg', []):
+                    text = item[1] if isinstance(item, list) else item
+                    negative_passages.append({
+                        "docid": f"vl_neg_{count}", 
+                        "text": str(text)
+                    })
+
+                # 3. Validation: Only save if we have both pos and neg
+                if not positive_passages or not negative_passages:
+                    skipped += 1
+                    continue
+                
+                # 4. Construct and Write Record
+                record = {
+                    "query_id": f"reasonir_vl_{count}",
+                    "query": query_text,
+                    "positive_passages": positive_passages,
+                    "negative_passages": negative_passages
+                }
+                f.write(json.dumps(record, ensure_ascii=False) + '\n')
+                count += 1
+                
+        print(f"✅ VL Complete! Saved: {count:,} | Skipped: {skipped:,}")
         return str(output_path)
 
     def prepare_msmarco_train_data(self,
@@ -228,25 +315,23 @@ if __name__ == "__main__":
     
     # Generate VL
     print("\n[2/3] VL Data")
-    preprocessor.prepare_reasonir_hq_train_data(
-        id2doc=id2doc,
+    preprocessor.prepare_vl_train_data(
         dataset_name=config['data']['reasonir']['name'],
-        subset='vl',
         filename="training_mixture/train_vl.jsonl",
-        limit=mixed_config.get('vl_samples', 200000)
+        limit=mixed_config.get('vl_samples', 233000),
+        skip_first_n=95000  # Skip corrupted early samples
     )
     
     # Generate HQ
     print("\n[3/3] HQ Data")
-    preprocessor.prepare_reasonir_hq_train_data(
+    preprocessor.prepare_hq_train_data(
         id2doc=id2doc,
         dataset_name=config['data']['reasonir']['name'],
-        subset='hq',
         filename="training_mixture/train_hq.jsonl",
-        limit=mixed_config.get('hq_samples', 50000)
+        limit=mixed_config.get('hq_samples', 97000)
     )
     
-    total = mixed_config.get('msmarco_samples', 20000) + mixed_config.get('vl_samples', 200000) + mixed_config.get('hq_samples', 50000)
+    total = mixed_config.get('msmarco_samples', 20000) + mixed_config.get('vl_samples', 233000) + mixed_config.get('hq_samples', 97000)
     print(f"\n✅ Training data generated in: {mixture_dir}")
     print(f"   Total samples: ~{total:,} across 3 files")
     print(f"   Tevatron will load: {mixture_dir / '*.jsonl'}")
