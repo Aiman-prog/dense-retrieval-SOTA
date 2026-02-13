@@ -1,6 +1,8 @@
 # --- Global Model Settings ---
 model:
-  base_model: "sentence-transformers/msmarco-bert-base-dot-v5"
+  base_model: "BAAI/bge-large-en-v1.5"
+  pooling: "cls"
+  normalize: true
   query_max_len: 256
   passage_max_len: 512
 
@@ -32,24 +34,26 @@ training:
   overwrite_output_dir: true
   dataloader_num_workers: 4
   inbatch:
-    model_name: "inbatch_reasonir_neg"
+    model_name: "inbatch_reasonir_pos"
     batch_size: 64
     learning_rate: 1e-5
     num_epochs: 2
-    train_group_size: 2
+    train_group_size: 1
     bf16: True
     dataloader_num_workers: 4
   crossbatch:
-    model_name: "reasonir_hq_2048_v100"
+    model_name: "crossbatch_bge"
     batch_size: 16
     target_batch_size: 2048
     per_device_batch_size: 64
     gradient_accumulation_steps: 16
     gc_q_chunk_size: 16
     gc_p_chunk_size: 16
-    learning_rate: 1e-5
+    learning_rate: 2e-5
+    warmup_ratio: 0.1
+    weight_decay: 0.01
     num_epochs: 2
-    train_group_size: 1
+    train_group_size: 2
     grad_cache: true
     bf16: true
     max_grad_norm: 1.0
@@ -94,6 +98,7 @@ evaluation:
     - "NDCG@10"
     - "Recall@1000"
   top_k: 1000
-  batch_size: 128
+  batch_size: 512
   trec_eval_path: "trec_eval"
-  bf16: False
+  bf16: True
+  dataloader_num_workers: 4

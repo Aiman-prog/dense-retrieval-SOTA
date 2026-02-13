@@ -37,7 +37,8 @@ def main():
     # Read k and batch_size from config.yaml
     args.k = config['evaluation'].get('top_k', 1000)
     args.batch_size = config['evaluation'].get('batch_size', 128)
-
+    args.dataloader_num_workers = config['evaluation'].get('dataloader_num_workers', 4)
+    args.bf16 = config['evaluation'].get('bf16', True)
     # --- HARDWARE DIAGNOSTIC ---
     # Kept this so you can verify the environment in the .out log
     print("\n" + "="*40, flush=True)
@@ -66,27 +67,41 @@ def main():
     corpus_pkl = eval_dir / 'corpus_emb' / 'corpus.pkl'
     query_pkl = eval_dir / 'query_emb' / 'query.pkl'
 
+    # --- Detect LoRA checkpoint ---
+    is_lora = (Path(args.model_path) / "adapter_config.json").exists()
+    if is_lora:
+        from utils.helpers import get_training_context
+        ctx = get_training_context("crossbatch")
+        encode_model_path = ctx['base_model']
+        lora_adapter_path = args.model_path
+        print(f"🔗 LoRA adapter detected. Base model: {encode_model_path}", flush=True)
+    else:
+        encode_model_path = args.model_path
+        lora_adapter_path = None
+
     # --- STEP 1: ENCODE ---
     print(f"🚀 Step 1: Encoding with Tevatron Driver...", flush=True)
 
-    # FORCE THIS TO TRUE for A100 MIG slices to avoid Sgemm crashes
-    bf16_arg = "True" 
 
     for input_f, output_p, is_q in [(corpus_file, corpus_pkl, False), (queries_file, query_pkl, True)]:
         output_p.parent.mkdir(parents=True, exist_ok=True)
         cmd = [
             sys.executable, '-m', 'tevatron.retriever.driver.encode',
             '--output_dir', str(output_p.parent),
-            '--model_name_or_path', args.model_path,
-            '--bf16', bf16_arg,        # MUST BE TRUE
+            '--model_name_or_path', encode_model_path,
+            '--bf16', str(args.bf16),
             '--fp16', 'False',
             '--per_device_eval_batch_size', str(args.batch_size),
             '--dataset_name', 'json',
             '--dataset_path', str(input_f),
             '--encode_output_path', str(output_p),
             '--attn_implementation', 'eager',
-            '--dataloader_num_workers', '2' 
+            '--dataloader_num_workers', str(args.dataloader_num_workers),
+            '--pooling', config['model'].get('pooling', 'cls'),
+            '--normalize', str(config['model'].get('normalize', False)),
         ]
+        if lora_adapter_path:
+            cmd += ['--lora_name_or_path', lora_adapter_path]
         
         if is_q:
             q_len = str(config['model'].get('query_max_len', 128))

@@ -6,13 +6,12 @@ from tevatron.retriever.driver.train import main as tevatron_train_main
 # Setup pathing
 project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root / 'src'))
-from utils.helpers import get_training_context, load_config
+from utils.helpers import get_training_context
 
 def main():
     # 1. Configuration & Paths via Centralized Context
     ctx = get_training_context("crossbatch")
     recipe = ctx['args'] 
-    config_yaml = load_config()
     
     # Resolve the mixture directory path
     processed_dir = Path(ctx['train_file']).parent.resolve()
@@ -32,7 +31,7 @@ def main():
 
     args_list = [
         '--output_dir', str(ctx['output_dir']),
-        '--model_name_or_path', config_yaml['model']['base_model'],
+        '--model_name_or_path', ctx['base_model'],
         '--dataset_name', 'json',
         '--dataset_path', training_data_path,
         '--dataset_split', 'train',
@@ -63,8 +62,25 @@ def main():
         '--max_grad_norm', str(recipe['max_grad_norm']),        # Prevent gradient explosion → NaN/Inf → SIGFPE
         '--logging_steps', str(recipe['logging_steps']),
         '--overwrite_output_dir', 'True',
+        '--save_strategy', 'steps',
+        '--save_steps', '100',
+        '--save_total_limit', '3',
         '--dataloader_num_workers', str(recipe['dataloader_num_workers']),  # A100 production mode
+        '--pooling', ctx['pooling'],
+        '--normalize', str(ctx['normalize']),
+        '--warmup_ratio', str(recipe['warmup_ratio']),
+        '--weight_decay', str(recipe['weight_decay']),
     ]
+
+    # LoRA: freeze base model, only train adapter matrices
+    if recipe.get('lora', False):
+        args_list += [
+            '--lora', 'True',
+            '--lora_r', str(recipe.get('lora_r', 16)),
+            '--lora_alpha', str(recipe.get('lora_alpha', 32)),
+            '--lora_dropout', str(recipe.get('lora_dropout', 0.1)),
+            '--lora_target_modules', recipe.get('lora_target_modules', 'query,key,value'),
+        ]
 
     sys.argv = ['train.py'] + args_list
     tevatron_train_main()

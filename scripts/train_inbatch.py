@@ -88,6 +88,7 @@ def main():
         '--attn_implementation', 'eager',
         '--dataloader_num_workers', str(ctx['args']['dataloader_num_workers']),
         '--optim', 'adamw_torch_fused',       # Uses more efficient GPU kernels
+        '--pooling', ctx['pooling'],
     ]
 
     # 3. Inject Arguments into sys.argv

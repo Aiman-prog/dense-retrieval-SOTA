@@ -104,7 +104,8 @@ def main():
                 '--per_device_eval_batch_size', str(ctx['args']['per_device_eval_batch_size']),
                 '--dataset_name', 'json', '--dataset_path', str(inp),
                 '--encode_output_path', str(outp), '--attn_implementation', 'eager',
-                '--dataloader_num_workers', str(ctx['args']['dataloader_num_workers'])
+                '--dataloader_num_workers', str(ctx['args']['dataloader_num_workers']),
+                '--pooling', ctx['pooling'],
             ]
             if is_q:
                 q_len = str(config['model'].get('query_max_len', 128))
@@ -152,7 +153,8 @@ def main():
             '--save_strategy', ctx['args']['save_strategy'],            # Stops 100GB checkpoint spike
             '--save_total_limit', str(ctx['args']['save_total_limit']),          # Safety: only keep 1 model copy
             '--ignore_data_skip', 'True',       # Forces batch size 64 (resets counter)
-            '--attn_implementation', 'eager', '--optim', 'adamw_torch_fused', '--logging_steps', str(ctx['args']['logging_steps'])
+            '--attn_implementation', 'eager', '--optim', 'adamw_torch_fused', '--logging_steps', str(ctx['args']['logging_steps']),
+            '--pooling', ctx['pooling'],
         ]
         sys.argv = ['train.py'] + training_args
         tevatron_train_main()
@@ -168,7 +170,7 @@ def main():
             
             # Re-use Phase A encoding style with version fallback
             for inp, outp, is_q in [(d_corpus, d_eval/"c.pkl", False), (d_queries, d_eval/"q.pkl", True)]:
-                cmd_eval = [sys.executable, '-m', 'tevatron.retriever.driver.encode', '--output_dir', str(outp.parent), '--model_name_or_path', current_model_path, '--bf16', 'True', '--fp16', 'False', '--per_device_eval_batch_size', str(ctx['args']['per_device_eval_batch_size']), '--dataset_name', 'json', '--dataset_path', str(inp), '--encode_output_path', str(outp), '--attn_implementation', 'eager']
+                cmd_eval = [sys.executable, '-m', 'tevatron.retriever.driver.encode', '--output_dir', str(outp.parent), '--model_name_or_path', current_model_path, '--bf16', 'True', '--fp16', 'False', '--per_device_eval_batch_size', str(ctx['args']['per_device_eval_batch_size']), '--dataset_name', 'json', '--dataset_path', str(inp), '--encode_output_path', str(outp), '--attn_implementation', 'eager', '--pooling', ctx['pooling']]
                 if is_q:
                     try: subprocess.run(cmd_eval + ['--encode_is_query', '--query_max_len', q_len], check=True)
                     except subprocess.CalledProcessError: subprocess.run(cmd_eval + ['--encode_is_qry', '--q_max_len', q_len], check=True)

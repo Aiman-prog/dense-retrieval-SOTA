@@ -71,15 +71,18 @@ def get_training_context(training_type: str = "inbatch") -> Dict[str, Any]:
         if snapshots:
             # Sort to get the most recent or consistent one
             chosen_snapshot = sorted(snapshots)[-1]
-            # Check if config.json is actually there
-            if (chosen_snapshot / "config.json").exists():
+            # Check if config.json is there (exists() or is_symlink() for HF cache)
+            cfg = chosen_snapshot / "config.json"
+            if cfg.exists() or cfg.is_symlink():
                 final_base_model = str(chosen_snapshot)
 
     return {
-        "args": recipe, 
+        "args": recipe,
         "base_model": final_base_model,
         "max_q": config['model']['query_max_len'],
         "max_p": config['model']['passage_max_len'],
+        "pooling": config['model'].get('pooling', 'cls'),
+        "normalize": config['model'].get('normalize', False),
         "train_file": get_path("train_jsonl"),
         "output_dir": get_path("models", recipe['model_name']),
         "cache_dir": str(get_path("bright").resolve())

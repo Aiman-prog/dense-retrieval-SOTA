@@ -170,10 +170,10 @@ if __name__ == "__main__":
     mixture_dir.mkdir(parents=True, exist_ok=True)
     
     # 1. Define your target counts
-    target_counts = {
-        'hq': 100521,
-        'vl': 122000
-    }
+    # target_counts = {
+    #     'hq': 100521,
+    #     'vl': 122000
+    # }
     
     for subset_type in ['hq', 'vl']:
         print("=" * 80)
@@ -185,7 +185,7 @@ if __name__ == "__main__":
             dataset_name=config['data']['reasonir']['name'],
             subset=subset_type, 
             filename=filename,
-            limit=target_counts[subset_type] # Use the specific limit for each subset
+            # limit=target_counts[subset_type] # Use the specific limit for each subset
         )
         
         print(f"\n✅ {subset_type.upper()} Data generated: {train_file_path}")
