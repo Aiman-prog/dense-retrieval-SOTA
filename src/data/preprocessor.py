@@ -154,6 +154,48 @@ class BRIGHTPreprocessor:
         print(f"✅ {subset.upper()} Complete! Saved: {count:,} | Skipped: {skipped:,}")
         return str(output_path)
 
+    def prepare_msmarco_train_data(self,
+                                   dataset_name: str = "sentence-transformers/msmarco-hard-negatives",
+                                   subset: str = "triplet",
+                                   cache_dir: Optional[str] = None,
+                                   filename: str = "train_msmarco.jsonl",
+                                   limit: Optional[int] = None) -> str:
+        """
+        Prepare MS MARCO training data with optional row limit.
+        """
+        import random
+        
+        output_path = self.output_dir / filename
+        cache = Path(cache_dir) if cache_dir else get_path("bright")
+        
+        print(f"📥 Loading MS MARCO dataset ({subset})...")
+        dataset = load_dataset(dataset_name, subset, split='train', cache_dir=str(cache))
+        
+        # Sample if limit specified
+        total = len(dataset)
+        if limit and limit < total:
+            indices = random.sample(range(total), limit)
+            print(f"   Sampling {limit:,} from {total:,} examples...")
+        else:
+            indices = range(total)
+            print(f"   Using all {total:,} examples...")
+        
+        count = 0
+        with open(output_path, 'w', encoding='utf-8') as f:
+            for idx in indices:
+                entry = dataset[idx]
+                record = {
+                    "query_id": f"msmarco_{idx}",
+                    "query": entry['query'],
+                    "positive_passages": [{"docid": f"msmarco_pos_{idx}", "text": entry['positive']}],
+                    "negative_passages": [{"docid": f"msmarco_neg_{idx}", "text": entry['negative']}]
+                }
+                f.write(json.dumps(record, ensure_ascii=False) + '\n')
+                count += 1
+        
+        print(f"✅ MS MARCO Complete! Saved: {count:,}")
+        return str(output_path)
+
 if __name__ == "__main__":
     from data.bright_loader import BRIGHTLoader
     
@@ -164,33 +206,52 @@ if __name__ == "__main__":
     
     preprocessor = BRIGHTPreprocessor()
     
-    # 1. TRAINING DATA GENERATION
-    # ReasonIR-8B is trained on a mixture of HQ and VL
+    # 1. TRAINING DATA GENERATION - Save to training_mixture/
     mixture_dir = preprocessor.output_dir / "training_mixture"
     mixture_dir.mkdir(parents=True, exist_ok=True)
     
-    # 1. Define your target counts
-    # target_counts = {
-    #     'hq': 100521,
-    #     'vl': 122000
-    # }
+    print("\n" + "=" * 80)
+    print("🎯 Generating Mixed Training Dataset")
+    print("   Tevatron will read all .jsonl files in training_mixture/")
+    print("=" * 80)
     
-    for subset_type in ['hq', 'vl']:
-        print("=" * 80)
-        # Point the filename to the correct directory
-        filename = f"training_mixture/train_reasonir_{subset_type}.jsonl"
-        
-        train_file_path = preprocessor.prepare_reasonir_hq_train_data(
-            id2doc=id2doc,
-            dataset_name=config['data']['reasonir']['name'],
-            subset=subset_type, 
-            filename=filename,
-            # limit=target_counts[subset_type] # Use the specific limit for each subset
-        )
-        
-        print(f"\n✅ {subset_type.upper()} Data generated: {train_file_path}")
+    mixed_config = config['data'].get('mixed_training', {})
+    
+    # Generate MS MARCO
+    print("\n[1/3] MS MARCO Data")
+    preprocessor.prepare_msmarco_train_data(
+        dataset_name=config['data'].get('msmarco', {}).get('name', 'sentence-transformers/msmarco-hard-negatives'),
+        subset=config['data'].get('msmarco', {}).get('subset', 'triplet'),
+        filename="training_mixture/train_msmarco.jsonl",
+        limit=mixed_config.get('msmarco_samples', 20000)
+    )
+    
+    # Generate VL
+    print("\n[2/3] VL Data")
+    preprocessor.prepare_reasonir_hq_train_data(
+        id2doc=id2doc,
+        dataset_name=config['data']['reasonir']['name'],
+        subset='vl',
+        filename="training_mixture/train_vl.jsonl",
+        limit=mixed_config.get('vl_samples', 200000)
+    )
+    
+    # Generate HQ
+    print("\n[3/3] HQ Data")
+    preprocessor.prepare_reasonir_hq_train_data(
+        id2doc=id2doc,
+        dataset_name=config['data']['reasonir']['name'],
+        subset='hq',
+        filename="training_mixture/train_hq.jsonl",
+        limit=mixed_config.get('hq_samples', 50000)
+    )
+    
+    total = mixed_config.get('msmarco_samples', 20000) + mixed_config.get('vl_samples', 200000) + mixed_config.get('hq_samples', 50000)
+    print(f"\n✅ Training data generated in: {mixture_dir}")
+    print(f"   Total samples: ~{total:,} across 3 files")
+    print(f"   Tevatron will load: {mixture_dir / '*.jsonl'}")
 
-    # 2. EVALUATION DATA GENERATION
+    # 3. EVALUATION DATA GENERATION
     print("\n" + "=" * 80)
     print("🌐 Generating BRIGHT Evaluation Data (Domains)")
     print("=" * 80)
