@@ -155,6 +155,8 @@ def main():
             '--ignore_data_skip', 'True',       # Forces batch size 64 (resets counter)
             '--attn_implementation', 'eager', '--optim', 'adamw_torch_fused', '--logging_steps', str(ctx['args']['logging_steps']),
             '--pooling', ctx['pooling'],
+            '--normalize', str(ctx['normalize']),
+            '--temperature', str(ctx['temperature']),
         ]
         sys.argv = ['train.py'] + training_args
         tevatron_train_main()

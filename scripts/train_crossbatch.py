@@ -68,6 +68,7 @@ def main():
         '--dataloader_num_workers', str(recipe['dataloader_num_workers']),  # A100 production mode
         '--pooling', ctx['pooling'],
         '--normalize', str(ctx['normalize']),
+        '--temperature', str(ctx['temperature']),
         '--warmup_ratio', str(recipe['warmup_ratio']),
         '--weight_decay', str(recipe['weight_decay']),
     ]

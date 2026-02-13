@@ -46,7 +46,6 @@ def main():
 
     try:
         from transformers import AutoTokenizer, AutoModel
-        from datasets import load_dataset
         
         print(f"📥 Downloading {model_name}...")
         # Note: No cache_dir= argument! We rely on os.environ['HF_HOME']
@@ -54,18 +53,6 @@ def main():
         AutoModel.from_pretrained(model_name)
         
         print(f"✅ Model download successful!")
-
-        # Download MS MARCO dataset for training mixture
-        print("\n" + "=" * 80)
-        print("📥 Downloading MS MARCO dataset for training mixture...")
-        msmarco_config = config['data'].get('msmarco', {})
-        msmarco_name = msmarco_config.get('name', 'sentence-transformers/msmarco-hard-negatives')
-        msmarco_subset = msmarco_config.get('subset', 'triplet')
-        
-        print(f"Dataset: {msmarco_name}")
-        print(f"Subset: {msmarco_subset}")
-        load_dataset(msmarco_name, msmarco_subset, split='train', cache_dir=str(cache_dir))
-        print(f"✅ MS MARCO dataset downloaded!")
 
         # 4. VERIFICATION: Look for the specific Hub snapshots folder
         repo_id = model_name.replace("/", "--")

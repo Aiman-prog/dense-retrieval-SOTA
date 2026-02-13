@@ -82,6 +82,7 @@ def get_training_context(training_type: str = "inbatch") -> Dict[str, Any]:
         "max_p": config['model']['passage_max_len'],
         "pooling": config['model'].get('pooling', 'cls'),
         "normalize": config['model'].get('normalize', False),
+        "temperature": config['model'].get('temperature', 0.02),
         "processed_dir": get_path("processed"),
         "output_dir": get_path("models", recipe['model_name']),
         "cache_dir": str(get_path("bright").resolve())
