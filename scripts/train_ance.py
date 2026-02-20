@@ -106,6 +106,7 @@ def main():
                 '--encode_output_path', str(outp), '--attn_implementation', 'eager',
                 '--dataloader_num_workers', str(ctx['args']['dataloader_num_workers']),
                 '--pooling', ctx['pooling'],
+                '--normalize', str(ctx['normalize']),
             ]
             if is_q:
                 q_len = str(config['model'].get('query_max_len', 128))
@@ -159,6 +160,25 @@ def main():
             '--temperature', str(ctx['temperature']),
         ]
         sys.argv = ['train.py'] + training_args
+        
+        # Patch GradCache loss to use temperature scaling
+        # Fix for bug where SimpleContrastiveLoss/DistributedContrastiveLoss ignore temperature
+        from models.temperature_scaled_loss import TemperatureScaledContrastiveLoss, DistributedTemperatureScaledContrastiveLoss
+        import tevatron.retriever.gc_trainer as gc_module
+        
+        # Create wrapper classes that use our temperature value
+        temp = ctx['temperature']
+        class SimpleContrastiveLossPatched(TemperatureScaledContrastiveLoss):
+            def __init__(self):
+                super().__init__(temperature=temp)
+        
+        class DistributedContrastiveLossPatched(DistributedTemperatureScaledContrastiveLoss):
+            def __init__(self, n_target: int = 0, scale_loss: bool = True):
+                super().__init__(temperature=temp, n_target=n_target, scale_loss=scale_loss)
+        
+        gc_module.SimpleContrastiveLoss = SimpleContrastiveLossPatched
+        gc_module.DistributedContrastiveLoss = DistributedContrastiveLossPatched
+        
         tevatron_train_main()
         current_model_path = str(output_model_dir)
 
@@ -172,7 +192,7 @@ def main():
             
             # Re-use Phase A encoding style with version fallback
             for inp, outp, is_q in [(d_corpus, d_eval/"c.pkl", False), (d_queries, d_eval/"q.pkl", True)]:
-                cmd_eval = [sys.executable, '-m', 'tevatron.retriever.driver.encode', '--output_dir', str(outp.parent), '--model_name_or_path', current_model_path, '--bf16', 'True', '--fp16', 'False', '--per_device_eval_batch_size', str(ctx['args']['per_device_eval_batch_size']), '--dataset_name', 'json', '--dataset_path', str(inp), '--encode_output_path', str(outp), '--attn_implementation', 'eager', '--pooling', ctx['pooling']]
+                cmd_eval = [sys.executable, '-m', 'tevatron.retriever.driver.encode', '--output_dir', str(outp.parent), '--model_name_or_path', current_model_path, '--bf16', 'True', '--fp16', 'False', '--per_device_eval_batch_size', str(ctx['args']['per_device_eval_batch_size']), '--dataset_name', 'json', '--dataset_path', str(inp), '--encode_output_path', str(outp), '--attn_implementation', 'eager', '--dataloader_num_workers', str(ctx['args']['dataloader_num_workers']), '--pooling', ctx['pooling'], '--normalize', str(ctx['normalize'])]
                 if is_q:
                     try: subprocess.run(cmd_eval + ['--encode_is_query', '--query_max_len', q_len], check=True)
                     except subprocess.CalledProcessError: subprocess.run(cmd_eval + ['--encode_is_qry', '--q_max_len', q_len], check=True)

@@ -48,7 +48,7 @@ training:
     bf16: True
     dataloader_num_workers: 4
   crossbatch:
-    model_name: "crossbatch_mixed_bge_m3"
+    model_name: "crossbatch_mixed_bge_m3_epoch2"
     batch_size: 16
     target_batch_size: 2048
     per_device_batch_size: 64
@@ -58,7 +58,7 @@ training:
     learning_rate: 1e-5  # Lower LR for BGE-M3 continued training
     warmup_ratio: 0.1
     weight_decay: 0.01
-    num_epochs: 1  # Quick validation run
+    num_epochs: 2  # Quick validation run
     train_group_size: 2
     grad_cache: true
     bf16: true
