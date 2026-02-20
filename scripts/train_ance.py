@@ -151,8 +151,9 @@ def main():
             '--num_train_epochs', str(ctx['args']['num_epochs']), '--bf16', 'True', '--dtype', 'bfloat16',
             '--gradient_checkpointing', str(ctx['args']['gradient_checkpointing']),
             '--overwrite_output_dir', 'True',   # Clears "toxic" old settings
-            '--save_strategy', ctx['args']['save_strategy'],            # Stops 100GB checkpoint spike
-            '--save_total_limit', str(ctx['args']['save_total_limit']),          # Safety: only keep 1 model copy
+            '--save_strategy', ctx['args']['save_strategy'],
+            '--save_steps', str(ctx['args'].get('save_steps', 500)),
+            '--save_total_limit', str(ctx['args']['save_total_limit']),
             '--ignore_data_skip', 'True',       # Forces batch size 64 (resets counter)
             '--attn_implementation', 'eager', '--optim', 'adamw_torch_fused', '--logging_steps', str(ctx['args']['logging_steps']),
             '--pooling', ctx['pooling'],
