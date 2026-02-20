@@ -18,7 +18,6 @@ project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root / 'src'))
 
 from utils.helpers import get_path, get_training_context, load_config
-from data.bright_loader import BRIGHTLoader
 from data.preprocessor import BRIGHTPreprocessor
 from evaluation.trec_eval_wrapper import TrecEvalWrapper
 
@@ -38,44 +37,50 @@ def run_setup():
         return corpus_path, queries_path, qrels_path
 
     print("🛠️ Running ANCE Setup...", flush=True)
-    loader = BRIGHTLoader()
-    loader.load_dataset()
     preprocessor = BRIGHTPreprocessor()
-    
-    # Corpus
-    id2doc_map = loader.get_all_documents_id_map()
-    hq_df = pd.DataFrame([{"doc_id": str(k), "text": v} for k, v in id2doc_map.items()])
-    vl_df = pd.read_json(mixture_dir / "train_reasonir_vl.jsonl", lines=True)
-    all_vl = []
-    for col in ['positive_passages', 'negative_passages']:
-        for record_list in vl_df[col]: all_vl.extend(record_list)
-    vl_corpus = pd.DataFrame(all_vl).rename(columns={'docid': 'doc_id'})
-    combined = pd.concat([hq_df, vl_corpus]).drop_duplicates(subset=['doc_id'])
-    preprocessor.prepare_tevatron_corpus(combined, filename="reasonir_corpus.jsonl")
-
-    # Queries
     mix_files = [f for f in mixture_dir.glob("*.jsonl") if not f.name.startswith('.')]
-    q_dfs = []
+
+    # Read all mixture files once
+    mix_dfs = []
     for f in mix_files:
         df = pd.read_json(f, lines=True)
         if 'query_text' in df.columns: df = df.rename(columns={'query_text': 'query'})
-        q_dfs.append(df[['query_id', 'query']])
-    queries_df = pd.concat(q_dfs).drop_duplicates(subset=['query_id'])
+        mix_dfs.append(df)
+    mix_df = pd.concat(mix_dfs, ignore_index=True)
+
+    # Corpus: all passages from mixture files (same source as crossbatch/inbatch)
+    all_passages = []
+    for col in ['positive_passages', 'negative_passages']:
+        for record_list in mix_df[col]:
+            all_passages.extend(record_list)
+    corpus_df = pd.DataFrame(all_passages).rename(columns={'docid': 'doc_id'})[['doc_id', 'text']].drop_duplicates(subset=['doc_id'])
+    preprocessor.prepare_tevatron_corpus(corpus_df, filename="reasonir_corpus.jsonl")
+    print(f"Corpus: {len(corpus_df)} passages", flush=True)
+
+    # Queries
+    queries_df = mix_df[['query_id', 'query']].drop_duplicates(subset=['query_id'])
     preprocessor.prepare_tevatron_queries(queries_df, filename="train_queries.jsonl")
 
     # Qrels
     pos_pairs = []
-    for f in mix_files:
-        df = pd.read_json(f, lines=True)
-        for _, row in df.iterrows():
-            for pos in row['positive_passages']:
-                pos_pairs.append({'query_id': str(row['query_id']), 'doc_id': str(pos['docid']), 'relevance': 1})
+    for _, row in mix_df.iterrows():
+        for pos in row['positive_passages']:
+            pos_pairs.append({'query_id': str(row['query_id']), 'doc_id': str(pos['docid']), 'relevance': 1})
     preprocessor.prepare_trec_qrels(pd.DataFrame(pos_pairs).drop_duplicates(), filename="train_qrels.txt")
 
     return corpus_path, queries_path, qrels_path
 
 def main():
     corpus_file, query_file, qrels_file = run_setup()
+
+    # Load corpus text lookup once — used in Phase C to write real hard negative text
+    corpus_lookup = {}
+    with open(corpus_file) as f:
+        for line in f:
+            d = json.loads(line)
+            corpus_lookup[d['docid']] = d['text']
+    print(f"Loaded corpus lookup: {len(corpus_lookup)} passages", flush=True)
+
     ctx = get_training_context("ance")
     config = load_config()
     current_model_path = ctx['base_model']
@@ -124,12 +129,19 @@ def main():
         idx = faiss.IndexFlatIP(c_data[0].shape[1]); idx.add(c_data[0].astype(np.float32))
         _, indices = idx.search(q_data[0].astype(np.float32), ctx['args']['mining_depth'])
         
+        n_negs = ctx['args']['train_group_size'] - 1  # e.g. 5 when train_group_size=6
         mined_negs = {}
         c_ids = [str(x) for x in c_data[1]]
         for i, qid in enumerate([str(x) for x in q_data[1]]):
             pot = [c_ids[idx] for idx in indices[i] if idx >= 0]
             true_negs = [d for d in pot if d not in qrels_dict.get(qid, set())]
-            mined_negs[qid] = random.choice(true_negs) if true_negs else pot[0]
+            candidates = true_negs if true_negs else pot
+            # Top-n hardest: earliest in FAISS-ranked list = highest similarity
+            if len(candidates) >= n_negs:
+                mined_negs[qid] = candidates[:n_negs]
+            else:
+                # Pad by repeating available candidates
+                mined_negs[qid] = (candidates * (n_negs // len(candidates) + 1))[:n_negs]
 
         mix_out = ep_dir / "mined_mixture"; mix_out.mkdir(exist_ok=True)
         for f_path in (get_path("processed") / "training_mixture").glob("*.jsonl"):
@@ -138,7 +150,10 @@ def main():
                 for line in f_in:
                     d = json.loads(line)
                     if str(d['query_id']) in mined_negs:
-                        d['negative_passages'] = [{"docid": mined_negs[str(d['query_id'])], "text": "ANCE_MINED"}]
+                        d['negative_passages'] = [
+                            {"docid": neg_id, "text": corpus_lookup.get(neg_id, "")}
+                            for neg_id in mined_negs[str(d['query_id'])]
+                        ]
                     f_out.write(json.dumps(d, ensure_ascii=False) + '\n')
 
         # --- PHASE D: TRAIN (Inspiration: train_inbatch.py logic) ---
@@ -146,7 +161,7 @@ def main():
         training_args = [
             '--output_dir', str(output_model_dir), '--model_name_or_path', current_model_path,
             '--dataset_name', 'json', '--dataset_path', str(mix_out / "*.jsonl"),
-            '--corpus_path', str(corpus_file), '--per_device_train_batch_size', str(ctx['args']['batch_size']),
+            '--dataset_split', 'train', '--per_device_train_batch_size', str(ctx['args']['batch_size']),
             '--train_group_size', str(ctx['args']['train_group_size']), '--learning_rate', str(ctx['args']['learning_rate']),
             '--num_train_epochs', str(ctx['args']['num_epochs']), '--bf16', 'True', '--dtype', 'bfloat16',
             '--gradient_checkpointing', str(ctx['args']['gradient_checkpointing']),
