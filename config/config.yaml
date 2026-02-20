@@ -71,11 +71,11 @@ training:
     num_episodes: 3
     mining_depth: 200
     learning_rate: 1e-5  # Lower LR for BGE-M3 continued training
-    batch_size: 64
+    batch_size: 32
     per_device_eval_batch_size: 512
     num_epochs: 1  # Quick validation run
     bf16: true
-    train_group_size: 2
+    train_group_size: 6
     dataloader_num_workers: 2
     gradient_checkpointing: true
     save_strategy: "steps"
