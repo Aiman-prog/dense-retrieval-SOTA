@@ -15,7 +15,7 @@ from pathlib import Path
 project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root / 'src'))
 
-from utils.helpers import get_training_context
+from utils.helpers import get_training_context, patch_tevatron_loss
 from tevatron.retriever.modeling import DenseModel
 from tevatron.retriever.driver.train import main as tevatron_train_main
 
@@ -104,24 +104,7 @@ def main():
         print(f"🚀 Starting In-Batch Training for model: {ctx['args']['model_name']}")
         print(f"📂 Loading data from: {training_data_path}")
         
-        # Patch GradCache loss to use temperature scaling
-        # Fix for bug where SimpleContrastiveLoss/DistributedContrastiveLoss ignore temperature
-        from models.temperature_scaled_loss import TemperatureScaledContrastiveLoss, DistributedTemperatureScaledContrastiveLoss
-        import tevatron.retriever.gc_trainer as gc_module
-        
-        # Create wrapper classes that use our temperature value
-        temp = ctx['temperature']
-        class SimpleContrastiveLossPatched(TemperatureScaledContrastiveLoss):
-            def __init__(self):
-                super().__init__(temperature=temp)
-        
-        class DistributedContrastiveLossPatched(DistributedTemperatureScaledContrastiveLoss):
-            def __init__(self, n_target: int = 0, scale_loss: bool = True):
-                super().__init__(temperature=temp, n_target=n_target, scale_loss=scale_loss)
-        
-        gc_module.SimpleContrastiveLoss = SimpleContrastiveLossPatched
-        gc_module.DistributedContrastiveLoss = DistributedContrastiveLossPatched
-        
+        patch_tevatron_loss(ctx['temperature'])
         tevatron_train_main()
         print(f"✅ Training completed. Model saved to: {ctx['output_dir']}")
     except Exception as e:
