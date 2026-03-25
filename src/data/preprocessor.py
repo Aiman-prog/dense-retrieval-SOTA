@@ -64,6 +64,29 @@ class BRIGHTPreprocessor:
                 
         return output_path
 
+    def prepare_pyserini_corpus(self, corpus: pd.DataFrame, output_dir: Path) -> str:
+        """
+        Save corpus in Pyserini/Lucene format {"id": ..., "contents": ...}.
+
+        Args:
+            corpus: DataFrame with columns doc_id, text
+            output_dir: Directory to write corpus.jsonl (created if needed)
+        Returns:
+            Path to written file
+        """
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / "corpus.jsonl"
+        print(f"Writing {len(corpus)} documents in Pyserini format to {output_path}...")
+        with open(output_path, 'w', encoding='utf-8') as f:
+            for _, row in corpus.iterrows():
+                doc = {
+                    "id": str(row['doc_id']),
+                    "contents": row['text'] if pd.notna(row['text']) else "",
+                }
+                f.write(json.dumps(doc, ensure_ascii=False) + '\n')
+        return str(output_path)
+
     def prepare_trec_qrels(self, qrels: pd.DataFrame, filename: str = "qrels.txt") -> str:
         """
         Save QRELS in TREC format for evaluation (trec_eval).

@@ -1,8 +1,9 @@
 import os
 import sys
+import gc
 import json
 import random
-import subprocess
+import argparse
 import numpy as np
 import pandas as pd
 import faiss
@@ -17,7 +18,8 @@ os.environ["TRANSFORMERS_ATTENTION_IMPLEMENTATION"] = "eager"
 project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root / 'src'))
 
-from utils.helpers import get_path, get_training_context, load_config
+from utils.helpers import get_path, get_training_context, load_config, \
+                          encode_to_pickle, build_faiss_index, patch_tevatron_loss
 from data.preprocessor import BRIGHTPreprocessor
 from evaluation.trec_eval_wrapper import TrecEvalWrapper
 
@@ -71,6 +73,11 @@ def run_setup():
     return corpus_path, queries_path, qrels_path
 
 def main():
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('--start_episode', type=int, default=1)
+    cli_args, _ = parser.parse_known_args()
+    start_ep = cli_args.start_episode
+
     corpus_file, query_file, qrels_file = run_setup()
 
     # Load corpus text lookup once — used in Phase C to write real hard negative text
@@ -84,6 +91,9 @@ def main():
     ctx = get_training_context("ance")
     config = load_config()
     current_model_path = ctx['base_model']
+    if start_ep > 1:
+        current_model_path = str(get_path("models") / f"ance_ep{start_ep - 1}")
+        print(f"▶️  Resuming ANCE from episode {start_ep}, using model: {current_model_path}", flush=True)
     workdir = get_path("temp_ance")
     workdir.mkdir(exist_ok=True, parents=True)
 
@@ -95,45 +105,24 @@ def main():
             if len(parts) >= 4: qrels_data.append({'qid': parts[0], 'did': parts[2]})
     qrels_dict = pd.DataFrame(qrels_data).groupby('qid')['did'].apply(set).to_dict()
 
-    for ep in range(1, ctx['args']['num_episodes'] + 1):
+    for ep in range(start_ep, ctx['args']['num_episodes'] + 1):
         print(f"\n🚀 ANCE EPISODE {ep}", flush=True)
         ep_dir = workdir / f"ep_{ep}"
         ep_dir.mkdir(exist_ok=True)
 
-        # --- PHASE A: ENCODE (Inspiration: evaluate.py logic) ---
-        for inp, outp, is_q in [(corpus_file, ep_dir/"corpus.pkl", False), (query_file, ep_dir/"query.pkl", True)]:
-            cmd = [
-                sys.executable, '-m', 'tevatron.retriever.driver.encode',
-                '--output_dir', str(outp.parent), '--model_name_or_path', current_model_path,
-                '--bf16', 'True', '--fp16', 'False', 
-                '--per_device_eval_batch_size', str(ctx['args']['per_device_eval_batch_size']),
-                '--dataset_name', 'json', '--dataset_path', str(inp),
-                '--encode_output_path', str(outp), '--attn_implementation', 'eager',
-                '--dataloader_num_workers', str(ctx['args']['dataloader_num_workers']),
-                '--pooling', ctx['pooling'],
-                '--normalize', str(ctx['normalize']),
-            ]
-            if is_q:
-                q_len = str(config['model'].get('query_max_len', 128))
-                # Tevatron Version Fallback Logic
-                try:
-                    subprocess.run(cmd + ['--encode_is_query', '--query_max_len', q_len], check=True)
-                except subprocess.CalledProcessError:
-                    subprocess.run(cmd + ['--encode_is_qry', '--q_max_len', q_len], check=True)
-            else:
-                subprocess.run(cmd + ['--passage_max_len', str(config['model'].get('passage_max_len', 512))], check=True)
+        # --- PHASE A: ENCODE ---
+        encode_to_pickle(current_model_path, corpus_file, ep_dir/"corpus.pkl", False, ctx, config)
+        encode_to_pickle(current_model_path, query_file,  ep_dir/"query.pkl",  True,  ctx, config)
 
         # --- PHASE B & C: MINE & UPDATE ---
-        with open(ep_dir/"corpus.pkl", 'rb') as f: c_data = pickle.load(f)
+        idx, _, c_ids = build_faiss_index(ep_dir/"corpus.pkl")
         with open(ep_dir/"query.pkl", 'rb') as f: q_data = pickle.load(f)
-        idx = faiss.IndexFlatIP(c_data[0].shape[1]); idx.add(c_data[0].astype(np.float32))
         _, indices = idx.search(q_data[0].astype(np.float32), ctx['args']['mining_depth'])
         
         n_negs = ctx['args']['train_group_size'] - 1  # e.g. 5 when train_group_size=6
         mined_negs = {}
-        c_ids = [str(x) for x in c_data[1]]
         for i, qid in enumerate([str(x) for x in q_data[1]]):
-            pot = [c_ids[idx] for idx in indices[i] if idx >= 0]
+            pot = [c_ids[j] for j in indices[i] if j >= 0]
             true_negs = [d for d in pot if d not in qrels_dict.get(qid, set())]
             candidates = true_negs if true_negs else pot
             # Top-n hardest: earliest in FAISS-ranked list = highest similarity
@@ -164,12 +153,15 @@ def main():
             '--dataset_split', 'train', '--per_device_train_batch_size', str(ctx['args']['batch_size']),
             '--train_group_size', str(ctx['args']['train_group_size']), '--learning_rate', str(ctx['args']['learning_rate']),
             '--num_train_epochs', str(ctx['args']['num_epochs']), '--bf16', 'True', '--dtype', 'bfloat16',
-            '--gradient_checkpointing', str(ctx['args']['gradient_checkpointing']),
             '--overwrite_output_dir', 'True',   # Clears "toxic" old settings
             '--save_strategy', ctx['args']['save_strategy'],
             '--save_steps', str(ctx['args'].get('save_steps', 500)),
             '--save_total_limit', str(ctx['args']['save_total_limit']),
             '--ignore_data_skip', 'True',       # Forces batch size 64 (resets counter)
+            '--warmup_ratio', str(ctx['args'].get('warmup_ratio', 0.0)),
+            '--weight_decay', str(ctx['args'].get('weight_decay', 0.0)),
+            '--max_grad_norm', str(ctx['args'].get('max_grad_norm', 1.0)),
+            '--dataloader_num_workers', str(ctx['args']['dataloader_num_workers']),
             '--attn_implementation', 'eager', '--optim', 'adamw_torch_fused', '--logging_steps', str(ctx['args']['logging_steps']),
             '--pooling', ctx['pooling'],
             '--normalize', str(ctx['normalize']),
@@ -177,26 +169,13 @@ def main():
         ]
         sys.argv = ['train.py'] + training_args
         
-        # Patch GradCache loss to use temperature scaling
-        # Fix for bug where SimpleContrastiveLoss/DistributedContrastiveLoss ignore temperature
-        from models.temperature_scaled_loss import TemperatureScaledContrastiveLoss, DistributedTemperatureScaledContrastiveLoss
-        import tevatron.retriever.gc_trainer as gc_module
-        
-        # Create wrapper classes that use our temperature value
-        temp = ctx['temperature']
-        class SimpleContrastiveLossPatched(TemperatureScaledContrastiveLoss):
-            def __init__(self):
-                super().__init__(temperature=temp)
-        
-        class DistributedContrastiveLossPatched(DistributedTemperatureScaledContrastiveLoss):
-            def __init__(self, n_target: int = 0, scale_loss: bool = True):
-                super().__init__(temperature=temp, n_target=n_target, scale_loss=scale_loss)
-        
-        gc_module.SimpleContrastiveLoss = SimpleContrastiveLossPatched
-        gc_module.DistributedContrastiveLoss = DistributedContrastiveLossPatched
-        
+        patch_tevatron_loss(ctx['temperature'])
         tevatron_train_main()
         current_model_path = str(output_model_dir)
+
+        # Free training model from GPU before encoding subprocesses start next episode
+        gc.collect()
+        torch.cuda.empty_cache()
 
         # --- PHASE E: EVALUATE (Strict Inspiration: evaluate.py loop) ---
         eval_summary = []
@@ -206,13 +185,9 @@ def main():
             d_qrels = get_path("processed") / f"{domain}_qrels.txt"
             d_eval = ep_dir / "eval" / domain; d_eval.mkdir(parents=True, exist_ok=True)
             
-            # Re-use Phase A encoding style with version fallback
-            for inp, outp, is_q in [(d_corpus, d_eval/"c.pkl", False), (d_queries, d_eval/"q.pkl", True)]:
-                cmd_eval = [sys.executable, '-m', 'tevatron.retriever.driver.encode', '--output_dir', str(outp.parent), '--model_name_or_path', current_model_path, '--bf16', 'True', '--fp16', 'False', '--per_device_eval_batch_size', str(ctx['args']['per_device_eval_batch_size']), '--dataset_name', 'json', '--dataset_path', str(inp), '--encode_output_path', str(outp), '--attn_implementation', 'eager', '--dataloader_num_workers', str(ctx['args']['dataloader_num_workers']), '--pooling', ctx['pooling'], '--normalize', str(ctx['normalize'])]
-                if is_q:
-                    try: subprocess.run(cmd_eval + ['--encode_is_query', '--query_max_len', q_len], check=True)
-                    except subprocess.CalledProcessError: subprocess.run(cmd_eval + ['--encode_is_qry', '--q_max_len', q_len], check=True)
-                else: subprocess.run(cmd_eval + ['--passage_max_len', str(config['model'].get('passage_max_len', 512))], check=True)
+            # Re-use encode_to_pickle for eval encoding
+            encode_to_pickle(current_model_path, d_corpus,  d_eval/"c.pkl", False, ctx, config)
+            encode_to_pickle(current_model_path, d_queries, d_eval/"q.pkl", True,  ctx, config)
 
             with open(d_eval/"c.pkl", 'rb') as f: dc = pickle.load(f)
             with open(d_eval/"q.pkl", 'rb') as f: dq = pickle.load(f)

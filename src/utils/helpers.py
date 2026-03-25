@@ -1,7 +1,12 @@
 """Helper utility functions for Path and Context Management."""
 
+import sys
+import subprocess
+import pickle
 import yaml
 import os
+import numpy as np
+import faiss
 from pathlib import Path
 from typing import Dict, Any
 
@@ -87,3 +92,59 @@ def get_training_context(training_type: str = "inbatch") -> Dict[str, Any]:
         "output_dir": get_path("models", recipe['model_name']),
         "cache_dir": str(get_path("bright").resolve())
     }
+
+
+def encode_to_pickle(model_path, input_file, output_pkl, is_query, ctx, config):
+    """Run Tevatron encode subprocess and save embeddings to a pickle file."""
+    cmd = [
+        sys.executable, '-m', 'tevatron.retriever.driver.encode',
+        '--output_dir', str(output_pkl.parent),
+        '--model_name_or_path', model_path,
+        '--bf16', 'True', '--fp16', 'False',
+        '--per_device_eval_batch_size', str(ctx['args']['per_device_eval_batch_size']),
+        '--dataset_name', 'json', '--dataset_path', str(input_file),
+        '--encode_output_path', str(output_pkl),
+        '--attn_implementation', 'eager',
+        '--dataloader_num_workers', str(ctx['args']['dataloader_num_workers']),
+        '--pooling', ctx['pooling'],
+        '--normalize', str(ctx['normalize']),
+    ]
+    if is_query:
+        q_len = str(config['model'].get('query_max_len', 128))
+        try:
+            subprocess.run(cmd + ['--encode_is_query', '--query_max_len', q_len], check=True)
+        except subprocess.CalledProcessError:
+            subprocess.run(cmd + ['--encode_is_qry', '--q_max_len', q_len], check=True)
+    else:
+        subprocess.run(cmd + ['--passage_max_len', str(config['model'].get('passage_max_len', 512))], check=True)
+
+
+def build_faiss_index(corpus_pkl_path):
+    """Load corpus pickle and build a FAISS IndexFlatIP. Returns (index, embeddings, ids)."""
+    with open(corpus_pkl_path, 'rb') as f:
+        c_data = pickle.load(f)
+    embeddings = c_data[0].astype(np.float32)
+    ids = [str(x) for x in c_data[1]]
+    index = faiss.IndexFlatIP(embeddings.shape[1])
+    index.add(embeddings)
+    return index, embeddings, ids
+
+
+def patch_tevatron_loss(temperature):
+    """Monkey-patch Tevatron's GradCache trainer to use temperature-scaled contrastive loss."""
+    from models.temperature_scaled_loss import (
+        TemperatureScaledContrastiveLoss,
+        DistributedTemperatureScaledContrastiveLoss,
+    )
+    import tevatron.retriever.gc_trainer as gc_module
+
+    class SimpleContrastiveLossPatched(TemperatureScaledContrastiveLoss):
+        def __init__(self):
+            super().__init__(temperature=temperature)
+
+    class DistributedContrastiveLossPatched(DistributedTemperatureScaledContrastiveLoss):
+        def __init__(self, n_target=0, scale_loss=True):
+            super().__init__(temperature=temperature, n_target=n_target, scale_loss=scale_loss)
+
+    gc_module.SimpleContrastiveLoss = SimpleContrastiveLossPatched
+    gc_module.DistributedContrastiveLoss = DistributedContrastiveLossPatched
