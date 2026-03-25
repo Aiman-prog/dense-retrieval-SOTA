@@ -42,11 +42,14 @@ training:
   inbatch:
     model_name: "inbatch_mixed_bge_m3"
     batch_size: 64
-    learning_rate: 1e-5 
-    num_epochs: 1  
+    learning_rate: 1e-5
+    num_epochs: 2
     train_group_size: 2
     bf16: True
     dataloader_num_workers: 4
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+    max_grad_norm: 1.0
   crossbatch:
     model_name: "crossbatch_mixed_bge_m3_epoch2"
     batch_size: 16
@@ -71,13 +74,16 @@ training:
     num_episodes: 3
     mining_depth: 200
     learning_rate: 1e-5  # Lower LR for BGE-M3 continued training
-    batch_size: 32
+    batch_size: 64
     per_device_eval_batch_size: 512
-    num_epochs: 1  # Quick validation run
+    num_epochs: 1
     bf16: true
     train_group_size: 6
     dataloader_num_workers: 2
-    gradient_checkpointing: true
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+    max_grad_norm: 1.0
+    gradient_checkpointing: false
     save_strategy: "steps"
     save_steps: 500
     save_total_limit: 1
@@ -105,7 +111,10 @@ evaluation:
     - "NDCG@10"
     - "Recall@1000"
   top_k: 1000
-  batch_size: 512
+  batch_size: 128
   trec_eval_path: "trec_eval"
   bf16: True
   dataloader_num_workers: 4
+  bm25:
+    k1: 0.9
+    b: 0.4

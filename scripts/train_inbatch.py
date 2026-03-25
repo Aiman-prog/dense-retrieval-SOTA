@@ -88,6 +88,9 @@ def main():
         '--attn_implementation', 'eager',
         '--dataloader_num_workers', str(ctx['args']['dataloader_num_workers']),
         '--optim', 'adamw_torch_fused',       # Uses more efficient GPU kernels
+        '--warmup_ratio', str(ctx['args']['warmup_ratio']),
+        '--weight_decay', str(ctx['args']['weight_decay']),
+        '--max_grad_norm', str(ctx['args']['max_grad_norm']),
         '--pooling', ctx['pooling'],
         '--normalize', str(ctx['normalize']),
         '--temperature', str(ctx['temperature']),
