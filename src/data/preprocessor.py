@@ -306,6 +306,82 @@ class BRIGHTPreprocessor:
         print(f"✅ MS MARCO Complete! Saved: {count:,}")
         return str(output_path)
 
+def run_setup():
+    """
+    Prepares the three processed files required by any training script that does
+    encoding or hard-negative mining (i.e. train_ance.py, train_grass.py).
+    Skips silently if all three files already exist and are non-empty.
+
+    What it does:
+      1. Reads all JSONL files from the training_mixture directory (MS MARCO, VL, HQ).
+      2. Collects every passage that appears as a positive or negative across all records,
+         deduplicates by doc_id, and writes them to `reasonir_corpus.jsonl` in Tevatron
+         format — this is the full training corpus used to build the FAISS / stale ANN index.
+      3. Extracts unique (query_id, query) pairs from the mixture and writes them to
+         `train_queries.jsonl` in Tevatron format — used to encode all training queries
+         during index building or GrassSampler.
+      4. Collects all (query_id, positive_doc_id) pairs from the mixture and writes them
+         to `train_qrels.txt` in TREC format — used during mining to filter out true
+         positives so they are never selected as hard negatives.
+
+    Returns:
+        Tuple[Path, Path, Path]: absolute paths to
+            (reasonir_corpus.jsonl, train_queries.jsonl, train_qrels.txt)
+    """
+    corpus_path = get_path("processed") / "reasonir_corpus.jsonl"
+    queries_path = get_path("processed") / "train_queries.jsonl"
+    qrels_path = get_path("processed") / "train_qrels.txt"
+    mixture_dir = get_path("processed") / "training_mixture"
+
+    if all(p.exists() and p.stat().st_size > 0 for p in [corpus_path, queries_path, qrels_path]):
+        print("⏩ Skipping setup: processed files already exist.", flush=True)
+        return corpus_path, queries_path, qrels_path
+
+    print("🛠️ Running setup: building corpus, queries, and qrels from training mixture...", flush=True)
+    preprocessor = BRIGHTPreprocessor()
+    mix_files = [f for f in mixture_dir.glob("*.jsonl") if not f.name.startswith('.')]
+
+    # Load all mixture files into a single DataFrame
+    mix_dfs = []
+    for f in mix_files:
+        df = pd.read_json(f, lines=True)
+        if 'query_text' in df.columns:
+            df = df.rename(columns={'query_text': 'query'})
+        mix_dfs.append(df)
+    mix_df = pd.concat(mix_dfs, ignore_index=True)
+
+    # --- Corpus ---
+    # Collect every passage (positive and negative) from all records, deduplicate by doc_id.
+    # This is the universe of documents the encoder will index for retrieval.
+    all_passages = []
+    for col in ['positive_passages', 'negative_passages']:
+        for record_list in mix_df[col]:
+            all_passages.extend(record_list)
+    corpus_df = (pd.DataFrame(all_passages)
+                 .rename(columns={'docid': 'doc_id'})[['doc_id', 'text']]
+                 .drop_duplicates(subset=['doc_id']))
+    preprocessor.prepare_tevatron_corpus(corpus_df, filename="reasonir_corpus.jsonl")
+    print(f"  Corpus: {len(corpus_df)} unique passages", flush=True)
+
+    # --- Queries ---
+    # One entry per unique query_id — used to encode training queries for ANN search.
+    queries_df = mix_df[['query_id', 'query']].drop_duplicates(subset=['query_id'])
+    preprocessor.prepare_tevatron_queries(queries_df, filename="train_queries.jsonl")
+    print(f"  Queries: {len(queries_df)} unique training queries", flush=True)
+
+    # --- Qrels ---
+    # All (query_id, positive_doc_id) pairs in TREC format.
+    # Used during mining to exclude true positives from the hard negative candidates.
+    pos_pairs = []
+    for _, row in mix_df.iterrows():
+        for pos in row['positive_passages']:
+            pos_pairs.append({'query_id': str(row['query_id']), 'doc_id': str(pos['docid']), 'relevance': 1})
+    preprocessor.prepare_trec_qrels(pd.DataFrame(pos_pairs).drop_duplicates(), filename="train_qrels.txt")
+    print(f"  Qrels: {len(pos_pairs)} positive pairs", flush=True)
+
+    return corpus_path, queries_path, qrels_path
+
+
 if __name__ == "__main__":
     from data.bright_loader import BRIGHTLoader
     
