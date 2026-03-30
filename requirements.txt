@@ -6,7 +6,7 @@
 # ============================================================================
 
 # --- Core Deep Learning ---
-torch==2.1.0  # Match container: pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime
+torch>=2.6.0  # Local dev (Mac/Python 3.13+). HPC uses torch 2.1.0 from Singularity container.
 transformers>=4.36.0,<5  # REQUIRED: peft needs Cache class from 4.36.0+; <5 because v5 requires PyTorch>=2.4
 sentence-transformers>=2.2.0,<3.0.0
 datasets>=2.14.0,<3.0.0
@@ -20,15 +20,16 @@ git+https://github.com/texttron/tevatron.git@8f31cd8  # CRITICAL: Use this exact
 git+https://github.com/luyug/GradCache.git  # Required for --grad_cache (cross-batch negatives)
 
 # --- Vector Search & Retrieval ---
-faiss-gpu>=1.7.0  # Use faiss-gpu for GPU training (faiss-cpu for CPU-only)
+faiss-cpu  # Local dev (Mac). HPC uses faiss-gpu via requirements-hpc.txt + Singularity
 pyserini>=0.22.0
-pytrec-eval  # Python bindings for TREC evaluation
+pytrec-eval-terrier  # Python bindings for TREC evaluation (maintained fork)
 
 # --- Utilities ---
-numpy>=1.24.0,<1.26.0  # Pin to avoid breaking changes
+numpy>=2.0.0  # Local dev (Python 3.13+ requires numpy 2.x). HPC container provides its own numpy.
 pandas>=2.0.0
 pyyaml>=6.0
 tqdm>=4.65.0
+matplotlib>=3.7.0
 importlib_metadata
 spacy>=3.5.0  # NLP utilities
 

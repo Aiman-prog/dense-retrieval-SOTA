@@ -37,6 +37,9 @@ sbatch scripts/run_evaluate_singularity.sh
 # 6. Evaluate all checkpoints (0%-100% training progress)
 sbatch scripts/run_eval_checkpoints_singularity.sh
 
+# 7. BM25 baseline — CPU-only, no GPU (see BM25 Setup section below first)
+sbatch scripts/run_bm25_singularity.sh
+
 # 7. Plot Recall@1000 curve (no GPU needed)
 singularity exec \
     --bind /scratch/${USER}:/scratch/${USER} \
@@ -52,6 +55,34 @@ singularity exec \
         --results_file /scratch/${USER}/dense-retrieval-SOTA/results/bright_benchmark/inbatch_reasonir_neg/checkpoint_results.json \
         --metrics recall_1000 ndcg_cut_10 recip_rank
 ```
+
+## BM25 Setup (Pyserini)
+
+Pyserini wraps Lucene and requires **Java 11+**, which is not in the base container.
+Run these once on the login node before submitting the BM25 job:
+
+```bash
+# 1. Download JDK 21 (Temurin) to scratch — Lucene 9+ requires Java 17+
+JDK_DIR="/scratch/${USER}/.jdk21"
+mkdir -p "$JDK_DIR"
+wget "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.3%2B9/OpenJDK21U-jdk_x64_linux_hotspot_21.0.3_9.tar.gz" \
+     -O /tmp/jdk21.tar.gz
+tar xzf /tmp/jdk21.tar.gz -C "$JDK_DIR" --strip-components=1
+"$JDK_DIR/bin/java" -version   # verify: openjdk 21.x.x
+
+# 2. Install pyserini into ~/.local (persists across jobs)
+singularity exec \
+    --bind /scratch/${USER}:/scratch/${USER} \
+    --bind /home/${USER}:/home/${USER} \
+    /scratch/${USER}/containers/pytorch_2.1.sif \
+    pip install --user --quiet pyserini
+```
+
+Then submit: `sbatch scripts/run_bm25_singularity.sh`
+
+Results land in `/scratch/${USER}/dense-retrieval-SOTA/results/bright_benchmark/{domain}_results_bm25.json`.
+
+---
 
 ## Project Structure
 

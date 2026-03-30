@@ -50,7 +50,8 @@ def get_path(key: str, model_name: str = None) -> Path:
         "bright": base / p_cfg['bright_cache'],
         "models": base / p_cfg['models_dir'],
         "results": base / p_cfg['results_dir'],
-        "temp_ance": base / "temp_ance_workdir"
+        "temp_ance": base / "temp_ance_workdir",
+        "temp_grass": base / "temp_grass_workdir"
     }
     
     if model_name:

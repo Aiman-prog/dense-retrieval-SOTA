@@ -72,6 +72,7 @@ training:
     model_name: "grass_mixed_bge_m3"
     base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_mixed_bge_m3"
     P: 200             # candidates retrieved from stale ANN per query
+    L: 50              # shortlist size: top-L by cheap pass before MC-dropout (L <= P)
     m: 5               # negatives per query (= train_group_size - 1)
     T: 10              # MC-dropout forward passes
     lambda_val: 0.5    # uncertainty weight in g = s_hat + lambda * sigma

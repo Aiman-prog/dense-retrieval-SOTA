@@ -50,25 +50,45 @@ def grass_sampler(model_path, stale_idx, c_ids, corpus_lookup, mix_df,
     GrassSampler (Algorithm 2): mines hard negatives for all training queries using
     a stale ANN index and MC-dropout uncertainty estimation.
 
-    For each training query:
+    Args:
+      model_path   — path to the base model used for encoding (HuggingFace checkpoint)
+      stale_idx    — FAISS IndexFlatIP built from base model corpus embeddings (can be stale)
+      c_ids        — list of corpus doc IDs parallel to the FAISS index rows
+      corpus_lookup — dict mapping doc ID → passage text for candidate encoding
+      mix_df       — DataFrame of training queries (columns: query_id, query)
+      qrels_dict   — dict mapping query_id → set of positive doc IDs (for filtering true positives)
+      cfg          — grass config block from config.yaml (contains P, L, m, T, lambda_val, etc.)
+      config       — full config dict (used for model max lengths)
+      out_dir      — output directory where updated JSONL training files are written
+
+    Hyperparameters (from cfg):
+      P          — pool size: number of candidates retrieved per query from the stale ANN index
+      L          — shortlist size: top-L candidates by cheap score before MC-dropout (L <= P)
+      m          — number of hard negatives selected per query (= train_group_size - 1)
+      T          — number of MC-dropout forward passes for uncertainty estimation
+      lambda_val — trade-off weight: higher lambda promotes more uncertain (exploratory) negatives
+
+    Algorithm:
       1. Retrieve top-P candidate doc IDs from the stale ANN index (index can be stale —
          Algorithm 2, Line 1). True positives from qrels are filtered out.
-      2. Encode all unique candidates and queries T times with dropout enabled (MC-dropout).
-         This gives T sets of embeddings sampled from the model's approximate posterior.
-      3. Compute per-candidate statistics across T passes:
+      2. One cheap eval-mode pass scores all P candidates; shortlist to top-L likely confusers.
+      3. Run T MC-dropout passes on the shortlist only. Each pass samples a slightly different
+         model due to dropout, giving T similarity scores per (query, candidate) pair.
+      4. Compute per-candidate statistics across T passes:
            s_hat(q, d) = mean similarity  — estimates expected hardness
            sigma(q, d) = std similarity   — estimates model uncertainty about this doc
-      4. Score each candidate: g(q, d) = s_hat + lambda * sigma
+      5. Score each candidate: g(q, d) = s_hat + lambda * sigma
          High g means the doc is both confusing (hard) and uncertain (informative).
-      5. Select the top-m candidates by g as the new hard negatives for this query.
+      6. Select the top-m candidates by g as the new hard negatives for this query.
 
     Queries are processed in batches (query_batch_size) to keep peak GPU memory bounded.
     Writes updated mixture JSONL files to out_dir with negative_passages replaced.
     """
-    P                = cfg['P']
-    m                = cfg['m']
-    T                = cfg['T']
-    lambda_val       = cfg['lambda_val']
+    P                = cfg['P']           # candidates retrieved per query from stale ANN
+    L                = cfg['L']           # shortlist: top-L by cheap pass before MC-dropout (L <= P)
+    m                = cfg['m']           # hard negatives selected per query (train_group_size - 1)
+    T                = cfg['T']           # MC-dropout forward passes for uncertainty estimation
+    lambda_val       = cfg['lambda_val']  # weight of uncertainty term in g = s_hat + lambda * sigma
     mc_batch_size    = cfg.get('mc_batch_size', 256)
     query_batch_size = cfg.get('query_batch_size', 64)
     q_max_len        = config['model']['query_max_len']
@@ -87,7 +107,7 @@ def grass_sampler(model_path, stale_idx, c_ids, corpus_lookup, mix_df,
     print(f"  Processing {n_queries} queries in {n_batches} batches (batch_size={query_batch_size})...", flush=True)
 
     # Process queries in batches to avoid holding (T × N_all_queries × dim) in memory.
-    # Peak memory per batch: T × query_batch_size × P × dim (candidates).
+    # Peak memory per batch: T × query_batch_size × L × dim (shortlisted candidates).
     mined_negs = {}
     for b, batch_start in enumerate(range(0, n_queries, query_batch_size)):
         batch_ids   = query_ids[batch_start:batch_start + query_batch_size]
@@ -106,26 +126,49 @@ def grass_sampler(model_path, stale_idx, c_ids, corpus_lookup, mix_df,
         batch_query_cands = {}
         batch_cand_ids_set = set()
         for i, qid in enumerate(batch_ids):
-            cands     = [c_ids[j] for j in indices[i] if j >= 0]
-            true_negs = [d for d in cands if d not in qrels_dict.get(qid, set())]
-            batch_query_cands[qid] = true_negs if true_negs else cands
-            batch_cand_ids_set.update(batch_query_cands[qid])
+            cands = [c_ids[j] for j in indices[i] if j >= 0 and c_ids[j] not in qrels_dict.get(qid, set())]
+            batch_query_cands[qid] = cands
+            batch_cand_ids_set.update(cands)
 
         batch_cand_ids    = list(batch_cand_ids_set)
         batch_cand_texts  = [corpus_lookup.get(did, "") for did in batch_cand_ids]
         batch_cand_to_idx = {did: i for i, did in enumerate(batch_cand_ids)}
 
-        # Encode all unique candidates for this batch T times — (T, N_batch_cands, dim)
-        c_embs_all   = [encode_batch(model, tokenizer, batch_cand_texts, device, p_max_len, mc_batch_size)
-                        for _ in range(T)]
-        c_embs_stack = np.stack(c_embs_all, axis=0)  # (T, N_batch_cands, dim)
+        # Stage 1: one cheap pass on all P candidates to shortlist to top-L (Algorithm 2, Lines 3-4)
+        model.eval()
+        c_embs_cheap = encode_batch(model, tokenizer, batch_cand_texts, device, p_max_len, mc_batch_size)
+        model.train()
 
-        # Compute g = s_hat + lambda * sigma and select top-m for each query in this batch
+        batch_query_shortlist = {}
+        shortlist_cand_ids_set = set()
         for i, qid in enumerate(batch_ids):
             cands = batch_query_cands[qid]
             if not cands:
+                batch_query_shortlist[qid] = cands
                 continue
             cand_idxs = [batch_cand_to_idx[d] for d in cands]
+            scores    = c_embs_cheap[cand_idxs] @ q_embs_mean[i]   # (N_cands_q,)
+            top_l     = np.argsort(scores)[::-1][:L]
+            shortlist = [cands[k] for k in top_l]
+            batch_query_shortlist[qid] = shortlist
+            shortlist_cand_ids_set.update(shortlist)
+
+        # Stage 2: T MC-dropout passes only on shortlisted candidates (Algorithm 2, Lines 5-8)
+        shortlist_ids   = list(shortlist_cand_ids_set)
+        shortlist_texts = [corpus_lookup.get(did, "") for did in shortlist_ids]
+        shortlist_to_idx = {did: i for i, did in enumerate(shortlist_ids)}
+
+        c_embs_all   = [encode_batch(model, tokenizer, shortlist_texts, device, p_max_len, mc_batch_size)
+                        for _ in range(T)]
+        c_embs_stack = np.stack(c_embs_all, axis=0)  # (T, N_shortlist, dim)
+
+        # Compute g = s_hat + lambda * sigma and select top-m for each query in this batch
+        batch_sigmas, batch_g = [], []
+        for i, qid in enumerate(batch_ids):
+            cands = batch_query_shortlist[qid]
+            if not cands:
+                continue
+            cand_idxs = [shortlist_to_idx[d] for d in cands]
 
             # q_t: (T, 1, dim)  @  c_t: (T, dim, N_cands_q)  →  (T, N_cands_q)
             q_t  = torch.from_numpy(q_embs_stack[:, i, :]).unsqueeze(1)      # (T, 1, dim)
@@ -138,9 +181,16 @@ def grass_sampler(model_path, stale_idx, c_ids, corpus_lookup, mix_df,
 
             top_m = np.argsort(g)[::-1][:m]
             mined_negs[qid] = [cands[k] for k in top_m]
+            batch_sigmas.append(sigma.mean())
+            batch_g.append(g.mean())
 
-        if (b + 1) % 10 == 0:
-            print(f"  Batch {b + 1}/{n_batches} done.", flush=True)
+        if b < 3 or (b + 1) % 100 == 0:
+            n_filtered = sum(len(v) for v in batch_query_cands.values())
+            n_raw = len(batch_ids) * P
+            print(f"  Batch {b+1}/{n_batches} | "
+                  f"P→L filter: {n_filtered}/{n_raw} → shortlist {len(shortlist_ids)} unique | "
+                  f"sigma mean: {np.mean(batch_sigmas):.5f} | "
+                  f"g mean: {np.mean(batch_g):.4f}", flush=True)
 
     # Free model from GPU before Tevatron training loads it
     del model
@@ -166,6 +216,11 @@ def grass_sampler(model_path, stale_idx, c_ids, corpus_lookup, mix_df,
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('--debug', action='store_true')
+    cli_args, _ = parser.parse_known_args()
+
     corpus_file, query_file, qrels_file = run_setup()
 
     # Load corpus text lookup — used to retrieve passage text when writing mined negatives
@@ -180,7 +235,7 @@ def main():
     config = load_config()
     cfg    = config['training']['grass']
 
-    workdir = get_path("base") / "temp_grass_workdir"
+    workdir = get_path("temp_grass")
     workdir.mkdir(exist_ok=True, parents=True)
 
     # Load qrels for positive filtering during GrassSampler
@@ -195,6 +250,12 @@ def main():
     # run_setup() already extracted unique queries and wrote them to train_queries.jsonl.
     mix_df = pd.read_json(query_file, lines=True)
 
+    if cli_args.debug:
+        mix_df = mix_df.head(100)
+        cfg = {**cfg, 'T': 2, 'P': 20, 'L': 5, 'm': 2, 'query_batch_size': 10,
+               'base_model': 'BAAI/bge-large-en-v1.5'}
+        print("🐛 DEBUG mode: 100 queries, T=2, P=20, L=5, model=BAAI/bge-large-en-v1.5", flush=True)
+
     print(f"✅ Setup complete. corpus_lookup={len(corpus_lookup)} passages, qrels={len(qrels_dict)} queries, mix_df={len(mix_df)} unique queries.", flush=True)
 
     # Build stale ANN index from base model — never refreshed (Algorithm 2, Line 1)
@@ -207,11 +268,11 @@ def main():
     stale_idx, _, c_ids = build_faiss_index(stale_pkl)
     print(f"✅ Stale index ready: {len(c_ids)} passages", flush=True)
 
-    # # --- GRASSSAMPLER: mine hard negatives using stale ANN + MC-dropout ---
-    # mix_out = workdir / "grass_train"
-    # print("🔍 Running GrassSampler...", flush=True)
-    # grass_sampler(cfg['base_model'], stale_idx, c_ids, corpus_lookup,
-    #               mix_df, qrels_dict, cfg, config, mix_out)
+    # --- GRASSSAMPLER: mine hard negatives using stale ANN + MC-dropout ---
+    mix_out = workdir / "grass_train"
+    print("🔍 Running GrassSampler...", flush=True)
+    grass_sampler(cfg['base_model'], stale_idx, c_ids, corpus_lookup,
+                  mix_df, qrels_dict, cfg, config, mix_out)
 
     # # --- TRAIN: one epoch on mined negatives ---
     # output_model_dir = get_path("models") / cfg['model_name']
