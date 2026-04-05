@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 
-#SBATCH --job-name=grass-reasonir
-#SBATCH --partition=gpu-a100-small
-#SBATCH --time=02:00:00              # GRASS needs time for MC-dropout passes + training per cycle
+#SBATCH --job-name=grass
+#SBATCH --partition=gpu-a100
+#SBATCH --time=14:00:00              # EMA: ~11.5h (10h train + 1.5h eval) + buffer
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=2          # CPUs for FAISS operations and dataloader workers
+#SBATCH --cpus-per-task=16           # Needed for FAISS operations
 #SBATCH --gpus-per-task=1
 #SBATCH --mem-per-cpu=8000M
 #SBATCH --account=Education-EEMCS-MSc-DSAIT
@@ -24,7 +24,7 @@ export TRANSFORMERS_OFFLINE=1
 
 # Memory & Performance Tuning
 export PYTORCH_ALLOC_CONF="expandable_segments:True"
-export OMP_NUM_THREADS=2             # Matches cpus-per-task
+export OMP_NUM_THREADS=16            # Matches cpus-per-task for FAISS speed
 
 # Container path
 CONTAINER="/scratch/${USER}/containers/pytorch_2.1.sif"
@@ -37,7 +37,7 @@ singularity exec --nv \
     --bind /scratch/${USER}:/scratch/${USER} \
     --bind /home/${USER}:/home/${USER} \
     ${CONTAINER} \
-    python -u scripts/train_grass.py --debug
+    python -u scripts/train_grass.py --mode ${GRASS_MODE:-ema}
 
 EXIT_CODE=$?
 

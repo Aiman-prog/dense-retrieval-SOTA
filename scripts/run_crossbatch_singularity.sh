@@ -2,7 +2,7 @@
 
 #SBATCH --job-name=rocketqa-a100-2048
 #SBATCH --partition=gpu-a100
-#SBATCH --time=03:00:00             # cocodr-large + train_group_size=2 ~6h
+#SBATCH --time=07:00:00             # cocodr-large + train_group_size=2 ~6h
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=2         # 2 GPUs (like V100 test)
 #SBATCH --cpus-per-task=4          # 2 CPUs per GPU (for 4 workers)

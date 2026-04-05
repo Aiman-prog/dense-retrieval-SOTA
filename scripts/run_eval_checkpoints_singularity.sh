@@ -27,7 +27,7 @@ CONTAINER="/scratch/${USER}/containers/pytorch_2.1.sif"
 
 # --- CONFIGURATION ---
 # Change this to the model directory you want to evaluate
-MODEL_DIR="/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/crossbatch_neg_new"
+MODEL_DIR="/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_mixed_bge_m3"
 
 # --- Create output directories ---
 mkdir -p logs

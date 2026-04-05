@@ -206,6 +206,16 @@ export PYTORCH_ALLOC_CONF="expandable_segments:True,max_split_size_mb:512"
 **Cause:** Tevatron code not patched
 **Fix:** Apply all modifications in Section 2
 
+### Issue: ModuleNotFoundError: No module named 'qwen_omni_utils'
+
+**Cause:** `collator.py` imports `qwen_omni_utils` for multimodal support
+**Fix:** Comment out the import line in `collator.py` (handled by setup.sh)
+
+### Issue: AttributeError: 'BertModel' object has no attribute 'visual'
+
+**Cause:** `dense.py` `DenseModel.__init__` tries to freeze visual encoder params (Qwen multimodal code in base class)
+**Fix:** Comment out all lines referencing `.visual.` in dense.py (handled by setup.sh)
+
 ### Issue: NameError: name 'torch' is not defined
 
 **Cause:** Missing torch import in train.py
@@ -247,3 +257,87 @@ Before running training, verify:
 
 **Last Updated:** 2026-02-07
 **Tested On:** DelftBlue HPC, gpu-a100 partition, PyTorch 2.1 Singularity container
+
+## Temperature issue monkey patch fix
+---                                                                                                                                                                 
+ Part 1: Temperature Bug — What Happened and How It Was Fixed                                                                                                        
+
+ The Root Cause
+
+ Tevatron has two separate training paths with incompatible loss implementations:
+
+ Path A — Standard trainer (tevatron/retriever/modeling/encoder.py:70):
+ loss = self.compute_loss(scores / self.temperature, target)
+ Here --temperature 0.02 CLI flag IS respected. Temperature divides the logits before softmax.
+
+ Path B — GradCache trainer (tevatron/retriever/gc_trainer.py:78-85):
+ loss_fn_cls = DistributedContrastiveLoss if self.is_ddp else SimpleContrastiveLoss
+ loss_fn = loss_fn_cls()
+ self.gc = GradCache(..., loss_fn=loss_fn, ...)
+ GradCacheTrainer instantiates its own SimpleContrastiveLoss / DistributedContrastiveLoss,
+ which compute raw dot-product cross-entropy with no temperature division:
+ class SimpleContrastiveLoss:
+     def __call__(self, x, y, target=None, reduction='mean'):
+         logits = torch.matmul(x, y.transpose(0, 1))
+         return F.cross_entropy(logits, target, reduction=reduction)  # No /temperature!
+
+ Since crossbatch training uses --grad_cache True, it always goes through Path B.
+ The --temperature CLI flag was completely ignored for GradCache runs.
+
+ The Symptom
+
+ Training loss sat at ~78-84 and plateaued after epoch 1 (only dropped 0.2 in epoch 2).
+
+ With normalized embeddings (cosine sim ∈ [-1, 1]) and no temperature scaling:
+ - The softmax distribution is nearly flat (exp(0.9) ≈ 2.46 vs exp(0.0) ≈ 1.0)
+ - Gradient signal is very weak — model makes easy corrections then stalls
+ - Expected loss with T=1.0 ≈ log(N) where N = candidate pool size
+
+ With T=0.02, logits are scaled to [-50, 50], creating sharp distributions and strong gradients.
+ Expected loss with T=0.02 should start ~2–4 and fall meaningfully across training.
+
+ The Fix (src/models/temperature_scaled_loss.py + monkey-patch in train scripts)
+
+ TemperatureScaledContrastiveLoss — drop-in for SimpleContrastiveLoss:
+ logits = torch.matmul(x, y.transpose(0, 1))
+ logits = logits / self.temperature   # KEY: divides by 0.02 before softmax
+ return F.cross_entropy(logits, target, reduction=reduction)
+
+ DistributedTemperatureScaledContrastiveLoss — drop-in for DistributedContrastiveLoss:
+ same as above but gathers tensors across GPUs first (identical structure to the original).
+
+ Monkey-patch in train_crossbatch.py (and mirrored in train_ance.py):
+ import tevatron.retriever.gc_trainer as gc_module
+ gc_module.SimpleContrastiveLoss = SimpleContrastiveLossPatched
+ gc_module.DistributedContrastiveLoss = DistributedContrastiveLossPatched
+ tevatron_train_main()   # GradCacheTrainer.__init__ picks up patched classes here
+ This works because GradCacheTrainer.__init__ reads the class names from the module
+ namespace at instantiation time — replacing them before calling tevatron_train_main()
+ ensures the patched versions are used.
+
+ Config (config/config.yaml):
+ model:
+   temperature: 0.02   # Now actually used via the GradCache patch
+ Helpers (src/utils/helpers.py):
+ "temperature": config['model'].get('temperature', 0.02),  # Flows into ctx['temperature']
+
+ ---
+
+ Root cause: Tevatron has a split-brain problem. The standard training path (EncoderModel) applies scores / self.temperature correctly. But GradCacheTrainer uses 
+  its own SimpleContrastiveLoss / DistributedContrastiveLoss classes that were written without temperature — they bypass the encoder's temperature entirely.
+
+  So passing --temperature 0.02 via CLI did nothing for GradCache training. The loss was stuck at ~78–84 because cosine similarities in [-1, 1] at T=1.0 produce a
+  near-flat softmax with almost no gradient signal.
+
+  Fix: Monkey-patch the GradCache module's loss classes before calling tevatron_train_main(). Since GradCacheTrainer.__init__ reads SimpleContrastiveLoss /
+  DistributedContrastiveLoss from the module namespace at instantiation, replacing them first ensures the patched versions with logits / 0.02 are used.
+
+  ---
+  ANCE Readiness
+
+  run_ance_singularity.sh — ready as-is.
+
+  train_ance.py — two bugs fixed:
+  - Phase A (mining encode): added --normalize so FAISS mining uses cosine-equivalent dot products
+  - Phase E (per-episode eval encode): added --normalize + --dataloader_num_workers — without this, all NDCG@10 episode scores would have been computed on
+  unnormalized embeddings

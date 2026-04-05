@@ -69,18 +69,23 @@ training:
     logging_steps: 10
     dataloader_num_workers: 4
   grass:
-    model_name: "grass_mixed_bge_m3"
+    # ============================================================
+    # MODE SWITCH — change ONE line to swap algorithms:
+    #   uncertainty_mode: "ema"         → EMA Teacher-Student  (~4h,  paper Algorithm 2 EMA branch)
+    #   uncertainty_mode: "mc_dropout"  → MC-Dropout           (~22h, paper Algorithm 2 MC-dropout branch)
+    # ============================================================
+    uncertainty_mode: "ema"
+
+    model_name: "grass_mixed_bge_m3"   # base name — code appends _ema or _mcdp automatically
     base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_mixed_bge_m3"
+
+    # --- Shared ---
     P: 200             # candidates retrieved from stale ANN per query
-    L: 50              # shortlist size: top-L by cheap pass before MC-dropout (L <= P)
+    L: 50              # shortlist size: top-L by cheap pass (L <= P)
     m: 5               # negatives per query (= train_group_size - 1)
-    T: 10              # MC-dropout forward passes
-    lambda_val: 0.5    # uncertainty weight in g = s_hat + lambda * sigma
-    mc_batch_size: 256  # batch size for in-process MC-dropout encoding
-    query_batch_size: 64  # number of queries processed per GrassSampler batch (controls peak GPU memory)
+    lambda_val: 2.0    # uncertainty weight in g = s_hat + lambda * sigma
+    mc_batch_size: 512 # encoding batch size (controls peak GPU memory during mining)
     learning_rate: 1e-5
-    batch_size: 64
-    per_device_eval_batch_size: 512
     num_epochs: 1
     train_group_size: 6
     bf16: true
@@ -93,6 +98,17 @@ training:
     save_total_limit: 1
     logging_steps: 100
     eval_top_k: 10
+    per_device_eval_batch_size: 512
+
+    # --- EMA-specific (used when uncertainty_mode: "ema") ---
+    ema_alpha: 0.999
+    ema_batch_size: 32 # smaller batch for full backprop — avoids OOM with BGE-M3
+
+    # --- MC-dropout-specific (used when uncertainty_mode: "mc_dropout") ---
+    T: 5               # MC-dropout forward passes
+    mc_dropout_p: 0.3  # dropout probability for MC passes (0.1 default is too weak)
+    query_batch_size: 128  # queries per GrassSampler outer batch
+    batch_size: 64
   ance:
     base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_mixed_bge_m3"
     model_name: "ance_mixed_bge_m3"

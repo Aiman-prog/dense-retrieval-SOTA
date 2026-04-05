@@ -2,8 +2,8 @@ import os
 import sys
 import gc
 import json
-import random
 import argparse
+import subprocess
 import numpy as np
 import pandas as pd
 import faiss
@@ -20,57 +20,12 @@ sys.path.append(str(project_root / 'src'))
 
 from utils.helpers import get_path, get_training_context, load_config, \
                           encode_to_pickle, build_faiss_index, patch_tevatron_loss
-from data.preprocessor import BRIGHTPreprocessor
-from evaluation.trec_eval_wrapper import TrecEvalWrapper
+from data.preprocessor import run_setup
 
 # 🩹 Tevatron Bug Patch
 if not hasattr(DenseModel, "_keys_to_ignore_on_save"):
     setattr(DenseModel, "_keys_to_ignore_on_save", None)
 
-def run_setup():
-    """Logic for Steps 1-4: Skips if files exist."""
-    corpus_path = get_path("processed") / "reasonir_corpus.jsonl"
-    queries_path = get_path("processed") / "train_queries.jsonl"
-    qrels_path = get_path("processed") / "train_qrels.txt"
-    mixture_dir = get_path("processed") / "training_mixture"
-
-    if all(p.exists() and p.stat().st_size > 0 for p in [corpus_path, queries_path, qrels_path]):
-        print("⏩ Skipping setup: Target files found.", flush=True)
-        return corpus_path, queries_path, qrels_path
-
-    print("🛠️ Running ANCE Setup...", flush=True)
-    preprocessor = BRIGHTPreprocessor()
-    mix_files = [f for f in mixture_dir.glob("*.jsonl") if not f.name.startswith('.')]
-
-    # Read all mixture files once
-    mix_dfs = []
-    for f in mix_files:
-        df = pd.read_json(f, lines=True)
-        if 'query_text' in df.columns: df = df.rename(columns={'query_text': 'query'})
-        mix_dfs.append(df)
-    mix_df = pd.concat(mix_dfs, ignore_index=True)
-
-    # Corpus: all passages from mixture files (same source as crossbatch/inbatch)
-    all_passages = []
-    for col in ['positive_passages', 'negative_passages']:
-        for record_list in mix_df[col]:
-            all_passages.extend(record_list)
-    corpus_df = pd.DataFrame(all_passages).rename(columns={'docid': 'doc_id'})[['doc_id', 'text']].drop_duplicates(subset=['doc_id'])
-    preprocessor.prepare_tevatron_corpus(corpus_df, filename="reasonir_corpus.jsonl")
-    print(f"Corpus: {len(corpus_df)} passages", flush=True)
-
-    # Queries
-    queries_df = mix_df[['query_id', 'query']].drop_duplicates(subset=['query_id'])
-    preprocessor.prepare_tevatron_queries(queries_df, filename="train_queries.jsonl")
-
-    # Qrels
-    pos_pairs = []
-    for _, row in mix_df.iterrows():
-        for pos in row['positive_passages']:
-            pos_pairs.append({'query_id': str(row['query_id']), 'doc_id': str(pos['docid']), 'relevance': 1})
-    preprocessor.prepare_trec_qrels(pd.DataFrame(pos_pairs).drop_duplicates(), filename="train_qrels.txt")
-
-    return corpus_path, queries_path, qrels_path
 
 def main():
     parser = argparse.ArgumentParser(add_help=False)
@@ -177,37 +132,19 @@ def main():
         gc.collect()
         torch.cuda.empty_cache()
 
-        # --- PHASE E: EVALUATE (Strict Inspiration: evaluate.py loop) ---
-        eval_summary = []
+        # --- PHASE E: EVALUATE ---
         for domain in config['evaluation'].get('eval_domains', []):
-            d_corpus = get_path("processed") / f"{domain}_corpus.jsonl"
-            d_queries = get_path("processed") / f"{domain}_queries.jsonl"
-            d_qrels = get_path("processed") / f"{domain}_qrels.txt"
-            d_eval = ep_dir / "eval" / domain; d_eval.mkdir(parents=True, exist_ok=True)
-            
-            # Re-use encode_to_pickle for eval encoding
-            encode_to_pickle(current_model_path, d_corpus,  d_eval/"c.pkl", False, ctx, config)
-            encode_to_pickle(current_model_path, d_queries, d_eval/"q.pkl", True,  ctx, config)
+            subprocess.run([
+                sys.executable, str(project_root / 'src/evaluation/evaluate.py'),
+                '--model_path', current_model_path,
+                '--domain', domain,
+            ], check=True)
 
-            with open(d_eval/"c.pkl", 'rb') as f: dc = pickle.load(f)
-            with open(d_eval/"q.pkl", 'rb') as f: dq = pickle.load(f)
-            idx_e = faiss.IndexFlatIP(dc[0].shape[1]); idx_e.add(dc[0].astype(np.float32))
-            eval_top_k = ctx['args'].get('eval_top_k', 10)
-            s_e, i_e = idx_e.search(dq[0].astype(np.float32), eval_top_k)
-            
-            results = {str(dq[1][j]): {str(dc[1][i_e[j][k]]): float(s_e[j][k]) for k in range(len(i_e[j])) if i_e[j][k] >= 0} for j in range(len(dq[1]))}
-            eval_qrels_data = []
-            with open(d_qrels, 'r') as f:
-                for line in f:
-                    parts = line.strip().split()
-                    if len(parts) >= 4:
-                        eval_qrels_data.append({'query_id': parts[0], 'doc_id': parts[2], 'relevance': parts[3]})
-            eval_eval_df = pd.DataFrame(eval_qrels_data)
-            evaluator = TrecEvalWrapper(eval_eval_df)
-            metrics = evaluator.evaluate(results, {'recip_rank', 'ndcg_cut_10'})
-            eval_summary.append({'domain': domain, 'ndcg10': metrics.get('ndcg_cut_10', 0)})
-        
-        print(f"📈 Ep {ep} Mean NDCG@10: {pd.DataFrame(eval_summary)['ndcg10'].mean():.4f}", flush=True)
+        scores = [
+            json.load(open(get_path("results") / f"{domain}_results.json"))['metrics'].get('ndcg_cut_10', 0)
+            for domain in config['evaluation'].get('eval_domains', [])
+        ]
+        print(f"📈 Ep {ep} Mean NDCG@10: {sum(scores) / len(scores):.4f}", flush=True)
 
 if __name__ == "__main__":
     main()
