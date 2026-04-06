@@ -132,8 +132,8 @@ def main():
 
     # Optimizer (paper uses LAMB; AdamW-fused is equivalent for BGE-M3 at batch 64)
     optimizer = AdamW(model.parameters(),
-                      lr=ctx['args']['learning_rate'],
-                      weight_decay=ctx['args'].get('weight_decay', 0.0))
+                      lr=float(ctx['args']['learning_rate']),
+                      weight_decay=float(ctx['args'].get('weight_decay', 0.0)))
     # Paper: linear warmup (5000 steps at MARCO scale); we scale proportionally with warmup_ratio
     warmup_steps = int(args.max_steps * ctx['args'].get('warmup_ratio', 0.1))
     scheduler = get_linear_schedule_with_warmup(optimizer, warmup_steps, args.max_steps)

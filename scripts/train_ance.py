@@ -308,6 +308,7 @@ def main():
         '--corpus_file',      str(corpus_file),
         '--query_file',       str(query_file),
         '--qrels_file',       str(qrels_file),
+        '--recipe',           recipe,
     ], env=infer_env)
     print(f"[ANCE] Inferencer started on GPU {infer_gpu} (pid {infer_proc.pid})", flush=True)
 

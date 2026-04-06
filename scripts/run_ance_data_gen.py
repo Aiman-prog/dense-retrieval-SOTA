@@ -59,17 +59,19 @@ def main():
     parser.add_argument('--corpus_file', required=True)
     parser.add_argument('--query_file', required=True)
     parser.add_argument('--qrels_file', required=True)
+    parser.add_argument('--recipe', default='ance')
     args = parser.parse_args()
 
     from transformers.trainer_utils import get_last_checkpoint
 
     ann_dir = Path(args.ann_dir)
     ann_dir.mkdir(exist_ok=True, parents=True)
-    ctx = get_training_context("ance")
+    Path(args.output_model_dir).mkdir(exist_ok=True, parents=True)  # prevent FileNotFoundError before first checkpoint
+    ctx = get_training_context(args.recipe)
     config = load_config()
     poll_interval = ctx['args'].get('data_gen_poll_interval', 60)
-    n_negs = ctx['args']['train_group_size'] - 1   # 1 negative per query (train_group_size=2)
-    mining_depth = ctx['args']['mining_depth']      # 200 (paper: top-200)
+    n_negs = ctx['args']['train_group_size'] - 1
+    mining_depth = ctx['args']['mining_depth']
 
     qrels_dict = _load_qrels(args.qrels_file)
     corpus_lookup = _load_corpus_lookup(args.corpus_file)
@@ -118,7 +120,7 @@ def main():
         # Write new JSONL training files to ann_dir/training_data_{N}/
         out_data_dir = ann_dir / f"training_data_{output_num}"
         out_data_dir.mkdir(exist_ok=True)
-        for f_path in (get_path("processed") / "training_mixture").glob("*.jsonl"):
+        for f_path in (get_path("processed") / ctx['args']['mixture_dir']).glob("*.jsonl"):
             if f_path.name.startswith('.'):
                 continue
             with open(f_path) as f_in, open(out_data_dir / f_path.name, 'w') as f_out:
