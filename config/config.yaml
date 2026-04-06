@@ -126,7 +126,7 @@ training:
     eval_qrels_file: null
     eval_metric: "ndcg_cut_10"
   ance_msmarco:
-    base_model: "BAAI/bge-m3"
+    base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_mixed_bge_m3"
     model_name: "ance_msmarco_bge_m3"
     train_group_size: 2                 # Paper: 1 negative per positive (Table 3)
     mining_depth: 200                   # Paper: top-200 ANN (Table 7)

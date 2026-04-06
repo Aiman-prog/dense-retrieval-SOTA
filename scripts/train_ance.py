@@ -322,6 +322,7 @@ def main():
             '--ann_dir',            str(ann_dir),
             '--output_dir',         str(output_model_dir),
             '--max_steps',          str(max_steps),
+            '--recipe',             recipe,
         ], env=train_env, check=True)
     finally:
         infer_proc.terminate()

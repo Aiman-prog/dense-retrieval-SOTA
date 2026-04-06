@@ -85,9 +85,10 @@ def main():
     parser.add_argument('--ann_dir',            required=True)
     parser.add_argument('--output_dir',         required=True)
     parser.add_argument('--max_steps',          type=int, required=True)
+    parser.add_argument('--recipe',             default='ance')
     args = parser.parse_args()
 
-    ctx = get_training_context("ance")
+    ctx = get_training_context(args.recipe)
     config = load_config()
     # Note: temperature scaling is handled by ModelArguments.temperature → DenseModel.self.temperature
     # (encoder.py line 70: loss = self.compute_loss(scores / self.temperature, target))
