@@ -307,13 +307,13 @@ class BRIGHTPreprocessor:
         return str(output_path)
 
     def prepare_msmarco_full_corpus(self,
-                                    dataset_name: str = "Tevatron/msmarco-passage",
+                                    dataset_name: str = "Tevatron/msmarco-passage-corpus",
                                     cache_dir: Optional[str] = None,
                                     filename: str = "msmarco_corpus.jsonl") -> str:
         """Write all 8.8M MS MARCO passages with real passage IDs for FAISS indexing."""
         cache = Path(cache_dir) if cache_dir else get_path("bright")
         print("📥 Loading MS MARCO full corpus (~8.8M passages)...")
-        dataset = load_dataset(dataset_name, split='corpus', cache_dir=str(cache))
+        dataset = load_dataset(dataset_name, split='train', cache_dir=str(cache))
         corpus_df = pd.DataFrame({'doc_id': dataset['docid'], 'text': dataset['text']})
         print(f"   Loaded {len(corpus_df):,} passages")
         return self.prepare_tevatron_corpus(corpus_df, filename=filename)
