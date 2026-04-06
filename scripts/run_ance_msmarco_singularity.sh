@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 
-#SBATCH --job-name=ance-reasonir
+#SBATCH --job-name=ance-msmarco
 #SBATCH --partition=gpu-a100
-#SBATCH --time=10:00:00              # Async ANCE: encoding passes add significant time
+#SBATCH --time=24:00:00              # ~16-18h estimated (BGE-M3 on A100 is ~5x faster than paper's RoBERTa on 4xV100)
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16           # More CPUs for FAISS operations
+#SBATCH --cpus-per-task=16
 #SBATCH --gpus-per-task=2            # 1:1 Trainer:Inferencer GPU split (paper Appendix A.3)
 #SBATCH --mem-per-cpu=8000M
 #SBATCH --account=Education-EEMCS-MSc-DSAIT
-#SBATCH --output=logs/ance_%j.out
-#SBATCH --error=logs/ance_%j.err
+#SBATCH --output=logs/ance_msmarco_%j.out
+#SBATCH --error=logs/ance_msmarco_%j.err
 #SBATCH --chdir=/home/aimanabdulwaha/dense-retrieval-SOTA
 
 # --- Environment Setup ---
@@ -24,27 +24,26 @@ export TRANSFORMERS_OFFLINE=1
 
 # Memory & Performance Tuning
 export PYTORCH_ALLOC_CONF="expandable_segments:True"
-export OMP_NUM_THREADS=16            # Matches cpus-per-task for FAISS speed
+export OMP_NUM_THREADS=16
 
 # Container path
 CONTAINER="/scratch/${USER}/containers/pytorch_2.1.sif"
 
-# --- Run ANCE Pipeline in Container ---
-echo "🚀 Starting Iterative ANCE Loop..."
-echo "📋 ANCE will iteratively: train → encode → mine → repeat"
+# --- Run ANCE MS MARCO Pipeline ---
+echo "🚀 Starting ANCE MS MARCO Validation..."
 
 singularity exec --nv \
     --bind /scratch/${USER}:/scratch/${USER} \
     --bind /home/${USER}:/home/${USER} \
     ${CONTAINER} \
-    python -u scripts/train_ance.py
+    python -u scripts/train_ance.py --recipe ance_msmarco
 
 EXIT_CODE=$?
 
 if [ $EXIT_CODE -eq 0 ]; then
-    echo "✅ ANCE training completed successfully"
+    echo "✅ ANCE MS MARCO completed successfully"
 else
-    echo "❌ ANCE training failed with code $EXIT_CODE"
+    echo "❌ ANCE MS MARCO failed with code $EXIT_CODE"
 fi
 
 echo "=========================================="

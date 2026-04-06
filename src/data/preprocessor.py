@@ -306,6 +306,89 @@ class BRIGHTPreprocessor:
         print(f"✅ MS MARCO Complete! Saved: {count:,}")
         return str(output_path)
 
+    def prepare_msmarco_full_corpus(self,
+                                    dataset_name: str = "Tevatron/msmarco-passage",
+                                    cache_dir: Optional[str] = None,
+                                    filename: str = "msmarco_corpus.jsonl") -> str:
+        """Write all 8.8M MS MARCO passages with real passage IDs for FAISS indexing."""
+        cache = Path(cache_dir) if cache_dir else get_path("bright")
+        print("📥 Loading MS MARCO full corpus (~8.8M passages)...")
+        dataset = load_dataset(dataset_name, split='corpus', cache_dir=str(cache))
+        corpus_df = pd.DataFrame({'doc_id': dataset['docid'], 'text': dataset['text']})
+        print(f"   Loaded {len(corpus_df):,} passages")
+        return self.prepare_tevatron_corpus(corpus_df, filename=filename)
+
+    def prepare_msmarco_tevatron_train(self,
+                                       dataset_name: str = "Tevatron/msmarco-passage",
+                                       cache_dir: Optional[str] = None,
+                                       mixture_filename: str = "msmarco_training_mixture/train_msmarco.jsonl",
+                                       queries_filename: str = "msmarco_train_queries.jsonl",
+                                       qrels_filename: str = "msmarco_train_qrels.txt") -> tuple:
+        """
+        From Tevatron/msmarco-passage train split, write:
+          - training mixture JSONL (real docids, for Trainer DataLoader)
+          - train queries JSONL (for Inferencer encode)
+          - train qrels TREC (for ANN mining: exclude true positives)
+        Returns (mixture_path, queries_path, qrels_path).
+        """
+        cache = Path(cache_dir) if cache_dir else get_path("bright")
+        print("📥 Loading Tevatron/msmarco-passage train split...")
+        dataset = load_dataset(dataset_name, split='train', cache_dir=str(cache))
+
+        mixture_path = self.output_dir / mixture_filename
+        mixture_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(mixture_path, 'w') as f:
+            for entry in dataset:
+                record = {
+                    "query_id": str(entry['query_id']),
+                    "query":    entry['query'],
+                    "positive_passages": entry['positive_passages'],
+                    "negative_passages": entry['negative_passages'],
+                }
+                f.write(json.dumps(record, ensure_ascii=False) + '\n')
+        print(f"   Wrote {len(dataset):,} training records to {mixture_path}")
+
+        queries_df = pd.DataFrame({
+            'query_id': [str(x) for x in dataset['query_id']],
+            'query':    dataset['query']
+        }).drop_duplicates('query_id')
+        q_path = self.prepare_tevatron_queries(queries_df, filename=queries_filename)
+
+        rows = []
+        for entry in dataset:
+            for pos in entry['positive_passages']:
+                rows.append({'query_id': str(entry['query_id']),
+                             'doc_id':   str(pos['docid']), 'relevance': 1})
+        qr_path = self.prepare_trec_qrels(
+            pd.DataFrame(rows).drop_duplicates(), filename=qrels_filename
+        )
+        return mixture_path, q_path, qr_path
+
+    def prepare_msmarco_dev(self,
+                            dataset_name: str = "Tevatron/msmarco-passage",
+                            cache_dir: Optional[str] = None) -> tuple:
+        """Write dev queries JSONL and dev qrels for MRR@10 evaluation."""
+        cache = Path(cache_dir) if cache_dir else get_path("bright")
+        print("📥 Loading Tevatron/msmarco-passage dev split...")
+        dataset = load_dataset(dataset_name, split='dev', cache_dir=str(cache))
+
+        queries_df = pd.DataFrame({
+            'query_id': [str(x) for x in dataset['query_id']],
+            'query':    dataset['query']
+        }).drop_duplicates('query_id')
+        q_path = self.prepare_tevatron_queries(queries_df, filename="msmarco_dev_queries.jsonl")
+
+        rows = []
+        for entry in dataset:
+            for pos in entry['positive_passages']:
+                rows.append({'query_id': str(entry['query_id']),
+                             'doc_id':   str(pos['docid']), 'relevance': 1})
+        qr_path = self.prepare_trec_qrels(
+            pd.DataFrame(rows).drop_duplicates(), filename="msmarco_dev_qrels.txt"
+        )
+        return q_path, qr_path
+
+
 def run_setup():
     """
     Prepares the three processed files required by any training script that does

@@ -51,6 +51,7 @@ def get_path(key: str, model_name: str = None) -> Path:
         "models": base / p_cfg['models_dir'],
         "results": base / p_cfg['results_dir'],
         "temp_ance": base / "temp_ance_workdir",
+        "temp_ance_msmarco": base / "temp_ance_msmarco_workdir",
         "temp_grass": base / "temp_grass_workdir"
     }
     
@@ -118,6 +119,16 @@ def encode_to_pickle(model_path, input_file, output_pkl, is_query, ctx, config):
             subprocess.run(cmd + ['--encode_is_qry', '--q_max_len', q_len], check=True)
     else:
         subprocess.run(cmd + ['--passage_max_len', str(config['model'].get('passage_max_len', 512))], check=True)
+
+
+def count_jsonl_examples(pattern: str) -> int:
+    """Count total lines across all JSONL files matching a glob pattern."""
+    import glob as glob_module
+    total = 0
+    for path in glob_module.glob(pattern):
+        with open(path) as f:
+            total += sum(1 for line in f if line.strip())
+    return total
 
 
 def build_faiss_index(corpus_pkl_path):
