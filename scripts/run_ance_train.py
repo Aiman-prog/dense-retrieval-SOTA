@@ -151,6 +151,7 @@ def main():
         # Paper: "when the new ANN index is ready, it immediately replaces existing negatives"
         if global_step > 0 and global_step % logging_steps == 0:
             ann_no, ann_path = get_latest_ann_data(ann_dir)
+            print(f"[Trainer] ANN check at step {global_step}: latest={ann_no}, using={last_ann_no}", flush=True)
             if ann_path is not None and ann_no > last_ann_no:
                 print(f"[Trainer] Step {global_step}: ANN #{ann_no} ready — swapping DataLoader",
                       flush=True)

@@ -411,9 +411,14 @@ class BRIGHTPreprocessor:
         )
         q_path = self.prepare_tevatron_queries(queries_df, filename="msmarco_dev_queries.jsonl")
 
-        qr_path = self.prepare_trec_qrels(
-            pd.DataFrame(qrel_rows).drop_duplicates(), filename="msmarco_dev_qrels.txt"
-        )
+        if qrel_rows:
+            qr_path = self.prepare_trec_qrels(
+                pd.DataFrame(qrel_rows).drop_duplicates(), filename="msmarco_dev_qrels.txt"
+            )
+        else:
+            print("   ⚠️  No positive_passages in validation split — qrels not written.")
+            print("      Download official qrels manually: msmarco.blob.core.windows.net/msmarcoranking/qrels.dev.small.tsv.gz")
+            qr_path = self.output_dir / "msmarco_dev_qrels.txt"
         return q_path, qr_path
 
 

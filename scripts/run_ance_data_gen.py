@@ -10,6 +10,8 @@ import sys
 import time
 import json
 import pickle
+import shutil
+import random
 import argparse
 import numpy as np
 from pathlib import Path
@@ -87,6 +89,9 @@ def main():
 
         if (next_checkpoint is None or next_checkpoint == last_checkpoint
                 or not is_valid_checkpoint(next_checkpoint)):
+            print(f"[Inferencer] Polling... last={Path(last_checkpoint).name if last_checkpoint else None} "
+                  f"next={Path(next_checkpoint).name if next_checkpoint else None} "
+                  f"valid={is_valid_checkpoint(next_checkpoint) if next_checkpoint else False}", flush=True)
             time.sleep(poll_interval)
             continue
 
@@ -96,8 +101,12 @@ def main():
         # Re-encode entire corpus with latest checkpoint (paper: "recomputes encodings of entire corpus")
         work_dir = ann_dir / f"work_{output_num}"
         work_dir.mkdir(exist_ok=True)
+        _t0 = time.time()
         encode_to_pickle(next_checkpoint, args.corpus_file, work_dir / "corpus.pkl", False, ctx, config)
+        print(f"[Inferencer] Corpus encode done in {time.time()-_t0:.1f}s", flush=True)
+        _t1 = time.time()
         encode_to_pickle(next_checkpoint, args.query_file,  work_dir / "query.pkl",  True,  ctx, config)
+        print(f"[Inferencer] Query encode done in {time.time()-_t1:.1f}s", flush=True)
 
         # Build FAISS IndexFlatIP and mine hard negatives
         # Paper Eq. 13: D^-_ANCE = ANN_{f(q,d)} \ D^+
@@ -112,10 +121,11 @@ def main():
             true_negs = [d for d in pot if d not in qrels_dict.get(qid, set())]
             candidates = true_negs if true_negs else pot
             # Top-n hardest: earliest in FAISS-ranked list = highest similarity = hardest negative
-            if len(candidates) >= n_negs:
-                mined_negs[qid] = candidates[:n_negs]
+            pool = candidates[:mining_depth]
+            if len(pool) >= n_negs:
+                mined_negs[qid] = random.sample(pool, n_negs)
             else:
-                mined_negs[qid] = (candidates * (n_negs // max(len(candidates), 1) + 1))[:n_negs]
+                mined_negs[qid] = (pool * (n_negs // max(len(pool), 1) + 1))[:n_negs]
 
         # Write new JSONL training files to ann_dir/training_data_{N}/
         out_data_dir = ann_dir / f"training_data_{output_num}"
@@ -136,6 +146,11 @@ def main():
         # Write ready marker AFTER all JSONL files are fully written (prevents partial reads)
         (ann_dir / f"ready_{output_num}").write_text(str(output_num))
         print(f"[Inferencer] ANN data #{output_num} ready. Waiting for next checkpoint...", flush=True)
+
+        # Clean up pkl files to free ~36GB disk space per cycle
+        import shutil
+        shutil.rmtree(work_dir, ignore_errors=True)
+        print(f"[Inferencer] Cleaned up {work_dir}", flush=True)
 
         last_checkpoint = next_checkpoint
         output_num += 1

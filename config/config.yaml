@@ -130,15 +130,15 @@ training:
     model_name: "ance_msmarco_bge_m3"
     train_group_size: 2                 # Paper: 1 negative per positive (Table 3)
     mining_depth: 200                   # Paper: top-200 ANN (Table 7)
-    total_epochs: 10                    # Paper: ~10 ANCE epochs to converge
+    total_epochs: 3                     # ~6 ANN refreshes to match paper (1 epoch ≈ 2 refreshes at bs=64)
     learning_rate: 5e-6                 # Paper LAMB 3e-6; AdamW equiv ~5e-6 for BGE-M3
     batch_size: 64
-    per_device_eval_batch_size: 256     # 8.8M corpus needs memory headroom
+    per_device_eval_batch_size: 256     # full A100 (80GB) — ~35min per encode vs 2.3h at 64
     dataloader_num_workers: 4
     warmup_ratio: 0.06                  # Paper: 5000 steps / ~83k total ≈ 6%
     weight_decay: 0.01
     max_grad_norm: 1.0
-    save_steps: 10000                   # Paper: refresh every 10k batches
+    save_steps: 1250                    # Paper: 10k batches @ bs=8 → scaled: 10000×8/64=1250
     save_total_limit: 3
     logging_steps: 500
     eval_top_k: 1000

@@ -2,6 +2,7 @@ import os
 import sys
 import math
 import json
+import random
 import argparse
 import subprocess
 import pickle
@@ -122,10 +123,11 @@ def _encode_and_mine_initial(ctx, config, corpus_file, query_file, corpus_lookup
         pot = [c_ids[j] for j in indices[i] if j >= 0]
         true_negs = [d for d in pot if d not in qrels_dict.get(qid, set())]
         candidates = true_negs if true_negs else pot
-        if len(candidates) >= n_negs:
-            mined_negs[qid] = candidates[:n_negs]
+        pool = candidates[:mining_depth]
+        if len(pool) >= n_negs:
+            mined_negs[qid] = random.sample(pool, n_negs)
         else:
-            mined_negs[qid] = (candidates * (n_negs // max(len(candidates), 1) + 1))[:n_negs]
+            mined_negs[qid] = (pool * (n_negs // max(len(pool), 1) + 1))[:n_negs]
 
     for f_path in mixture_dir.glob("*.jsonl"):
         if f_path.name.startswith('.'):
