@@ -112,24 +112,33 @@ training:
   ance:
     base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_mixed_bge_m3"
     model_name: "ance_mixed_bge_m3"
-    num_episodes: 3
+    train_group_size: 6       # 5 negatives — matches GRASS for fair comparison
     mining_depth: 200
-    learning_rate: 1e-5  # Lower LR for BGE-M3 continued training
+    total_epochs: 3           # async design: Trainer runs continuously; Inferencer refreshes in parallel
+    learning_rate: 1e-5
     batch_size: 64
     per_device_eval_batch_size: 512
-    num_epochs: 1
     bf16: true
-    train_group_size: 6
     dataloader_num_workers: 2
     warmup_ratio: 0.1
     weight_decay: 0.01
     max_grad_norm: 1.0
     gradient_checkpointing: false
-    save_strategy: "steps"
     save_steps: 500
     save_total_limit: 1
     logging_steps: 100
     eval_top_k: 10
+    data_gen_poll_interval: 60
+    corpus_file: "reasonir_corpus.jsonl"
+    train_queries_file: "train_queries.jsonl"
+    train_qrels_file: "train_qrels.txt"
+    mixture_dir: "training_mixture"
+    temp_workdir: "temp_ance"
+    setup_mode: "reasonir_mixture"
+    eval_corpus_file: null
+    eval_queries_file: null
+    eval_qrels_file: null
+    eval_metric: "ndcg_cut_10"
 
 
 # --- Evaluation Settings (Restored & Cleaned) ---

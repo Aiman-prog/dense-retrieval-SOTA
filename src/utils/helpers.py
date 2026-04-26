@@ -61,7 +61,7 @@ def get_path(key: str, model_name: str = None) -> Path:
 def get_training_context(training_type: str = "inbatch") -> Dict[str, Any]:
     config = load_config()
     recipe = config['training'][training_type]
-    model_name = config['model']['base_model']
+    model_name = recipe.get('base_model') or config['model']['base_model']
     
     # Force absolute path resolution
     cache_base = get_path("bright").resolve() / "hub"
@@ -149,3 +149,13 @@ def patch_tevatron_loss(temperature):
 
     gc_module.SimpleContrastiveLoss = SimpleContrastiveLossPatched
     gc_module.DistributedContrastiveLoss = DistributedContrastiveLossPatched
+
+
+def count_jsonl_examples(pattern: str) -> int:
+    """Count total lines across all JSONL files matching a glob pattern."""
+    import glob as glob_module
+    total = 0
+    for path in glob_module.glob(pattern):
+        with open(path) as f:
+            total += sum(1 for line in f if line.strip())
+    return total
