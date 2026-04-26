@@ -3,6 +3,7 @@
 import os
 import sys
 import json
+import hashlib
 import pandas as pd
 from pathlib import Path
 from typing import Optional, Dict, List
@@ -158,9 +159,10 @@ class BRIGHTPreprocessor:
                 # Process negative passages (direct text)
                 for item in entry.get('neg', []):
                     text = item[1] if isinstance(item, list) else item
+                    text = str(text)
                     negative_passages.append({
-                        "docid": f"hq_neg_{count}", 
-                        "text": str(text)
+                        "docid": f"hq_neg_{count}",
+                        "text": text
                     })
 
                 # 3. Validation: Only save if we have both pos and neg
@@ -234,15 +236,15 @@ class BRIGHTPreprocessor:
                 for item in entry.get('pos', []):
                     text = item[1] if isinstance(item, list) else item
                     positive_passages.append({
-                        "docid": f"vl_pos_{count}", 
+                        "docid": f"vl_pos_{count}",
                         "text": str(text)
                     })
-                
+
                 # Process negative passages (direct text)
                 for item in entry.get('neg', []):
                     text = item[1] if isinstance(item, list) else item
                     negative_passages.append({
-                        "docid": f"vl_neg_{count}", 
+                        "docid": f"vl_neg_{count}",
                         "text": str(text)
                     })
 
@@ -274,36 +276,41 @@ class BRIGHTPreprocessor:
         Prepare MS MARCO training data with optional row limit.
         """
         import random
-        
+
         output_path = self.output_dir / filename
         cache = Path(cache_dir) if cache_dir else get_path("bright")
-        
+
         print(f"📥 Loading MS MARCO dataset ({subset})...")
         dataset = load_dataset(dataset_name, subset, split='train', cache_dir=str(cache))
-        
-        # Sample if limit specified
+
         total = len(dataset)
-        if limit and limit < total:
-            indices = random.sample(range(total), limit)
-            print(f"   Sampling {limit:,} from {total:,} examples...")
-        else:
-            indices = range(total)
-            print(f"   Using all {total:,} examples...")
-        
+        # Shuffle indices for randomness, then iterate until we collect `limit` clean records
+        indices = list(range(total))
+        random.shuffle(indices)
+        print(f"   Collecting up to {limit:,} clean records from {total:,} examples (skipping pos==neg)...")
+
         count = 0
+        skipped = 0
         with open(output_path, 'w', encoding='utf-8') as f:
             for idx in indices:
+                if limit is not None and count >= limit:
+                    break
                 entry = dataset[idx]
+                pos_text = entry['positive']
+                neg_text = entry['negative']
+                if neg_text.strip() == pos_text.strip():
+                    skipped += 1
+                    continue
                 record = {
-                    "query_id": f"msmarco_{idx}",
+                    "query_id": f"msmarco_{count}",
                     "query": entry['query'],
-                    "positive_passages": [{"docid": f"msmarco_pos_{idx}", "text": entry['positive']}],
-                    "negative_passages": [{"docid": f"msmarco_neg_{idx}", "text": entry['negative']}]
+                    "positive_passages": [{"docid": f"msmarco_pos_{count}", "text": pos_text}],
+                    "negative_passages": [{"docid": f"msmarco_neg_{count}", "text": neg_text}]
                 }
                 f.write(json.dumps(record, ensure_ascii=False) + '\n')
                 count += 1
-        
-        print(f"✅ MS MARCO Complete! Saved: {count:,}")
+
+        print(f"✅ MS MARCO Complete! Saved: {count:,} | Skipped (pos==neg): {skipped:,}")
         return str(output_path)
 
 def run_setup():
@@ -351,17 +358,33 @@ def run_setup():
     mix_df = pd.concat(mix_dfs, ignore_index=True)
 
     # --- Corpus ---
-    # Collect every passage (positive and negative) from all records, deduplicate by doc_id.
-    # This is the universe of documents the encoder will index for retrieval.
+    # Collect every passage (positive and negative) from all records, deduplicate by text
+    # hash so that passages with identical content but different docids collapse to one
+    # canonical entry. This prevents GRASS/ANCE from retrieving a duplicate of a positive
+    # under a different docid and selecting it as a hard negative.
     all_passages = []
     for col in ['positive_passages', 'negative_passages']:
         for record_list in mix_df[col]:
             all_passages.extend(record_list)
-    corpus_df = (pd.DataFrame(all_passages)
-                 .rename(columns={'docid': 'doc_id'})[['doc_id', 'text']]
-                 .drop_duplicates(subset=['doc_id']))
+    passages_df = (pd.DataFrame(all_passages)
+                   .rename(columns={'docid': 'doc_id'})[['doc_id', 'text']])
+    passages_df['_hash'] = passages_df['text'].apply(
+        lambda t: hashlib.md5(t.strip().encode()).hexdigest()
+    )
+    # First docid seen for each unique text becomes canonical
+    hash_to_canonical = (passages_df.drop_duplicates(subset=['_hash'])
+                         .set_index('_hash')['doc_id'])
+    passages_df['canonical_id'] = passages_df['_hash'].map(hash_to_canonical)
+    # Remap dict: only entries where docid != canonical (i.e. true duplicates)
+    docid_remap = {
+        row['doc_id']: row['canonical_id']
+        for _, row in passages_df[passages_df['doc_id'] != passages_df['canonical_id']].iterrows()
+    }
+    corpus_df = (passages_df.drop_duplicates(subset=['_hash'])
+                 [['doc_id', 'text']])
     preprocessor.prepare_tevatron_corpus(corpus_df, filename="reasonir_corpus.jsonl")
-    print(f"  Corpus: {len(corpus_df)} unique passages", flush=True)
+    print(f"  Corpus: {len(corpus_df)} unique passages "
+          f"(collapsed {len(docid_remap)} duplicate-text docids)", flush=True)
 
     # --- Queries ---
     # One entry per unique query_id — used to encode training queries for ANN search.
@@ -375,7 +398,9 @@ def run_setup():
     pos_pairs = []
     for _, row in mix_df.iterrows():
         for pos in row['positive_passages']:
-            pos_pairs.append({'query_id': str(row['query_id']), 'doc_id': str(pos['docid']), 'relevance': 1})
+            orig_id = str(pos['docid'])
+            canonical_id = docid_remap.get(orig_id, orig_id)
+            pos_pairs.append({'query_id': str(row['query_id']), 'doc_id': canonical_id, 'relevance': 1})
     preprocessor.prepare_trec_qrels(pd.DataFrame(pos_pairs).drop_duplicates(), filename="train_qrels.txt")
     print(f"  Qrels: {len(pos_pairs)} positive pairs", flush=True)
 
