@@ -26,10 +26,10 @@ data:
     subset: "hq"
     train_file: "train_reasonir.jsonl"
   mixed_training:
-    msmarco_samples: 83030   # 23.7% - Public data bridge + calibration (prevent forgetting)
-    vl_samples: 149970       # 42.8% - ALL available clean VL (length generalization)
-    hq_samples: 97000        # 27.7% - Nearly all HQ (reasoning-intensive queries)
-    # Total: 350k samples | Note: VL corrupted before index 95k, only 150k clean samples available
+    msmarco_samples: 120000  # 32.7% - Public data bridge + calibration (prevent forgetting)
+    vl_samples: 149970       # 40.8% - ALL available clean VL (length generalization)
+    hq_samples: 97000        # 26.4% - Nearly all HQ (reasoning-intensive queries)
+    # Total: ~367k samples | VL filtered by min_pos_words=10 (drops classification-label entries)
   msmarco:
     name: "sentence-transformers/msmarco-distilbert-margin-mse-mean-dot-v1"
     subset: "triplet"

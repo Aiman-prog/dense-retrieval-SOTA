@@ -188,39 +188,37 @@ class BRIGHTPreprocessor:
                               cache_dir: Optional[str] = None,
                               filename: str = "train_vl.jsonl",
                               limit: Optional[int] = None,
-                              skip_first_n: int = 95000) -> str:
+                              min_pos_words: int = 10) -> str:
         """
         Prepare VL (Varied-Length) training data from ReasonIR.
         Documents are direct text (no BRIGHT mapping needed).
-        
+
         Args:
             dataset_name: HuggingFace dataset name
             cache_dir: Cache directory for datasets
             filename: Output filename
             limit: Maximum number of samples to process
-            skip_first_n: Skip first N samples (default 95000 to avoid corrupted data)
-        
+            min_pos_words: Minimum positive text length in words — filters out
+                           classification-label entries (single-word positives like
+                           'executive', 'completed') that appear in the first ~88K rows
+                           of the HuggingFace VL split
+
         Returns:
             Path to the generated file
         """
         output_path = self.output_dir / filename
         cache = Path(cache_dir) if cache_dir else get_path("bright")
-        
+
         print(f"📥 Loading ReasonIR VL dataset...")
-        if skip_first_n > 0:
-            print(f"   ⚠️  Skipping first {skip_first_n:,} corrupted samples...")
-        
+        print(f"   Filtering entries with positive text < {min_pos_words} words...")
+
         dataset = load_dataset(dataset_name, "vl", cache_dir=str(cache))
-        
+
         count = 0
         skipped = 0
-        
+
         with open(output_path, 'w', encoding='utf-8') as f:
-            for idx, entry in enumerate(dataset['train']):
-                # Skip corrupted samples
-                if idx < skip_first_n:
-                    continue
-                
+            for entry in dataset['train']:
                 if limit is not None and count >= limit:
                     break
 
@@ -248,11 +246,14 @@ class BRIGHTPreprocessor:
                         "text": str(text)
                     })
 
-                # 3. Validation: Only save if we have both pos and neg
+                # 3. Validation: skip classification-label entries and empty passages
                 if not positive_passages or not negative_passages:
                     skipped += 1
                     continue
-                
+                if len(positive_passages[0]['text'].split()) < min_pos_words:
+                    skipped += 1
+                    continue
+
                 # 4. Construct and Write Record
                 record = {
                     "query_id": f"reasonir_vl_{count}",
@@ -443,7 +444,7 @@ if __name__ == "__main__":
         dataset_name=config['data']['reasonir']['name'],
         filename="training_mixture/train_vl.jsonl",
         limit=mixed_config.get('vl_samples', 233000),
-        skip_first_n=95000  # Skip corrupted early samples
+        min_pos_words=10  # Filter classification-label entries (pos text < 10 words)
     )
     
     # Generate HQ
