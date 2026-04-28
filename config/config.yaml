@@ -1,3 +1,6 @@
+# --- Reproducibility ---
+seed: 42
+
 # --- Global Model Settings ---
 model:
   base_model: "BAAI/bge-m3"
@@ -26,10 +29,10 @@ data:
     subset: "hq"
     train_file: "train_reasonir.jsonl"
   mixed_training:
-    msmarco_samples: 120000  # 32.7% - Public data bridge + calibration (prevent forgetting)
-    vl_samples: 149970       # 40.8% - ALL available clean VL (length generalization)
-    hq_samples: 97000        # 26.4% - Nearly all HQ (reasoning-intensive queries)
-    # Total: ~367k samples | VL filtered by min_pos_words=10 (drops classification-label entries)
+    msmarco_samples: 83030   # 23.7% - Public data bridge + calibration (prevent forgetting)
+    vl_samples: 149970       # 42.8% - ALL available clean VL (length generalization)
+    hq_samples: 97000        # 27.7% - Nearly all HQ (reasoning-intensive queries)
+    # Total: ~350k samples | Note: VL corrupted before index 95k, only 150k clean samples available
   msmarco:
     name: "sentence-transformers/msmarco-distilbert-margin-mse-mean-dot-v1"
     subset: "triplet"
@@ -82,12 +85,12 @@ training:
     # --- Shared ---
     P: 200             # candidates retrieved from stale ANN per query
     L: 50              # shortlist size: top-L by cheap pass (L <= P)
-    m: 5               # negatives per query (= train_group_size - 1)
+    m: 1               # negatives per query (= train_group_size - 1)
     lambda_val: 2.0    # uncertainty weight in g = s_hat + lambda * sigma
     mc_batch_size: 512 # encoding batch size (controls peak GPU memory during mining)
     learning_rate: 1e-5
     num_epochs: 1
-    train_group_size: 6
+    train_group_size: 2
     bf16: true
     dataloader_num_workers: 2
     warmup_ratio: 0.1
@@ -112,7 +115,7 @@ training:
   ance:
     base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_mixed_bge_m3"
     model_name: "ance_mixed_bge_m3"
-    train_group_size: 6       # 5 negatives — matches GRASS for fair comparison
+    train_group_size: 2       # 1 negative — matches original ANCE paper (Table 3)
     mining_depth: 200
     total_epochs: 3           # async design: Trainer runs continuously; Inferencer refreshes in parallel
     learning_rate: 1e-5

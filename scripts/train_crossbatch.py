@@ -6,10 +6,12 @@ from tevatron.retriever.driver.train import main as tevatron_train_main
 # Setup pathing
 project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root / 'src'))
-from utils.helpers import get_training_context, patch_tevatron_loss
+from utils.helpers import get_training_context, patch_tevatron_loss, load_config, set_seed
 
 def main():
     # 1. Configuration & Paths via Centralized Context
+    config = load_config()
+    set_seed(config.get('seed', 42))
     ctx = get_training_context("crossbatch")
     recipe = ctx['args'] 
     
@@ -71,6 +73,7 @@ def main():
         '--temperature', str(ctx['temperature']),
         '--warmup_ratio', str(recipe['warmup_ratio']),
         '--weight_decay', str(recipe['weight_decay']),
+        '--seed', str(config.get('seed', 42)),
     ]
 
     # LoRA: freeze base model, only train adapter matrices

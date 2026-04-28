@@ -151,6 +151,17 @@ def patch_tevatron_loss(temperature):
     gc_module.DistributedContrastiveLoss = DistributedContrastiveLossPatched
 
 
+def set_seed(seed: int):
+    import random as _random
+    import numpy as _np
+    import torch as _torch
+    _random.seed(seed)
+    _np.random.seed(seed)
+    _torch.manual_seed(seed)
+    if _torch.cuda.is_available():
+        _torch.cuda.manual_seed_all(seed)
+
+
 def count_jsonl_examples(pattern: str) -> int:
     """Count total lines across all JSONL files matching a glob pattern."""
     import glob as glob_module

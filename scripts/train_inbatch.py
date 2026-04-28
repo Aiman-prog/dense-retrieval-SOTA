@@ -15,7 +15,7 @@ from pathlib import Path
 project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root / 'src'))
 
-from utils.helpers import get_training_context, patch_tevatron_loss
+from utils.helpers import get_training_context, patch_tevatron_loss, load_config, set_seed
 from tevatron.retriever.modeling import DenseModel
 from tevatron.retriever.driver.train import main as tevatron_train_main
 
@@ -25,7 +25,9 @@ if not hasattr(DenseModel, "_keys_to_ignore_on_save"):
 
 def main():
     # 1. Get unified context (Hyperparameters + Absolute Paths)
-    ctx = get_training_context("inbatch") 
+    config = load_config()
+    set_seed(config.get('seed', 42))
+    ctx = get_training_context("inbatch")
     
     # --- PATH MODIFICATION: Resolve the mixture directory ---
     # We look for the folder named 'training_mixture' inside the data directory
@@ -94,6 +96,7 @@ def main():
         '--pooling', ctx['pooling'],
         '--normalize', str(ctx['normalize']),
         '--temperature', str(ctx['temperature']),
+        '--seed', str(config.get('seed', 42)),
     ]
 
     # 3. Inject Arguments into sys.argv

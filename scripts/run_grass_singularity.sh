@@ -2,7 +2,7 @@
 
 #SBATCH --job-name=grass
 #SBATCH --partition=gpu-a100
-#SBATCH --time=14:00:00              # MCDP: ~11h (mining + train + eval) + buffer
+#SBATCH --time=26:00:00              # MCDP: ~20h (mining + train + eval) + buffer
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16           # Needed for FAISS operations
 #SBATCH --gpus-per-task=1

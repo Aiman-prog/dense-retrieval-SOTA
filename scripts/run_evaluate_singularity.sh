@@ -26,7 +26,7 @@ export TRANSFORMERS_OFFLINE=1
 CONTAINER="/scratch/${USER}/containers/pytorch_2.1.sif"
 
 # --- CONFIGURATION ---
-MODEL_PATH="/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/ance_ep3"
+MODEL_PATH="/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/ance_mixed_bge_m3"
 
 # --- Create output directories ---
 mkdir -p logs

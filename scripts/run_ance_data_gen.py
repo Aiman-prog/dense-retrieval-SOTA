@@ -71,6 +71,8 @@ def main():
     Path(args.output_model_dir).mkdir(exist_ok=True, parents=True)  # prevent FileNotFoundError before first checkpoint
     ctx = get_training_context(args.recipe)
     config = load_config()
+    from utils.helpers import set_seed
+    set_seed(config.get('seed', 42))
     poll_interval = ctx['args'].get('data_gen_poll_interval', 60)
     n_negs = ctx['args']['train_group_size'] - 1
     mining_depth = ctx['args']['mining_depth']

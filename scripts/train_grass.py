@@ -21,7 +21,7 @@ project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root / 'src'))
 
 from utils.helpers import get_path, get_training_context, load_config, \
-                          encode_to_pickle, build_faiss_index, patch_tevatron_loss
+                          encode_to_pickle, build_faiss_index, patch_tevatron_loss, set_seed
 from data.preprocessor import run_setup
 
 # Tevatron Bug Patch
@@ -502,6 +502,7 @@ def main():
     ctx    = get_training_context("grass")
     config = load_config()
     cfg    = config['training']['grass']
+    set_seed(config.get('seed', 42))
 
     workdir = get_path("temp_grass")
     workdir.mkdir(exist_ok=True, parents=True)
@@ -576,6 +577,7 @@ def main():
             '--pooling', ctx['pooling'],
             '--normalize', str(ctx['normalize']),
             '--temperature', str(ctx['temperature']),
+            '--seed', str(config.get('seed', 42)),
         ]
         sys.argv = ['train.py'] + training_args
         patch_tevatron_loss(ctx['temperature'])
