@@ -1,3 +1,4 @@
+
 """
 ANCE Trainer — custom training loop, runs on GPU 0.
 Mirrors run_ann.py's while-loop design: polls ann_dir at logging_steps, swaps DataLoader in-place.
@@ -90,8 +91,6 @@ def main():
 
     ctx = get_training_context(args.recipe)
     config = load_config()
-    from utils.helpers import set_seed
-    set_seed(config.get('seed', 42))
     # Note: temperature scaling is handled by ModelArguments.temperature → DenseModel.self.temperature
     # (encoder.py line 70: loss = self.compute_loss(scores / self.temperature, target))
     # patch_tevatron_loss is NOT called here — it patches gc_trainer which we don't use
