@@ -8,6 +8,7 @@ import subprocess
 import numpy as np
 import pandas as pd
 import torch
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from torch.optim import AdamW
 from torch.nn.utils import clip_grad_norm_
@@ -40,7 +41,10 @@ def encode_batch(model, tokenizer, texts, device, max_len, batch_size):
         batch = texts[i:i + batch_size]
         inputs = tokenizer(batch, padding=True, truncation=True,
                            max_length=max_len, return_tensors='pt').to(device)
-        with torch.no_grad():
+        # [S3] autocast routes matmuls through bf16/TF32 paths — same as encode_batch_train.
+        # enabled=False on CPU so it's safe to run locally without CUDA.
+        with torch.no_grad(), torch.autocast(device_type='cuda', dtype=torch.bfloat16,
+                                              enabled=device.type == 'cuda'):
             out = model(**inputs)
         embs = out.last_hidden_state[:, 0, :]  # CLS pooling
         embs = torch.nn.functional.normalize(embs, dim=-1)
@@ -305,6 +309,50 @@ def train_with_ema_grass(stale_idx, stale_embs, c_id_to_idx, c_ids,
     return output_model_dir
 
 
+def _shortlist_batch(batch_ids, indices, q_embs_det, qrels_dict, c_ids,
+                     c_id_to_idx, stale_embs, corpus_lookup, P, L):
+    """
+    [S7] CPU shortlisting — designed to run in a background thread while the GPU
+    executes the T MC query encodes. All inputs are read-only (numpy arrays and
+    Python dicts/lists), so concurrent access is safe. numpy BLAS releases the
+    GIL during the dot-product calls, enabling genuine CPU/GPU parallelism.
+
+    Extracts what was previously inline in the grass_sampler loop (lines that filtered
+    positives and built the stale-embedding shortlist) into a standalone function so
+    it can be submitted to a ThreadPoolExecutor immediately after the FAISS search,
+    before the GPU has started the MC passes.
+
+    Returns (batch_query_shortlist, shortlist_ids, shortlist_texts, shortlist_to_idx).
+    """
+    # Filter true positives out of each query's P ANN candidates
+    batch_query_cands = {}
+    for i, qid in enumerate(batch_ids):
+        cands = [c_ids[j] for j in indices[i]
+                 if j >= 0 and c_ids[j] not in qrels_dict.get(qid, set())]
+        batch_query_cands[qid] = cands
+
+    # Shortlist to top-L per query using cheap stale-embedding dot products
+    batch_query_shortlist = {}
+    shortlist_cand_ids_set = set()
+    for i, qid in enumerate(batch_ids):
+        cands = batch_query_cands[qid]
+        if not cands:
+            batch_query_shortlist[qid] = []
+            continue
+        stale_idxs = [c_id_to_idx[d] for d in cands]
+        scores     = stale_embs[stale_idxs] @ q_embs_det[i]   # (N_cands_q,) — numpy BLAS, releases GIL
+        top_l      = np.argsort(scores)[::-1][:L]
+        shortlist  = [cands[k] for k in top_l]
+        batch_query_shortlist[qid] = shortlist
+        shortlist_cand_ids_set.update(shortlist)
+
+    shortlist_ids    = list(shortlist_cand_ids_set)
+    shortlist_texts  = [corpus_lookup.get(did, "") for did in shortlist_ids]
+    shortlist_to_idx = {did: idx for idx, did in enumerate(shortlist_ids)}
+    n_filtered = sum(len(v) for v in batch_query_cands.values())
+    return batch_query_shortlist, shortlist_ids, shortlist_texts, shortlist_to_idx, n_filtered
+
+
 def grass_sampler(model_path, stale_idx, stale_embs, c_id_to_idx, c_ids, corpus_lookup, mix_df,
                   qrels_dict, cfg, config, out_dir):
     """
@@ -378,6 +426,16 @@ def grass_sampler(model_path, stale_idx, stale_embs, c_id_to_idx, c_ids, corpus_
     # Peak memory per batch: T × query_batch_size × L × dim (shortlisted candidates).
     mined_negs = {}
     t_loop_start = time.time()
+
+    # [S6] Open mining log for per-query uncertainty analysis after training
+    log_path = out_dir / "mining_log.jsonl"
+    log_path.parent.mkdir(exist_ok=True, parents=True)
+    mining_log_f = open(log_path, 'w')
+
+    # [S7] One persistent background thread — CPU shortlisting runs here while GPU
+    # does T MC query encodes. max_workers=1 avoids over-subscribing CPU cores.
+    cpu_exec = ThreadPoolExecutor(max_workers=1)
+
     for b, batch_start in enumerate(range(0, n_queries, query_batch_size)):
         batch_ids   = query_ids[batch_start:batch_start + query_batch_size]
         batch_texts = query_texts[batch_start:batch_start + query_batch_size]
@@ -389,53 +447,49 @@ def grass_sampler(model_path, stale_idx, stale_embs, c_id_to_idx, c_ids, corpus_
 
         _, indices = stale_idx.search(q_embs_det, P)
 
-        # T MC-dropout query encodings for uncertainty scoring (Algorithm 2, Lines 6-7)
-        q_embs_all   = [encode_batch(model, tokenizer, batch_texts, device, q_max_len, mc_batch_size)
-                        for _ in range(T)]
-        q_embs_stack = np.stack(q_embs_all, axis=0)  # (T, B, dim)
+        # [S7] Launch CPU filter+shortlist in a background thread immediately after FAISS.
+        # filter+shortlist only depends on indices and q_embs_det (both ready now), NOT on
+        # q_embs_stack — so it can safely run while the GPU executes the T MC query encodes below.
+        shortlist_fut = cpu_exec.submit(
+            _shortlist_batch, batch_ids, indices, q_embs_det, qrels_dict,
+            c_ids, c_id_to_idx, stale_embs, corpus_lookup, P, L
+        )
 
-        # Collect candidate doc IDs for this batch, filtering true positives
-        batch_query_cands = {}
-        for i, qid in enumerate(batch_ids):
-            cands = [c_ids[j] for j in indices[i] if j >= 0 and c_ids[j] not in qrels_dict.get(qid, set())]
-            batch_query_cands[qid] = cands
+        # [S1] Vectorize T MC query encodes into one forward pass instead of T serial calls.
+        # batch_texts * T repeats the list T times: [t0..tB, t0..tB, ...]. PyTorch dropout
+        # samples an independent mask per batch element, so each of the T copies of text_i
+        # gets a different stochastic realization — valid MC-dropout. encode_batch chunks
+        # by mc_batch_size internally so peak GPU memory is unchanged.
+        q_embs_flat  = encode_batch(model, tokenizer, batch_texts * T, device, q_max_len, mc_batch_size)
+        q_embs_stack = q_embs_flat.reshape(T, len(batch_texts), -1)  # (T, B, dim)
 
-        # Stage 1: shortlist to top-L using pre-computed stale embeddings (no re-encoding needed)
-        batch_query_shortlist = {}
-        shortlist_cand_ids_set = set()
-        for i, qid in enumerate(batch_ids):
-            cands = batch_query_cands[qid]
-            if not cands:
-                batch_query_shortlist[qid] = cands
-                continue
-            stale_idxs = [c_id_to_idx[d] for d in cands]
-            scores     = stale_embs[stale_idxs] @ q_embs_det[i]   # (N_cands_q,)
-            top_l      = np.argsort(scores)[::-1][:L]
-            shortlist  = [cands[k] for k in top_l]
-            batch_query_shortlist[qid] = shortlist
-            shortlist_cand_ids_set.update(shortlist)
+        # [S7] Join shortlisting — should already be done while GPU was encoding queries
+        batch_query_shortlist, shortlist_ids, shortlist_texts, shortlist_to_idx, n_filtered = shortlist_fut.result()
 
-        # Stage 2: T MC-dropout passes only on shortlisted candidates (Algorithm 2, Lines 5-8)
-        shortlist_ids   = list(shortlist_cand_ids_set)
-        shortlist_texts = [corpus_lookup.get(did, "") for did in shortlist_ids]
-        shortlist_to_idx = {did: i for i, did in enumerate(shortlist_ids)}
-
-        c_embs_all   = [encode_batch(model, tokenizer, shortlist_texts, device, p_max_len, mc_batch_size)
-                        for _ in range(T)]
-        c_embs_stack = np.stack(c_embs_all, axis=0)  # (T, N_shortlist, dim)
+        # [S2] Same vectorization as S1 for candidate MC encodes.
+        # Guard against empty shortlist (all candidates were true positives).
+        if shortlist_texts:
+            c_embs_flat  = encode_batch(model, tokenizer, shortlist_texts * T, device, p_max_len, mc_batch_size)
+            c_embs_stack = c_embs_flat.reshape(T, len(shortlist_texts), -1)  # (T, N_shortlist, dim)
+        else:
+            c_embs_stack = None
 
         # Compute g = s_hat + lambda * sigma and select top-m for each query in this batch
         batch_sigmas, batch_g = [], []
         for i, qid in enumerate(batch_ids):
             cands = batch_query_shortlist[qid]
-            if not cands:
+            # [S4] guard also handles the c_embs_stack=None case (empty shortlist batch)
+            if not cands or c_embs_stack is None:
                 continue
             cand_idxs = [shortlist_to_idx[d] for d in cands]
 
-            # q_t: (T, 1, dim)  @  c_t: (T, dim, N_cands_q)  →  (T, N_cands_q)
-            q_t  = torch.from_numpy(q_embs_stack[:, i, :]).unsqueeze(1)      # (T, 1, dim)
-            c_t  = torch.from_numpy(c_embs_stack[:, cand_idxs, :])           # (T, N_cands_q, dim)
-            sims = torch.bmm(q_t, c_t.transpose(1, 2)).squeeze(1).numpy()    # (T, N_cands_q)
+            # [S4] Pure numpy einsum instead of per-query torch tensor creation + bmm.
+            # Eliminates B × 3 torch.from_numpy() calls per outer batch. numpy einsum
+            # uses BLAS internally and is faster than torch bmm for tiny (T, 1, ~50) matrices.
+            # q_i: (T, dim) view (no copy) — c_i: (T, N_cands, dim)
+            q_i  = q_embs_stack[:, i, :]
+            c_i  = c_embs_stack[:, cand_idxs, :]
+            sims = np.einsum('td,tnd->tn', q_i, c_i)  # (T, N_cands)
 
             s_hat = sims.mean(axis=0)  # expected similarity — measures hardness
             sigma = sims.std(axis=0)   # std across passes  — measures model uncertainty
@@ -446,17 +500,37 @@ def grass_sampler(model_path, stale_idx, stale_embs, c_id_to_idx, c_ids, corpus_
             batch_sigmas.append(sigma.mean())
             batch_g.append(g.mean())
 
+            # [S6] Log per-query mining stats — zero compute overhead, data already computed.
+            # rank_by_shat: where the chosen negative ranks if we ignore uncertainty (pure hardness).
+            # A consistently low rank means uncertainty is pulling in genuinely novel negatives.
+            rank_by_shat = int(np.argsort(np.argsort(-s_hat))[top_m[0]])
+            mining_log_f.write(json.dumps({
+                "query_id": qid,
+                "neg_docid": cands[top_m[0]],
+                "s_hat_selected": float(s_hat[top_m[0]]),
+                "sigma_selected": float(sigma[top_m[0]]),
+                "g_selected":     float(g[top_m[0]]),
+                "rank_by_shat":   rank_by_shat,
+                "sigma_mean_shortlist": float(sigma.mean()),
+            }, ensure_ascii=False) + '\n')
+
         if b < 3 or (b + 1) % 100 == 0:
             elapsed   = time.time() - t_loop_start
             secs_per  = elapsed / (b + 1)
             remaining = secs_per * (n_batches - b - 1)
             eta       = f"{int(remaining // 3600)}h {int((remaining % 3600) // 60)}m"
-            n_filtered = sum(len(v) for v in batch_query_cands.values())
             n_raw = len(batch_ids) * P
             print(f"  Batch {b+1}/{n_batches} | ETA {eta} | "
                   f"P→L filter: {n_filtered}/{n_raw} → shortlist {len(shortlist_ids)} unique | "
                   f"sigma mean: {np.mean(batch_sigmas):.5f} | "
                   f"g mean: {np.mean(batch_g):.4f}", flush=True)
+
+    # [S6] Flush and close mining log
+    mining_log_f.close()
+    print(f"  Mining log written to {log_path}", flush=True)
+
+    # [S7] Shut down background thread pool
+    cpu_exec.shutdown(wait=False)
 
     # Free model from GPU before Tevatron training loads it
     del model

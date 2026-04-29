@@ -77,7 +77,7 @@ training:
     #   uncertainty_mode: "ema"         → EMA Teacher-Student  (~4h,  paper Algorithm 2 EMA branch)
     #   uncertainty_mode: "mc_dropout"  → MC-Dropout           (~22h, paper Algorithm 2 MC-dropout branch)
     # ============================================================
-    uncertainty_mode: "ema"
+    uncertainty_mode: "mc_dropout"
 
     model_name: "grass_mixed_bge_m3"   # base name — code appends _ema or _mcdp automatically
     base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_mixed_bge_m3"

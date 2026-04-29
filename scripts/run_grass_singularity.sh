@@ -29,6 +29,9 @@ export OMP_NUM_THREADS=16            # Matches cpus-per-task for FAISS speed
 # Container path
 CONTAINER="/scratch/${USER}/containers/pytorch_2.1.sif"
 
+# --- Pre-flight ---
+mkdir -p logs
+
 # --- Run GRASS Pipeline in Container ---
 echo "🌿 Starting GRASS Training Loop..."
 echo "📋 GRASS: mine hard negatives (stale ANN + MC-dropout) → train → evaluate"
@@ -37,7 +40,7 @@ singularity exec --nv \
     --bind /scratch/${USER}:/scratch/${USER} \
     --bind /home/${USER}:/home/${USER} \
     ${CONTAINER} \
-    python -u scripts/train_grass.py --mode ${GRASS_MODE:-mc_dropout}
+    python -u scripts/train_grass.py
 
 EXIT_CODE=$?
 
