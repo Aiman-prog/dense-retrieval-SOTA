@@ -660,19 +660,20 @@ def main():
     gc.collect()
     torch.cuda.empty_cache()
 
-    # --- EVALUATE ---
-    for domain in config['evaluation'].get('eval_domains', []):
-        subprocess.run([
-            sys.executable, str(project_root / 'src/evaluation/evaluate.py'),
-            '--model_path', str(output_model_dir),
-            '--domain', domain,
-        ], check=True)
+    # --- EVALUATE (commented out — run separately to save wall time) ---
+    # for domain in config['evaluation'].get('eval_domains', []):
+    #     subprocess.run([
+    #         sys.executable, str(project_root / 'src/evaluation/evaluate.py'),
+    #         '--model_path', str(output_model_dir),
+    #         '--domain', domain,
+    #     ], check=True)
+    #
+    # scores = [
+    #     json.load(open(get_path("results") / f"{domain}_results.json"))['metrics'].get('ndcg_cut_10', 0)
+    #     for domain in config['evaluation'].get('eval_domains', [])
+    # ]
+    # print(f"📈 GRASS Mean NDCG@10: {sum(scores) / len(scores):.4f}", flush=True)
 
-    scores = [
-        json.load(open(get_path("results") / f"{domain}_results.json"))['metrics'].get('ndcg_cut_10', 0)
-        for domain in config['evaluation'].get('eval_domains', [])
-    ]
-    print(f"📈 GRASS Mean NDCG@10: {sum(scores) / len(scores):.4f}", flush=True)
     print(f"✅ GRASS complete. Model saved to: {output_model_dir}", flush=True)
 
 
