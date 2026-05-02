@@ -40,7 +40,10 @@ singularity exec --nv \
     --bind /scratch/${USER}:/scratch/${USER} \
     --bind /home/${USER}:/home/${USER} \
     ${CONTAINER} \
-    python -u scripts/train_grass.py
+    python -u scripts/train_grass.py \
+        ${GRASS_MODE:+--mode $GRASS_MODE} \
+        ${GRASS_N_DAS:+--n_das $GRASS_N_DAS} \
+        ${GRASS_MODEL_SUFFIX:+--model_suffix $GRASS_MODEL_SUFFIX}
 
 EXIT_CODE=$?
 
