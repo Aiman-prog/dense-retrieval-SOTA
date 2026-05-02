@@ -7,6 +7,7 @@ import yaml
 import os
 import numpy as np
 import faiss
+import torch
 from pathlib import Path
 from typing import Dict, Any
 
@@ -160,6 +161,27 @@ def set_seed(seed: int):
     _torch.manual_seed(seed)
     if _torch.cuda.is_available():
         _torch.cuda.manual_seed_all(seed)
+
+
+def encode_batch(model, tokenizer, texts, device, max_len, batch_size):
+    """
+    Encode a list of texts in mini-batches, returning L2-normalised CLS embeddings.
+    Runs under no_grad with bf16 autocast (disabled on CPU).
+    Used by both EMA mining (run_grass_ema) and MC-dropout mining (run_grass_mcd).
+    """
+    all_embs = []
+    for i in range(0, len(texts), batch_size):
+        batch  = texts[i:i + batch_size]
+        inputs = tokenizer(batch, padding=True, truncation=True,
+                           max_length=max_len, return_tensors='pt').to(device)
+        # [S3] autocast — enabled=False on CPU so safe to run locally.
+        with torch.no_grad(), torch.autocast(device_type='cuda', dtype=torch.bfloat16,
+                                              enabled=device.type == 'cuda'):
+            out = model(**inputs)
+        embs = out.last_hidden_state[:, 0, :]
+        embs = torch.nn.functional.normalize(embs, dim=-1)
+        all_embs.append(embs.cpu().float().numpy())
+    return np.concatenate(all_embs, axis=0)
 
 
 def count_jsonl_examples(pattern: str) -> int:

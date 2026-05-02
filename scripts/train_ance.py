@@ -6,6 +6,7 @@ import random
 import argparse
 import subprocess
 import pickle
+import shutil
 import numpy as np
 import pandas as pd
 import faiss
@@ -284,6 +285,16 @@ def main():
     print(f"[ANCE] Starting from model: {ance_base_model}", flush=True)
 
     output_model_dir = get_path("models") / ctx['args']['model_name']
+
+    # Remove checkpoints from any previous run. get_last_checkpoint() returns the
+    # highest step-numbered checkpoint in the directory, so a stale checkpoint-17202
+    # from a prior run will permanently shadow all new checkpoint-500/1000/... saves,
+    # keeping the inferencer stuck forever on the old weights.
+    stale = sorted(output_model_dir.glob("checkpoint-*"))
+    if stale:
+        for ckpt in stale:
+            shutil.rmtree(ckpt, ignore_errors=True)
+        print(f"[ANCE] Removed {len(stale)} stale checkpoint(s) from {output_model_dir.name}", flush=True)
 
     # ── INITIAL ENCODE + MINE (once, before training starts) ─────────────────
     existing_jsonl = list(initial_data_dir.glob("*.jsonl"))

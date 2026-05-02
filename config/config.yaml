@@ -107,6 +107,12 @@ training:
     ema_alpha: 0.999
     ema_batch_size: 32 # smaller batch for full backprop — avoids OOM with BGE-M3
 
+    # --- CaseBandit MAB [S8] (EMA mode only) ---
+    mab_n_das:     5      # challengers mined per batch (out of ema_batch_size=32)
+    mab_alpha:     1.0    # LinUCB exploration constant
+    mab_epsilon:   0.05   # gap-index threshold for J_t graduation
+    mab_min_pulls: 2      # min mines before J_t eligibility
+
     # --- MC-dropout-specific (used when uncertainty_mode: "mc_dropout") ---
     T: 5               # MC-dropout forward passes
     mc_dropout_p: 0.3  # dropout probability for MC passes (0.1 default is too weak)
