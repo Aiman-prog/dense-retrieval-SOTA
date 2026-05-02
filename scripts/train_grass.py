@@ -25,6 +25,10 @@ def main():
                         help='Override uncertainty_mode from config: "ema" or "mc_dropout"')
     parser.add_argument('--n_das', type=int, default=None,
                         help='Override mab_n_das from config (challengers per batch)')
+    parser.add_argument('--build_index_only', action='store_true',
+                        help='Build stale ANN index then exit — run this before parallel sweeps')
+    parser.add_argument('--model_suffix', type=str, default=None,
+                        help='Append suffix to model output dir (e.g. "ndas5") to avoid collisions')
     cli_args, _ = parser.parse_known_args()
 
     corpus_file, query_file, qrels_file = run_setup()
@@ -57,6 +61,10 @@ def main():
         cfg = {**cfg, 'mab_n_das': cli_args.n_das}
         print(f"  CLI override: mab_n_das={cli_args.n_das}", flush=True)
 
+    if cli_args.model_suffix is not None:
+        cfg = {**cfg, 'model_name': cfg['model_name'] + '_' + cli_args.model_suffix}
+        print(f"  CLI override: model_name={cfg['model_name']}", flush=True)
+
     if cli_args.debug:
         mix_df = mix_df.head(100)
         cfg = {**cfg, 'T': 2, 'P': 20, 'L': 5, 'm': 2, 'query_batch_size': 10}
@@ -74,6 +82,10 @@ def main():
     stale_idx, stale_embs, c_ids = build_faiss_index(stale_pkl)
     c_id_to_idx = {did: i for i, did in enumerate(c_ids)}
     print(f"✅ Stale index ready: {len(c_ids)} passages", flush=True)
+
+    if cli_args.build_index_only:
+        print("✅ Index built. Exiting.", flush=True)
+        return
 
     uncertainty_mode = cli_args.mode or cfg.get('uncertainty_mode', 'mc_dropout')
     print(f"\n{'='*50}", flush=True)
