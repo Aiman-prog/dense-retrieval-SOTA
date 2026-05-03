@@ -89,7 +89,7 @@ training:
     lambda_val: 2.0    # uncertainty weight in g = s_hat + lambda * sigma
     mc_batch_size: 512 # encoding batch size (controls peak GPU memory during mining)
     learning_rate: 1e-5
-    num_epochs: 1
+    num_epochs: 3
     train_group_size: 2
     bf16: true
     dataloader_num_workers: 2

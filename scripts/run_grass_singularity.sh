@@ -2,7 +2,7 @@
 
 #SBATCH --job-name=grass
 #SBATCH --partition=gpu-a100
-#SBATCH --time=20:00:00              # MCDP: ~14-16h after speedups (eval runs separately)
+#SBATCH --time=18:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16           # Needed for FAISS operations
 #SBATCH --gpus-per-task=1
@@ -43,7 +43,8 @@ singularity exec --nv \
     python -u scripts/train_grass.py \
         ${GRASS_MODE:+--mode $GRASS_MODE} \
         ${GRASS_N_DAS:+--n_das $GRASS_N_DAS} \
-        ${GRASS_MODEL_SUFFIX:+--model_suffix $GRASS_MODEL_SUFFIX}
+        ${GRASS_MODEL_SUFFIX:+--model_suffix $GRASS_MODEL_SUFFIX} \
+        ${GRASS_NUM_EPOCHS:+--num_epochs $GRASS_NUM_EPOCHS}
 
 EXIT_CODE=$?
 

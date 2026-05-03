@@ -29,6 +29,8 @@ def main():
                         help='Build stale ANN index then exit — run this before parallel sweeps')
     parser.add_argument('--model_suffix', type=str, default=None,
                         help='Append suffix to model output dir (e.g. "ndas5") to avoid collisions')
+    parser.add_argument('--num_epochs', type=int, default=None,
+                        help='Override num_epochs from config')
     cli_args, _ = parser.parse_known_args()
 
     corpus_file, query_file, qrels_file = run_setup()
@@ -48,6 +50,10 @@ def main():
     if cli_args.model_suffix is not None:
         cfg = {**cfg, 'model_name': cfg['model_name'] + '_' + cli_args.model_suffix}
         print(f"  CLI override: model_name={cfg['model_name']}", flush=True)
+
+    if cli_args.num_epochs is not None:
+        cfg = {**cfg, 'num_epochs': cli_args.num_epochs}
+        print(f"  CLI override: num_epochs={cli_args.num_epochs}", flush=True)
 
     stale_dir = workdir / "stale_index"
     stale_dir.mkdir(exist_ok=True)
