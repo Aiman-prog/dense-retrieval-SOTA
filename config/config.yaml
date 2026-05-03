@@ -101,7 +101,7 @@ training:
     save_total_limit: 1
     logging_steps: 100
     eval_top_k: 10
-    per_device_eval_batch_size: 512
+    per_device_eval_batch_size: 256
 
     # --- EMA-specific (used when uncertainty_mode: "ema") ---
     ema_alpha: 0.999

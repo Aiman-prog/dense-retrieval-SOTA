@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 
 #SBATCH --job-name=grass_index
-#SBATCH --partition=gpu-a100
+#SBATCH --partition=gpu-a100-small
 #SBATCH --time=02:00:00
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=2
 #SBATCH --gpus-per-task=1
 #SBATCH --mem-per-cpu=8000M
 #SBATCH --account=Education-EEMCS-MSc-DSAIT
@@ -22,7 +22,7 @@ export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 
 export PYTORCH_ALLOC_CONF="expandable_segments:True"
-export OMP_NUM_THREADS=16
+export OMP_NUM_THREADS=2
 
 CONTAINER="/scratch/${USER}/containers/pytorch_2.1.sif"
 

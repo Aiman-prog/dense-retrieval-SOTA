@@ -33,13 +33,6 @@ def main():
 
     corpus_file, query_file, qrels_file = run_setup()
 
-    corpus_lookup = {}
-    with open(corpus_file) as f:
-        for line in f:
-            d = json.loads(line)
-            corpus_lookup[d['docid']] = d['text']
-    print(f"Loaded corpus lookup: {len(corpus_lookup)} passages", flush=True)
-
     ctx    = get_training_context("grass")
     config = load_config()
     cfg    = config['training']['grass']
@@ -48,15 +41,6 @@ def main():
     workdir = get_path("temp_grass")
     workdir.mkdir(exist_ok=True, parents=True)
 
-    qrels_data = []
-    with open(qrels_file, 'r') as f:
-        for line in f:
-            parts = line.strip().split()
-            if len(parts) >= 4: qrels_data.append({'qid': parts[0], 'did': parts[2]})
-    qrels_dict = pd.DataFrame(qrels_data).groupby('qid')['did'].apply(set).to_dict()
-
-    mix_df = pd.read_json(query_file, lines=True)
-
     if cli_args.n_das is not None:
         cfg = {**cfg, 'mab_n_das': cli_args.n_das}
         print(f"  CLI override: mab_n_das={cli_args.n_das}", flush=True)
@@ -64,14 +48,6 @@ def main():
     if cli_args.model_suffix is not None:
         cfg = {**cfg, 'model_name': cfg['model_name'] + '_' + cli_args.model_suffix}
         print(f"  CLI override: model_name={cfg['model_name']}", flush=True)
-
-    if cli_args.debug:
-        mix_df = mix_df.head(100)
-        cfg = {**cfg, 'T': 2, 'P': 20, 'L': 5, 'm': 2, 'query_batch_size': 10}
-        print("🐛 DEBUG mode: 100 queries, T=2, P=20, L=5", flush=True)
-
-    print(f"✅ Setup complete. corpus_lookup={len(corpus_lookup)} passages, "
-          f"qrels={len(qrels_dict)} queries, mix_df={len(mix_df)} unique queries.", flush=True)
 
     stale_dir = workdir / "stale_index"
     stale_dir.mkdir(exist_ok=True)
@@ -86,6 +62,30 @@ def main():
     if cli_args.build_index_only:
         print("✅ Index built. Exiting.", flush=True)
         return
+
+    corpus_lookup = {}
+    with open(corpus_file) as f:
+        for line in f:
+            d = json.loads(line)
+            corpus_lookup[d['docid']] = d['text']
+    print(f"Loaded corpus lookup: {len(corpus_lookup)} passages", flush=True)
+
+    qrels_data = []
+    with open(qrels_file, 'r') as f:
+        for line in f:
+            parts = line.strip().split()
+            if len(parts) >= 4: qrels_data.append({'qid': parts[0], 'did': parts[2]})
+    qrels_dict = pd.DataFrame(qrels_data).groupby('qid')['did'].apply(set).to_dict()
+
+    mix_df = pd.read_json(query_file, lines=True)
+
+    if cli_args.debug:
+        mix_df = mix_df.head(100)
+        cfg = {**cfg, 'T': 2, 'P': 20, 'L': 5, 'm': 2, 'query_batch_size': 10}
+        print("🐛 DEBUG mode: 100 queries, T=2, P=20, L=5", flush=True)
+
+    print(f"✅ Setup complete. corpus_lookup={len(corpus_lookup)} passages, "
+          f"qrels={len(qrels_dict)} queries, mix_df={len(mix_df)} unique queries.", flush=True)
 
     uncertainty_mode = cli_args.mode or cfg.get('uncertainty_mode', 'mc_dropout')
     print(f"\n{'='*50}", flush=True)
