@@ -162,6 +162,8 @@ def main():
 
     # Save results to JSON for downstream aggregation
     results_base = base_dir / config['paths']['results_dir']
+    model_name = Path(args.model_path).name
+    results_base = results_base / model_name
     results_base.mkdir(parents=True, exist_ok=True)
     result_file = results_base / f"{args.domain}_results.json"
     result_data = {

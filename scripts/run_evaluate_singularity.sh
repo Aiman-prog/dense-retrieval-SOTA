@@ -8,8 +8,8 @@
 #SBATCH --gpus-per-task=1
 #SBATCH --mem-per-cpu=5000M
 #SBATCH --account=Education-EEMCS-MSc-DSAIT
-#SBATCH --output=logs/eval_anceep3_neg_%j.out
-#SBATCH --error=logs/eval_anceep3_neg_%j.err
+#SBATCH --output=logs/eval_%j.out
+#SBATCH --error=logs/eval_%j.err
 #SBATCH --chdir=/home/aimanabdulwaha/dense-retrieval-SOTA
 
 # --- Environment Setup ---
@@ -26,7 +26,7 @@ export TRANSFORMERS_OFFLINE=1
 CONTAINER="/scratch/${USER}/containers/pytorch_2.1.sif"
 
 # --- CONFIGURATION ---
-MODEL_PATH="/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/ance_mixed_bge_m3"
+MODEL_PATH="${EVAL_MODEL_PATH:?Error: EVAL_MODEL_PATH must be set}"
 
 # --- Create output directories ---
 mkdir -p logs
