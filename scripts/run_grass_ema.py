@@ -10,6 +10,12 @@ from torch.optim import AdamW
 from torch.nn.utils import clip_grad_norm_
 from transformers import AutoTokenizer, AutoModel, get_linear_schedule_with_warmup
 
+try:
+    import bitsandbytes as bnb
+    _BNB_AVAILABLE = True
+except ImportError:
+    _BNB_AVAILABLE = False
+
 project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root / 'src'))
 
@@ -159,19 +165,37 @@ def train_with_ema_grass(stale_idx, stale_embs, c_id_to_idx, c_ids,
     device    = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     tokenizer = AutoTokenizer.from_pretrained(base_model)
 
-    # Student model — gradient checkpointing prevents OOM with full backprop on BGE-M3
+    # Student model
     model = AutoModel.from_pretrained(base_model, torch_dtype=torch.bfloat16).to(device)
-    model.gradient_checkpointing_enable()
+    # AdamW8bit frees ~3.9GB VRAM (optimizer states 4.5GB→0.56GB) — enables ema_batch_size=64
+    # without gradient checkpointing. Falls back to AdamW + gradient checkpointing if bnb absent.
+    if _BNB_AVAILABLE:
+        optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=lr, weight_decay=weight_decay)
+        print("  [AdamW8bit] 8-bit Adam enabled — gradient checkpointing OFF", flush=True)
+    else:
+        model.gradient_checkpointing_enable()
+        optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+        print("  [AdamW8bit] bitsandbytes not found — AdamW + gradient checkpointing ON "
+              "(pip install bitsandbytes for ~2x speedup)", flush=True)
     model.train()
 
-    # EMA teacher — frozen copy, always eval, no grad
+    # EMA teacher — frozen copy, always eval, no grad. Never compiled: [S10] _foreach EMA
+    # iterates raw parameters which breaks with compiled module wrappers.
     ema_model = AutoModel.from_pretrained(base_model, torch_dtype=torch.bfloat16).to(device)
     for p in ema_model.parameters():
         p.requires_grad_(False)
     ema_model.eval()
 
-    loss_fn   = TemperatureScaledContrastiveLoss(temperature=temperature)
-    optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    loss_fn = TemperatureScaledContrastiveLoss(temperature=temperature)
+
+    # [S13] torch.compile on student only — 15-25% faster forward passes via kernel fusion.
+    # _model_raw kept separately: compiled wrapper may not expose HF save_pretrained.
+    _model_raw = model
+    try:
+        model = torch.compile(model, dynamic=True)
+        print("  [S13] torch.compile enabled on student", flush=True)
+    except Exception as e:
+        print(f"  [S13] torch.compile skipped ({e})", flush=True)
 
     # Load training data from mixture JSONL
     mix_dir     = get_path("processed") / "training_mixture"
@@ -271,16 +295,18 @@ def train_with_ema_grass(stale_idx, stale_embs, c_id_to_idx, c_ids,
             loss = loss_fn(q_embs, d_embs)
 
             # 4. Backward
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)  # [S11] avoids 2.2GB gradient tensor write
             loss.backward()
             clip_grad_norm_(model.parameters(), max_grad_norm)
             optimizer.step()
             scheduler.step()
 
-            # 5. EMA update — every gradient step (Algorithm 1 Line 9)
+            # 5. EMA update — [S10] _foreach fuses ~240 tensor ops into 2 kernel launches
+            _ema_ps = list(ema_model.parameters())
+            _cur_ps = list(model.parameters())
             with torch.no_grad():
-                for p_ema, p_cur in zip(ema_model.parameters(), model.parameters()):
-                    p_ema.data.mul_(ema_alpha).add_(p_cur.data, alpha=1.0 - ema_alpha)
+                torch._foreach_mul_(_ema_ps, ema_alpha)
+                torch._foreach_add_(_ema_ps, _cur_ps, alpha=1.0 - ema_alpha)
 
             epoch_loss  += loss.item()
             global_step += 1
@@ -299,16 +325,16 @@ def train_with_ema_grass(stale_idx, stale_embs, c_id_to_idx, c_ids,
                     print(f"  [S8] J_t={jt_size} graduated | skip ratio={skip_pct}", flush=True)
 
             if global_step % save_steps == 0:
-                model.save_pretrained(str(output_model_dir))
+                _model_raw.save_pretrained(str(output_model_dir))
                 tokenizer.save_pretrained(str(output_model_dir))
 
         print(f"  Epoch {epoch+1} done. avg_loss={epoch_loss / n_batches:.4f}", flush=True)
 
-    model.save_pretrained(str(output_model_dir))
+    _model_raw.save_pretrained(str(output_model_dir))
     tokenizer.save_pretrained(str(output_model_dir))
     print(f"  EMA GRASS done. Model saved to {output_model_dir}", flush=True)
 
-    del model, ema_model
+    del model, ema_model, _model_raw
     gc.collect()
     torch.cuda.empty_cache()
 

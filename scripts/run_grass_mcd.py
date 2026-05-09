@@ -13,50 +13,11 @@ from tevatron.retriever.modeling import DenseModel
 project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root / 'src'))
 
-from utils.helpers import get_path, encode_batch, patch_tevatron_loss
+from utils.helpers import get_path, encode_batch, patch_tevatron_loss, _shortlist_batch
 
 # Tevatron Bug Patch
 if not hasattr(DenseModel, "_keys_to_ignore_on_save"):
     setattr(DenseModel, "_keys_to_ignore_on_save", None)
-
-
-def _shortlist_batch(batch_ids, indices, q_embs_det, qrels_dict, c_ids,
-                     c_id_to_idx, stale_embs, corpus_lookup, P, L):
-    """
-    [S7] CPU shortlisting — designed to run in a background thread while the GPU
-    executes the T MC query encodes. All inputs are read-only (numpy arrays and
-    Python dicts/lists), so concurrent access is safe. numpy BLAS releases the
-    GIL during the dot-product calls, enabling genuine CPU/GPU parallelism.
-
-    Returns (batch_query_shortlist, shortlist_ids, shortlist_texts, shortlist_to_idx, n_filtered).
-    """
-    # Filter true positives out of each query's P ANN candidates
-    batch_query_cands = {}
-    for i, qid in enumerate(batch_ids):
-        cands = [c_ids[j] for j in indices[i]
-                 if j >= 0 and c_ids[j] not in qrels_dict.get(qid, set())]
-        batch_query_cands[qid] = cands
-
-    # Shortlist to top-L per query using cheap stale-embedding dot products
-    batch_query_shortlist  = {}
-    shortlist_cand_ids_set = set()
-    for i, qid in enumerate(batch_ids):
-        cands = batch_query_cands[qid]
-        if not cands:
-            batch_query_shortlist[qid] = []
-            continue
-        stale_idxs = [c_id_to_idx[d] for d in cands]
-        scores     = stale_embs[stale_idxs] @ q_embs_det[i]  # numpy BLAS, releases GIL
-        top_l      = np.argsort(scores)[::-1][:L]
-        shortlist  = [cands[k] for k in top_l]
-        batch_query_shortlist[qid] = shortlist
-        shortlist_cand_ids_set.update(shortlist)
-
-    shortlist_ids    = list(shortlist_cand_ids_set)
-    shortlist_texts  = [corpus_lookup.get(did, "") for did in shortlist_ids]
-    shortlist_to_idx = {did: idx for idx, did in enumerate(shortlist_ids)}
-    n_filtered = sum(len(v) for v in batch_query_cands.values())
-    return batch_query_shortlist, shortlist_ids, shortlist_texts, shortlist_to_idx, n_filtered
 
 
 def grass_sampler(model_path, stale_idx, stale_embs, c_id_to_idx, c_ids, corpus_lookup, mix_df,

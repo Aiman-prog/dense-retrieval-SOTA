@@ -1,84 +1,84 @@
-import math
-import numpy as np
+import heapq
+import random
 
 
 class CaseBandit:
     """
-    [S8] CASE-style challenger-set bandit for EMA mining.
-    Each batch: selects n_das queries (challengers) for full EMA mining.
-    All other queries use neg_cache (initially mixture negatives).
-    Reward: sigma = |s_cur - s_ema| — already computed in mine_ema_batch.
-    Feature: [mean_sigma, 1.0] — updated via Sherman-Morrison as observations arrive.
-    Cold start: UCB=inf for unseen queries → random n_das selection → fast calibration.
-    J_t: queries with stable low sigma graduate → cached neg frozen, never re-mined.
+    Epsilon-greedy bandit over a mean-σ max-heap for global query selection.
+
+    Fixes the batch-level UCB bug: select_global() picks from the full query pool
+    (initialized via init_all_queries), not just the current training batch.
+
+    Exploitation (1-ε fraction): pop top mean-σ queries from the heap.
+    Exploration (ε fraction): random sample from the unseen set.
+    J_t: queries with consistently low σ graduate and are excluded permanently.
+
+    The legacy select(batch_ids) method is preserved for run_grass_ema.py compatibility.
     """
-    def __init__(self, n_das=5, alpha=1.0, lambda_reg=1.0, epsilon=0.05, min_pulls=2):
-        self.n_das     = n_das
-        self.alpha     = alpha
-        self.epsilon   = epsilon
-        self.min_pulls = min_pulls
+    def __init__(self, n_das=5, alpha=1.0, epsilon=0.2, min_pulls=2):
+        self.n_das      = n_das
+        self.epsilon    = epsilon
+        self.min_pulls  = min_pulls
+        self.mean_sigma = {}    # qid → float (running mean of observed σ)
+        self.n_pulls    = {}    # qid → int
+        self.J_t        = set() # graduated query IDs — never re-mined
+        self.version    = {}    # qid → int (lazy-deletion counter for heap)
+        self.unseen     = set() # queries not yet observed
+        self.heap       = []    # max-heap entries: (-sigma, version, qid)
 
-        d = 2  # feature: [mean_sigma, 1.0]
-        self.V_inv  = (1.0 / lambda_reg) * np.eye(d)
-        self.b      = np.zeros(d)
-        self.theta  = np.zeros(d)
+    def init_all_queries(self, all_query_ids):
+        """Initialize heap with all query IDs at σ=0. O(n) via heapify."""
+        self.unseen = set(all_query_ids)
+        self.heap   = [(-0.0, 0, qid) for qid in all_query_ids]
+        heapq.heapify(self.heap)
 
-        self.n_pulls    = {}   # qid → int
-        self.mean_sigma = {}   # qid → float (running mean of observed sigma)
-        self.J_t        = set()  # graduated query IDs — never re-mined
+    def _heap_pop_top(self, n):
+        """Pop up to n queries by highest mean-σ, skipping stale or graduated entries.
+        Popped queries are NOT re-pushed — they re-enter only when update() is called.
+        This prevents the same top-K queries from monopolising every mining cycle."""
+        results = []
+        while len(results) < n and self.heap:
+            neg_sigma, ver, qid = heapq.heappop(self.heap)
+            if self.version.get(qid, 0) == ver and qid not in self.J_t:
+                results.append(qid)
+        return results
 
-    @staticmethod
-    def feat(sigma_val):
-        return np.array([float(sigma_val), 1.0])
+    def select_global(self, n_das=None, epsilon=None):
+        """Return n_das query IDs: exploit top-σ heap + explore random unseen."""
+        if n_das is None:
+            n_das = self.n_das
+        if epsilon is None:
+            epsilon = self.epsilon
+        n_exploit   = int(n_das * (1 - epsilon))
+        n_explore   = n_das - n_exploit
+        exploit_ids = self._heap_pop_top(n_exploit)
+        explore_pool = list(self.unseen - self.J_t)
+        explore_ids  = random.sample(explore_pool, min(n_explore, len(explore_pool)))
+        return exploit_ids + explore_ids
 
-    def ucb(self, qid):
-        """UCB score for a query. inf for unseen queries."""
-        if qid not in self.mean_sigma:
-            return float('inf')
-        x     = self.feat(self.mean_sigma[qid])
-        mu    = float(self.theta @ x)
-        bonus = self.alpha * math.sqrt(max(0.0, float(x @ self.V_inv @ x)))
-        return mu + bonus
+    def update(self, qid, sigma_observed):
+        """Update running mean-σ, push fresh heap entry, check J_t graduation."""
+        n = self.n_pulls.get(qid, 0) + 1
+        self.n_pulls[qid] = n
+        old = self.mean_sigma.get(qid, 0.0)
+        self.mean_sigma[qid] = old + (sigma_observed - old) / n
+        self.unseen.discard(qid)
+        ver = self.version.get(qid, 0) + 1
+        self.version[qid] = ver
+        heapq.heappush(self.heap, (-self.mean_sigma[qid], ver, qid))
+        # J_t graduation: query graduates if its mean-σ is below the worst J_t member
+        if n >= self.min_pulls:
+            if not self.J_t:
+                self.J_t.add(qid)
+            else:
+                worst = max(self.J_t, key=lambda q: self.mean_sigma.get(q, 0.0))
+                if self.mean_sigma[qid] <= self.mean_sigma.get(worst, 0.0):
+                    self.J_t.add(qid)
 
     def select(self, batch_ids):
-        """Return set of top-n_das query IDs by UCB, excluding J_t members."""
+        """Legacy batch-level select for run_grass_ema.py. Scores by mean-σ (∞ for unseen)."""
         active = [qid for qid in batch_ids if qid not in self.J_t]
         if not active:
             return set()
-        ranked = sorted(active, key=self.ucb, reverse=True)
+        ranked = sorted(active, key=lambda q: self.mean_sigma.get(q, float('inf')), reverse=True)
         return set(ranked[:self.n_das])
-
-    def update(self, qid, sigma_observed):
-        """
-        Update running mean, Sherman-Morrison V_inv, and check J_t graduation.
-        Call once per mined query after observing its sigma from mine_ema_batch.
-        """
-        if qid not in self.n_pulls:
-            self.n_pulls[qid]    = 0
-            self.mean_sigma[qid] = 0.0
-
-        self.n_pulls[qid] += 1
-        n = self.n_pulls[qid]
-        self.mean_sigma[qid] += (sigma_observed - self.mean_sigma[qid]) / n
-
-        # Sherman-Morrison rank-1 update of V_inv
-        x  = self.feat(sigma_observed)
-        Vx = self.V_inv @ x
-        self.V_inv -= np.outer(Vx, Vx) / (1.0 + float(x @ Vx))
-        self.b     += sigma_observed * x
-        self.theta  = self.V_inv @ self.b
-
-        # J_t graduation: gap-index B(q, worst_in_J_t) <= epsilon
-        if n >= self.min_pulls and self.J_t:
-            worst = max(self.J_t, key=lambda q: self.mean_sigma.get(q, 0.0))
-            x_q   = self.feat(self.mean_sigma[qid])
-            x_w   = self.feat(self.mean_sigma.get(worst, 0.0))
-            conf  = self.alpha * (
-                math.sqrt(max(0.0, float(x_q @ self.V_inv @ x_q))) +
-                math.sqrt(max(0.0, float(x_w @ self.V_inv @ x_w)))
-            )
-            gap = self.mean_sigma[qid] - self.mean_sigma.get(worst, 0.0)
-            if (gap + conf) <= self.epsilon:
-                self.J_t.add(qid)
-        elif n >= self.min_pulls:
-            self.J_t.add(qid)  # bootstrap J_t with first graduated queries

@@ -25,6 +25,8 @@ def main():
                         help='Override uncertainty_mode from config: "ema" or "mc_dropout"')
     parser.add_argument('--n_das', type=int, default=None,
                         help='Override mab_n_das from config (challengers per batch)')
+    parser.add_argument('--async_mining', action='store_true',
+                        help='2-GPU async mode: miner on GPU 1, trainer on GPU 0')
     parser.add_argument('--build_index_only', action='store_true',
                         help='Build stale ANN index then exit — run this before parallel sweeps')
     parser.add_argument('--model_suffix', type=str, default=None,
@@ -39,6 +41,11 @@ def main():
     config = load_config()
     cfg    = config['training']['grass']
     set_seed(config.get('seed', 42))
+
+    if cli_args.async_mining or cfg.get('async_mining', False):
+        from train_grass_async import main as async_main
+        async_main()
+        return
 
     workdir = get_path("temp_grass")
     workdir.mkdir(exist_ok=True, parents=True)

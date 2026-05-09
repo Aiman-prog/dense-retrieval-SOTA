@@ -19,39 +19,11 @@ from pathlib import Path
 project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root / 'src'))
 
-from utils.helpers import get_path, get_training_context, load_config, encode_to_pickle, build_faiss_index
+from utils.helpers import (
+    get_path, get_training_context, load_config, encode_to_pickle, build_faiss_index,
+    is_valid_checkpoint, get_latest_marker_no, _load_qrels, _load_corpus_lookup,
+)
 import pandas as pd
-
-
-def get_latest_ann_no(ann_dir: Path) -> int:
-    nos = [int(f.name.split("_")[-1]) for f in ann_dir.glob("ready_*")
-           if f.name.split("_")[-1].isdigit()]
-    return max(nos) if nos else 0
-
-
-def is_valid_checkpoint(ckpt_path: str) -> bool:
-    """Inferencer only loads a checkpoint once optimizer.pt is present (fully written)."""
-    p = Path(ckpt_path)
-    return (p / "optimizer.pt").exists()
-
-
-def _load_qrels(qrels_file):
-    data = []
-    with open(qrels_file) as f:
-        for line in f:
-            parts = line.strip().split()
-            if len(parts) >= 4:
-                data.append({'qid': parts[0], 'did': parts[2]})
-    return pd.DataFrame(data).groupby('qid')['did'].apply(set).to_dict() if data else {}
-
-
-def _load_corpus_lookup(corpus_file):
-    lookup = {}
-    with open(corpus_file) as f:
-        for line in f:
-            d = json.loads(line)
-            lookup[d['docid']] = d['text']
-    return lookup
 
 
 def main():
@@ -81,7 +53,7 @@ def main():
     corpus_lookup = _load_corpus_lookup(args.corpus_file)
 
     last_checkpoint = None
-    output_num = get_latest_ann_no(ann_dir) + 1
+    output_num = get_latest_marker_no(ann_dir, prefix="ready_") + 1
     print(f"[Inferencer] Polling {args.output_model_dir} every {poll_interval}s | "
           f"mining_depth={mining_depth}, n_negs={n_negs}", flush=True)
 

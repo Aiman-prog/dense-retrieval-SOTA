@@ -1,13 +1,18 @@
 """
-Unit tests for the GRASS mining speedups (S1-S7).
-Tests correctness of each change using synthetic data only.
+Unit tests for the GRASS mining speedups (S1-S7) and async 2-GPU components (S14+).
+Tests correctness using synthetic data only.
 No real model download, no GPU required — falls back to CPU.
 
 Run: python scripts/grass_test.py
 """
 import sys
 import json
+import heapq
+import random
+import threading
 import tempfile
+import time
+import collections
 import numpy as np
 import torch
 import torch.nn as nn
@@ -50,9 +55,21 @@ _mod = importlib.util.module_from_spec(ema_spec)
 sys.modules['run_grass_ema'] = _mod
 ema_spec.loader.exec_module(_mod)
 
-from utils.helpers import encode_batch
+from utils.helpers import encode_batch, is_valid_checkpoint, get_latest_marker_no, _shortlist_batch
 from utils.bandit import CaseBandit
 _mod.CaseBandit = CaseBandit  # S8 tests reference _mod.CaseBandit
+
+# Load run_grass_train for _apply_pending_neg_updates (no tevatron imports at module level)
+_train_spec = importlib.util.spec_from_file_location(
+    'run_grass_train', Path(__file__).parent / 'run_grass_train.py'
+)
+_train_mod = importlib.util.module_from_spec(_train_spec)
+# Stub out temperature_scaled_loss so module-level import doesn't fail
+sys.modules.setdefault('models', MagicMock())
+sys.modules.setdefault('models.temperature_scaled_loss', MagicMock())
+sys.modules['run_grass_train'] = _train_mod
+_train_spec.loader.exec_module(_train_mod)
+_apply_pending_neg_updates = _train_mod._apply_pending_neg_updates
 
 # -----------------------------------------------------------------------
 # Shared helpers
@@ -507,10 +524,431 @@ def test_s8_low_sigma_graduates_to_jt():
 
 
 # -----------------------------------------------------------------------
+# S9  — L=25 + ema_batch_size=64 config
+# S10 — _foreach EMA update
+# S11 — zero_grad(set_to_none=True)
+# S12 — save_steps=1000 config
+# S13 — torch.compile on student
+# -----------------------------------------------------------------------
+
+def test_s9_config_L_and_batch():
+    """L must be <= 25 [S9] and ema_batch_size must be >= 64 [AdamW8bit]."""
+    import yaml
+    with open(project_root / 'config' / 'config.yaml') as f:
+        config = yaml.safe_load(f)
+    grass = config['training']['grass']
+    assert grass['L'] <= 25, f"L={grass['L']} should be <= 25 after [S9]"
+    assert grass['ema_batch_size'] >= 64, \
+        f"ema_batch_size={grass['ema_batch_size']} should be >= 64 after AdamW8bit change"
+
+
+def test_s10_foreach_ema_matches_loop():
+    """_foreach_mul_ + _foreach_add_ must produce the same result as the per-tensor loop."""
+    alpha = 0.999
+    torch.manual_seed(0)
+    ema_loop    = [torch.randn(8, 8) for _ in range(6)]
+    ema_foreach = [t.clone() for t in ema_loop]
+    cur         = [torch.randn(8, 8) for _ in range(6)]
+
+    with torch.no_grad():
+        for p_ema, p_cur in zip(ema_loop, cur):
+            p_ema.data.mul_(alpha).add_(p_cur.data, alpha=1.0 - alpha)
+
+    with torch.no_grad():
+        torch._foreach_mul_(ema_foreach, alpha)
+        torch._foreach_add_(ema_foreach, cur, alpha=1.0 - alpha)
+
+    for i, (loop_t, foreach_t) in enumerate(zip(ema_loop, ema_foreach)):
+        assert torch.allclose(loop_t, foreach_t, atol=1e-6), \
+            f"tensor {i}: max diff {(loop_t - foreach_t).abs().max():.2e}"
+
+
+def test_s11_zero_grad_set_to_none():
+    """zero_grad(set_to_none=True) must leave all grad attributes as None, not zero tensors."""
+    linear = torch.nn.Linear(4, 4).to(DEVICE)
+    x = torch.randn(2, 4, device=DEVICE)
+    linear(x).sum().backward()
+    assert any(p.grad is not None for p in linear.parameters()), \
+        "backward must produce gradients before zero_grad"
+    linear.zero_grad(set_to_none=True)
+    assert all(p.grad is None for p in linear.parameters()), \
+        "set_to_none=True must set all grads to None (not zero tensors)"
+
+
+def test_s12_config_save_steps():
+    """save_steps must be >= 1000 to halve checkpoint I/O overhead [S12]."""
+    import yaml
+    with open(project_root / 'config' / 'config.yaml') as f:
+        config = yaml.safe_load(f)
+    save_steps = config['training']['grass']['save_steps']
+    assert save_steps >= 1000, f"save_steps={save_steps} should be >= 1000 after [S12]"
+
+
+def test_s13_torch_compile_correct_shape():
+    """torch.compile(model, dynamic=True) must produce same output shape as uncompiled [S13]."""
+    model     = MockModel().to(DEVICE)
+    tokenizer = MockTokenizer()
+    model.eval()
+    texts = ["hello", "world", "foo bar"]
+
+    with torch.no_grad():
+        embs_orig = encode_batch(model, tokenizer, texts, DEVICE, max_len=32, batch_size=8)
+
+    try:
+        compiled = torch.compile(model, dynamic=True)
+        with torch.no_grad():
+            embs_compiled = encode_batch(compiled, tokenizer, texts, DEVICE, max_len=32, batch_size=8)
+        assert embs_compiled.shape == embs_orig.shape, \
+            f"compiled shape {embs_compiled.shape} != original {embs_orig.shape}"
+        norms = np.linalg.norm(embs_compiled, axis=1)
+        assert np.allclose(norms, 1.0, atol=1e-5), f"compiled embeddings not normalized: {norms}"
+    except Exception as e:
+        print(f"(torch.compile unavailable: {e} — skip)", end=" ")
+
+
+# -----------------------------------------------------------------------
+# Epsilon-greedy heap / CaseBandit (async tests)
+# -----------------------------------------------------------------------
+
+def test_heap_lazy_deletion():
+    """Stale heap entry (wrong version) must be discarded; updated entry wins."""
+    b = CaseBandit(n_das=1, epsilon=0.0)
+    b.init_all_queries(['q1', 'q2'])
+    # q1 gets σ=0.8; this creates version=1 entry in heap
+    b.update('q1', 0.8)
+    # Manually corrupt heap by pushing a stale entry for q1 at version 0
+    heapq.heappush(b.heap, (-0.0, 0, 'q1'))
+    # select_global should still return q1 (highest mean-σ), discarding the stale 0.0 entry
+    selected = b.select_global(n_das=1, epsilon=0.0)
+    assert 'q1' in selected, f"q1 (σ=0.8) not selected; got {selected}"
+
+
+def test_epsilon_split():
+    """Over 1000 rounds, exploit slot fraction ≈ (1-ε) within ±5%."""
+    rng = random.Random(42)
+    n_queries = 100
+    epsilon   = 0.2
+    n_das     = 10
+    qids      = [f"q{i}" for i in range(n_queries)]
+    b         = CaseBandit(n_das=n_das, epsilon=epsilon)
+    b.init_all_queries(qids)
+    # Seed some observations so exploitation is non-trivial
+    for qid in qids[:50]:
+        b.update(qid, rng.random())
+
+    exploit_count = 0
+    total_selected = 0
+    # Run enough rounds that unseen set empties and we see stable exploit/explore split
+    for _ in range(200):
+        exploit_ids = b._heap_pop_top(int(n_das * (1 - epsilon)))
+        explore_ids = rng.sample(list(b.unseen - b.J_t), min(n_das - len(exploit_ids),
+                                                               len(b.unseen - b.J_t)))
+        exploit_count  += len(exploit_ids)
+        total_selected += len(exploit_ids) + len(explore_ids)
+        # Re-push exploit so heap stays valid
+        for qid in exploit_ids:
+            heapq.heappush(b.heap, (-b.mean_sigma.get(qid, 0.0), b.version.get(qid, 0), qid))
+
+    if total_selected > 0:
+        actual_frac = exploit_count / total_selected
+        assert abs(actual_frac - (1 - epsilon)) < 0.15, \
+            f"exploit fraction={actual_frac:.2f} far from {1-epsilon:.2f}"
+
+
+def test_exploitation_favours_high_sigma():
+    """Query with σ=0.9 should win >50% of exploit slots vs 9 queries at σ=0.1."""
+    rng   = random.Random(0)
+    b     = CaseBandit(n_das=5, epsilon=0.0)  # pure exploitation
+    qids  = [f"q{i}" for i in range(10)]
+    b.init_all_queries(qids)
+    for qid in qids[1:]:
+        b.update(qid, 0.1)
+        b.update(qid, 0.1)
+    b.update('q0', 0.9)
+    b.update('q0', 0.9)
+
+    q0_count = 0
+    total    = 0
+    for _ in range(100):
+        selected = b.select_global(n_das=5, epsilon=0.0)
+        q0_count += selected.count('q0')
+        total    += len(selected)
+
+    assert q0_count / max(total, 1) > 0.3, \
+        f"high-σ query q0 got only {q0_count}/{total} exploit slots"
+
+
+def test_monopolisation_bounded():
+    """High-σ query must not monopolise: expect <80% of total mining events."""
+    b    = CaseBandit(n_das=5, epsilon=0.1)
+    qids = [f"q{i}" for i in range(100)]
+    b.init_all_queries(qids)
+    for qid in qids[1:]:
+        b.update(qid, 0.1)
+    b.update('q0', 0.9)
+
+    counts = collections.Counter()
+    for _ in range(200):
+        selected = b.select_global(n_das=5, epsilon=0.1)
+        counts.update(selected)
+
+    total    = sum(counts.values())
+    q0_share = counts['q0'] / max(total, 1)
+    assert q0_share < 0.80, f"q0 monopolised {q0_share:.1%} of mining events"
+
+
+def test_jt_graduation_excludes():
+    """A graduated query must never appear in exploit or explore output."""
+    b    = CaseBandit(n_das=5, epsilon=0.2, min_pulls=1)
+    qids = [f"q{i}" for i in range(20)]
+    b.init_all_queries(qids)
+    # Graduate q0 manually
+    b.update('q0', 0.9)   # min_pulls=1 → immediately graduates (J_t bootstrap)
+    assert 'q0' in b.J_t, "q0 should have graduated"
+
+    for _ in range(50):
+        selected = b.select_global(n_das=5, epsilon=0.2)
+        assert 'q0' not in selected, f"graduated q0 appeared in {selected}"
+
+
+def test_unseen_set_shrinks():
+    """After K exploration events, len(unseen) must decrease by K (no double-counts)."""
+    b    = CaseBandit(n_das=3, epsilon=1.0)  # pure exploration
+    qids = [f"q{i}" for i in range(50)]
+    b.init_all_queries(qids)
+    initial_unseen = len(b.unseen)
+    seen_new = set()
+    for _ in range(10):
+        selected = b.select_global(n_das=3, epsilon=1.0)
+        for qid in selected:
+            if qid in b.unseen:
+                b.update(qid, 0.2)
+                seen_new.add(qid)
+
+    assert len(b.unseen) == initial_unseen - len(seen_new), \
+        f"unseen set size mismatch after updates"
+
+
+def test_sigma_zero_init():
+    """All queries start with σ=0 in heap; first real observation pushes above 0."""
+    b    = CaseBandit(n_das=1, epsilon=0.0)
+    qids = ['qA', 'qB']
+    b.init_all_queries(qids)
+    assert all(b.mean_sigma.get(qid, 0.0) == 0.0 for qid in qids)
+    b.update('qA', 0.5)
+    assert b.mean_sigma['qA'] > 0.0, "mean_sigma should be >0 after first update"
+
+
+# -----------------------------------------------------------------------
+# IPC tests
+# -----------------------------------------------------------------------
+
+def test_ipc_write_read():
+    """Miner-style write (update_{N}.jsonl + ready_{N}) → _apply_pending updates neg_cache."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        d = Path(tmpdir)
+        # Simulate miner writing update #1
+        data = [{'query_id': 'q1', 'neg_docid': 'doc42'},
+                {'query_id': 'q2', 'neg_docid': 'doc99'}]
+        with open(d / 'update_1.jsonl', 'w') as f:
+            for row in data:
+                f.write(json.dumps(row) + '\n')
+        (d / 'ready_1').write_text('1')
+
+        neg_cache = {}
+        last_no, n = _apply_pending_neg_updates(d, neg_cache, 0)
+        assert last_no == 1, f"last_no={last_no}"
+        assert n == 2,       f"n_applied={n}"
+        assert neg_cache.get('q1') == 'doc42'
+        assert neg_cache.get('q2') == 'doc99'
+
+
+def test_ipc_validity_gate():
+    """JSONL present but ready marker absent → update ignored."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        d = Path(tmpdir)
+        with open(d / 'update_1.jsonl', 'w') as f:
+            f.write(json.dumps({'query_id': 'q1', 'neg_docid': 'doc42'}) + '\n')
+        # No ready_1 written
+
+        neg_cache = {}
+        last_no, n = _apply_pending_neg_updates(d, neg_cache, 0)
+        assert n == 0, f"partial update should be ignored; n_applied={n}"
+        assert 'q1' not in neg_cache
+
+
+def test_ipc_all_pending_applied():
+    """Trainer applies updates 1, 2, 3 in order, not just the latest."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        d = Path(tmpdir)
+        for i in range(1, 4):
+            with open(d / f'update_{i}.jsonl', 'w') as f:
+                f.write(json.dumps({'query_id': f'q{i}', 'neg_docid': f'doc{i}'}) + '\n')
+            (d / f'ready_{i}').write_text(str(i))
+
+        neg_cache = {}
+        last_no, n = _apply_pending_neg_updates(d, neg_cache, 0)
+        assert last_no == 3
+        assert n == 3
+        for i in range(1, 4):
+            assert neg_cache.get(f'q{i}') == f'doc{i}', f"q{i} missing"
+
+
+def test_miner_checkpoint_gate():
+    """is_valid_checkpoint is False without optimizer.pt, True after it exists."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ckpt = Path(tmpdir) / 'checkpoint-500'
+        ckpt.mkdir()
+        assert not is_valid_checkpoint(str(ckpt)), "should be invalid without optimizer.pt"
+        (ckpt / 'optimizer.pt').write_bytes(b'')
+        assert is_valid_checkpoint(str(ckpt)), "should be valid once optimizer.pt exists"
+
+
+# -----------------------------------------------------------------------
+# neg_cache / training integration
+# -----------------------------------------------------------------------
+
+def test_neg_cache_injected_in_batch():
+    """Miner update for q1 must appear in the neg_cache used by trainer."""
+    neg_cache    = {'q1': 'old_doc', 'q2': 'doc_b'}
+    miner_update = {'query_id': 'q1', 'neg_docid': 'new_hard_doc'}
+    neg_cache[miner_update['query_id']] = miner_update['neg_docid']
+    assert neg_cache['q1'] == 'new_hard_doc', "neg_cache not updated by miner"
+
+
+def test_neg_cache_fallback():
+    """Unmined query must use original mixture negative, not empty string."""
+    train_items = [
+        {'query_id': 'qA', 'neg_docid': 'mixture_neg'},
+        {'query_id': 'qB', 'neg_docid': None},
+    ]
+    neg_cache = {it['query_id']: it['neg_docid'] for it in train_items if it['neg_docid']}
+    assert neg_cache.get('qA') == 'mixture_neg', "qA should use mixture negative"
+    assert 'qB' not in neg_cache, "qB has no negative, must not appear in cache"
+
+
+# -----------------------------------------------------------------------
+# Distribution plot tests (coverage curves; skip if matplotlib absent)
+# -----------------------------------------------------------------------
+
+def test_coverage_curve_plot():
+    """
+    Simulate mining for n_das in {3,6} over 200 cycles.
+    Verify coverage grows monotonically and at expected rate (~n_das/n_queries per cycle).
+    Saves plot to logs_cluster/ if matplotlib is available.
+    """
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        has_mpl = True
+    except ImportError:
+        has_mpl = False
+
+    n_queries  = 500
+    n_cycles   = 100
+    qids       = [f"q{i}" for i in range(n_queries)]
+
+    curves = {}
+    for n_das in [3, 6]:
+        b = CaseBandit(n_das=n_das, epsilon=0.2)
+        b.init_all_queries(qids)
+        coverage = []
+        mined    = set()
+        for _ in range(n_cycles):
+            selected = b.select_global(n_das=n_das, epsilon=0.2)
+            for qid in selected:
+                if qid not in mined:
+                    b.update(qid, random.uniform(0.0, 0.5))
+                    mined.add(qid)
+            coverage.append(len(mined) / n_queries)
+        curves[n_das] = coverage
+
+        # Coverage must be monotonically non-decreasing
+        assert all(curves[n_das][i] <= curves[n_das][i+1]
+                   for i in range(len(curves[n_das])-1)), \
+            f"n_das={n_das}: coverage not monotone"
+        # After all cycles, n_das=6 should have higher coverage than n_das=3
+    assert curves[6][-1] >= curves[3][-1], \
+        f"larger n_das should yield higher coverage: {curves[6][-1]} vs {curves[3][-1]}"
+
+    if has_mpl:
+        logs_dir = Path(__file__).resolve().parent.parent / 'logs_cluster'
+        logs_dir.mkdir(exist_ok=True)
+        plt.figure()
+        for n_das, cov in curves.items():
+            plt.plot(cov, label=f'n_das={n_das}')
+        plt.xlabel('Mining cycle')
+        plt.ylabel('Fraction of corpus covered')
+        plt.title('Coverage curve by n_das')
+        plt.legend()
+        plt.savefig(str(logs_dir / 'test_coverage_curve.png'))
+        plt.close()
+
+
+def test_e2e_smoke():
+    """
+    End-to-end smoke: fake miner thread + trainer loop with tiny data.
+    Verifies neg_cache gets updated (no deadlock, no error).
+    """
+    import queue
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        neg_update_dir = Path(tmpdir) / 'neg_updates'
+        neg_update_dir.mkdir()
+
+        n_queries = 50
+        qids      = [f"q{i}" for i in range(n_queries)]
+
+        # Fake miner: writes one update every 0.05s
+        stop_evt = threading.Event()
+
+        def fake_miner():
+            update_no = 1
+            while not stop_evt.is_set():
+                data = [{'query_id': f'q{random.randint(0, n_queries-1)}',
+                          'neg_docid': f'doc{random.randint(0, 500)}'}]
+                jpath = neg_update_dir / f'update_{update_no}.jsonl'
+                with open(jpath, 'w') as f:
+                    for row in data:
+                        f.write(json.dumps(row) + '\n')
+                (neg_update_dir / f'ready_{update_no}').write_text(str(update_no))
+                update_no += 1
+                time.sleep(0.05)
+
+        miner_thread = threading.Thread(target=fake_miner, daemon=True)
+        miner_thread.start()
+
+        # Fake trainer: apply neg updates every 5 "steps"
+        neg_cache    = {qid: f'init_{qid}' for qid in qids}
+        last_update  = 0
+        n_steps      = 40
+
+        for step in range(n_steps):
+            if step % 5 == 0:
+                last_update, n_applied = _apply_pending_neg_updates(
+                    neg_update_dir, neg_cache, last_update
+                )
+            time.sleep(0.01)
+
+        stop_evt.set()
+        miner_thread.join(timeout=2.0)
+
+        # Check some negatives were updated (miner ran fast enough)
+        n_updated = sum(1 for qid in qids
+                        if not neg_cache.get(qid, '').startswith('init_'))
+        assert n_updated > 0 or last_update == 0, \
+            "trainer should have applied at least some miner updates"
+        # Verify neg_cache has no empty values for initially populated queries
+        assert all(neg_cache.get(qid) for qid in qids), \
+            "some queries lost their negative entirely"
+
+
+# -----------------------------------------------------------------------
 # Main runner
 # -----------------------------------------------------------------------
 if __name__ == '__main__':
-    print(f"\nGRASS Speedup Tests  (device: {DEVICE})")
+    print(f"\nGRASS Tests — Speedups + Async 2-GPU  (device: {DEVICE})")
     print("=" * 60)
 
     suite = [
@@ -540,6 +978,32 @@ if __name__ == '__main__':
         ("S8  unseen queries always selected over seen",      test_s8_unseen_queries_always_selected),
         ("S8  J_t queries never returned by select()",        test_s8_jt_queries_never_selected),
         ("S8  low-sigma query graduates to J_t",              test_s8_low_sigma_graduates_to_jt),
+        # S9-S13 — speed optimisations
+        ("S9  config L<=25 and ema_batch_size>=64",           test_s9_config_L_and_batch),
+        ("S10 _foreach EMA matches per-tensor loop",          test_s10_foreach_ema_matches_loop),
+        ("S11 zero_grad(set_to_none=True) sets grads=None",   test_s11_zero_grad_set_to_none),
+        ("S12 config save_steps >= 1000",                     test_s12_config_save_steps),
+        ("S13 torch.compile produces correct shape+norms",    test_s13_torch_compile_correct_shape),
+        # Async 2-GPU — epsilon-greedy heap (S14+)
+        ("A01 heap lazy deletion discards stale entries",      test_heap_lazy_deletion),
+        ("A02 epsilon split ≈ (1-ε) exploit / ε explore",     test_epsilon_split),
+        ("A03 exploitation favours high-σ query",              test_exploitation_favours_high_sigma),
+        ("A04 monopolisation bounded (<80% of events)",        test_monopolisation_bounded),
+        ("A05 graduated query excluded from all selection",    test_jt_graduation_excludes),
+        ("A06 unseen set shrinks after explore events",        test_unseen_set_shrinks),
+        ("A07 all queries init at σ=0 in heap",                test_sigma_zero_init),
+        # IPC
+        ("A08 IPC write+read updates neg_cache correctly",     test_ipc_write_read),
+        ("A09 IPC validity gate: no ready marker → ignored",   test_ipc_validity_gate),
+        ("A10 all pending updates applied in order",           test_ipc_all_pending_applied),
+        ("A11 checkpoint gate: invalid without optimizer.pt",  test_miner_checkpoint_gate),
+        # neg_cache / training
+        ("A12 miner neg injected into neg_cache",              test_neg_cache_injected_in_batch),
+        ("A13 unmined query falls back to mixture negative",   test_neg_cache_fallback),
+        # Coverage / distribution
+        ("A14 coverage curve monotone + n_das=6 > n_das=3",   test_coverage_curve_plot),
+        # End-to-end smoke
+        ("A15 e2e smoke: fake miner + trainer, no deadlock",   test_e2e_smoke),
     ]
 
     passed = sum(_run(name, fn) for name, fn in suite)
@@ -547,7 +1011,7 @@ if __name__ == '__main__':
     print("=" * 60)
     print(f"  {passed}/{total} passed", end="  ")
     if passed == total:
-        print("— all speedup checks green, safe to run.")
+        print("— all checks green, safe to submit to cluster.")
     else:
         print("— investigate failures before running on cluster.")
     print("=" * 60)

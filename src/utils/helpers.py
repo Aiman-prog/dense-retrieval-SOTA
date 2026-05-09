@@ -3,6 +3,7 @@
 import sys
 import subprocess
 import pickle
+import json
 import yaml
 import os
 import numpy as np
@@ -52,7 +53,8 @@ def get_path(key: str, model_name: str = None) -> Path:
         "models": base / p_cfg['models_dir'],
         "results": base / p_cfg['results_dir'],
         "temp_ance": base / "temp_ance_workdir",
-        "temp_grass": base / "temp_grass_workdir"
+        "temp_grass": base / "temp_grass_workdir",
+        "temp_grass_async": base / "temp_grass_async_workdir",
     }
     
     if model_name:
@@ -192,3 +194,158 @@ def count_jsonl_examples(pattern: str) -> int:
         with open(path) as f:
             total += sum(1 for line in f if line.strip())
     return total
+
+
+# ── Shared IPC / IO utilities (used by ANCE + GRASS async) ──────────────────
+
+def is_valid_checkpoint(ckpt_path: str) -> bool:
+    """Checkpoint is fully written once optimizer.pt exists (trainer writes it last)."""
+    return (Path(ckpt_path) / "optimizer.pt").exists()
+
+
+def get_latest_marker_no(directory: Path, prefix: str = "ready_") -> int:
+    """Return the highest N from files named {prefix}{N} in directory, or 0 if none."""
+    nos = [int(f.name[len(prefix):]) for f in directory.glob(f"{prefix}*")
+           if f.name[len(prefix):].isdigit()]
+    return max(nos) if nos else 0
+
+
+def _load_qrels(qrels_file) -> dict:
+    """Load TREC qrels file. Returns {qid: set(docids)}."""
+    import pandas as pd
+    data = []
+    with open(qrels_file) as f:
+        for line in f:
+            parts = line.strip().split()
+            if len(parts) >= 4:
+                data.append({'qid': parts[0], 'did': parts[2]})
+    return pd.DataFrame(data).groupby('qid')['did'].apply(set).to_dict() if data else {}
+
+
+def _load_corpus_lookup(corpus_file) -> dict:
+    """Load corpus JSONL. Returns {docid: text}."""
+    lookup = {}
+    with open(corpus_file) as f:
+        for line in f:
+            d = json.loads(line)
+            lookup[d['docid']] = d['text']
+    return lookup
+
+
+def _shortlist_batch(batch_ids, indices, q_embs_det, qrels_dict, c_ids,
+                     c_id_to_idx, stale_embs, corpus_lookup, P, L):
+    """
+    CPU shortlisting: filter true positives from P ANN candidates per query,
+    then keep top-L by cheap stale_embs @ q_cur dot product.
+    Safe for background thread execution (numpy BLAS releases the GIL).
+    Returns (batch_query_shortlist, shortlist_ids, shortlist_texts, shortlist_to_idx, n_filtered).
+    """
+    batch_query_cands = {}
+    for i, qid in enumerate(batch_ids):
+        cands = [c_ids[j] for j in indices[i]
+                 if j >= 0 and c_ids[j] not in qrels_dict.get(qid, set())]
+        batch_query_cands[qid] = cands
+
+    batch_query_shortlist  = {}
+    shortlist_cand_ids_set = set()
+    for i, qid in enumerate(batch_ids):
+        cands = batch_query_cands[qid]
+        if not cands:
+            batch_query_shortlist[qid] = []
+            continue
+        stale_idxs = [c_id_to_idx[d] for d in cands]
+        scores     = stale_embs[stale_idxs] @ q_embs_det[i]
+        top_l      = np.argsort(scores)[::-1][:L]
+        shortlist  = [cands[k] for k in top_l]
+        batch_query_shortlist[qid] = shortlist
+        shortlist_cand_ids_set.update(shortlist)
+
+    shortlist_ids    = list(shortlist_cand_ids_set)
+    shortlist_texts  = [corpus_lookup.get(did, "") for did in shortlist_ids]
+    shortlist_to_idx = {did: idx for idx, did in enumerate(shortlist_ids)}
+    n_filtered = sum(len(v) for v in batch_query_cands.values())
+    return batch_query_shortlist, shortlist_ids, shortlist_texts, shortlist_to_idx, n_filtered
+
+
+def evaluate_bright(ctx, config, model_path, temp_workdir_key=None):
+    """Multi-domain BRIGHT evaluation (or single-set if eval_corpus_file set in ctx.args)."""
+    import pickle
+    import pandas as pd
+    from evaluation.trec_eval_wrapper import TrecEvalWrapper
+
+    args = ctx['args']
+    if temp_workdir_key is None:
+        temp_workdir_key = args.get('temp_workdir', 'temp_grass_async')
+    temp_dir = get_path(temp_workdir_key)
+
+    if args.get('eval_corpus_file'):
+        p         = get_path("processed")
+        d_corpus  = p / args['eval_corpus_file']
+        d_queries = p / args['eval_queries_file']
+        d_qrels   = p / args['eval_qrels_file']
+        if not all(x.exists() for x in [d_corpus, d_queries, d_qrels]):
+            print("[Eval] Skipping: eval files not found", flush=True)
+            return
+        eval_dir = temp_dir / "final_eval"
+        eval_dir.mkdir(parents=True, exist_ok=True)
+        encode_to_pickle(str(model_path), d_corpus,  eval_dir / "c.pkl", False, ctx, config)
+        encode_to_pickle(str(model_path), d_queries, eval_dir / "q.pkl", True,  ctx, config)
+        with open(eval_dir / "c.pkl", 'rb') as f: dc = pickle.load(f)
+        with open(eval_dir / "q.pkl", 'rb') as f: dq = pickle.load(f)
+        idx_e = faiss.IndexFlatIP(dc[0].shape[1])
+        idx_e.add(dc[0].astype(np.float32))
+        s_e, i_e = idx_e.search(dq[0].astype(np.float32), args.get('eval_top_k', 1000))
+        results = {
+            str(dq[1][j]): {str(dc[1][i_e[j][k]]): float(s_e[j][k])
+                             for k in range(len(i_e[j])) if i_e[j][k] >= 0}
+            for j in range(len(dq[1]))
+        }
+        eval_qrels_data = []
+        with open(d_qrels) as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) >= 4:
+                    eval_qrels_data.append({'query_id': parts[0], 'doc_id': parts[2],
+                                            'relevance': parts[3]})
+        metric = args.get('eval_metric', 'ndcg_cut_10')
+        evaluator = TrecEvalWrapper(pd.DataFrame(eval_qrels_data))
+        metrics = evaluator.evaluate(results, {metric})
+        print(f"\n📈 Eval — {metric}={metrics.get(metric, 0):.4f}", flush=True)
+    else:
+        eval_summary = []
+        for domain in config['evaluation'].get('eval_domains', []):
+            d_corpus  = get_path("processed") / f"{domain}_corpus.jsonl"
+            d_queries = get_path("processed") / f"{domain}_queries.jsonl"
+            d_qrels   = get_path("processed") / f"{domain}_qrels.txt"
+            if not all(p.exists() for p in [d_corpus, d_queries, d_qrels]):
+                print(f"[Eval] Skipping {domain}: files not found", flush=True)
+                continue
+            eval_dir = temp_dir / "final_eval" / domain
+            eval_dir.mkdir(parents=True, exist_ok=True)
+            encode_to_pickle(str(model_path), d_corpus,  eval_dir / "c.pkl", False, ctx, config)
+            encode_to_pickle(str(model_path), d_queries, eval_dir / "q.pkl", True,  ctx, config)
+            with open(eval_dir / "c.pkl", 'rb') as f: dc = pickle.load(f)
+            with open(eval_dir / "q.pkl", 'rb') as f: dq = pickle.load(f)
+            idx_e = faiss.IndexFlatIP(dc[0].shape[1])
+            idx_e.add(dc[0].astype(np.float32))
+            eval_top_k = args.get('eval_top_k', 10)
+            s_e, i_e = idx_e.search(dq[0].astype(np.float32), eval_top_k)
+            results = {
+                str(dq[1][j]): {str(dc[1][i_e[j][k]]): float(s_e[j][k])
+                                 for k in range(len(i_e[j])) if i_e[j][k] >= 0}
+                for j in range(len(dq[1]))
+            }
+            eval_qrels_data = []
+            with open(d_qrels) as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) >= 4:
+                        eval_qrels_data.append({'query_id': parts[0], 'doc_id': parts[2],
+                                                'relevance': parts[3]})
+            evaluator = TrecEvalWrapper(pd.DataFrame(eval_qrels_data))
+            metrics = evaluator.evaluate(results, {'recip_rank', 'ndcg_cut_10'})
+            eval_summary.append({'domain': domain, 'ndcg10': metrics.get('ndcg_cut_10', 0)})
+            print(f"[Eval] {domain}: NDCG@10={metrics.get('ndcg_cut_10', 0):.4f}", flush=True)
+        if eval_summary:
+            mean_ndcg = pd.DataFrame(eval_summary)['ndcg10'].mean()
+            print(f"\n📈 Final Mean NDCG@10: {mean_ndcg:.4f}", flush=True)

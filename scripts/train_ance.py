@@ -19,9 +19,9 @@ project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root / 'src'))
 
 from utils.helpers import get_path, get_training_context, load_config, \
-                          encode_to_pickle, build_faiss_index, count_jsonl_examples
+                          encode_to_pickle, build_faiss_index, count_jsonl_examples, \
+                          _load_qrels, evaluate_bright
 from data.preprocessor import BRIGHTPreprocessor
-from evaluation.trec_eval_wrapper import TrecEvalWrapper
 
 # 🩹 Tevatron Bug Patch
 if not hasattr(DenseModel, "_keys_to_ignore_on_save"):
@@ -91,16 +91,6 @@ def run_setup(recipe_args):
     return corpus_path, queries_path, qrels_path
 
 
-def _load_qrels(qrels_file):
-    data = []
-    with open(qrels_file, 'r') as f:
-        for line in f:
-            parts = line.strip().split()
-            if len(parts) >= 4:
-                data.append({'qid': parts[0], 'did': parts[2]})
-    return pd.DataFrame(data).groupby('qid')['did'].apply(set).to_dict() if data else {}
-
-
 def _encode_and_mine_initial(ctx, config, corpus_file, query_file, corpus_lookup,
                               qrels_dict, initial_data_dir, base_model, mixture_dir):
     """Initial ANN mine using the base model so the Trainer has data from step 0."""
@@ -144,104 +134,6 @@ def _encode_and_mine_initial(ctx, config, corpus_file, query_file, corpus_lookup
                 f_out.write(json.dumps(d, ensure_ascii=False) + '\n')
 
     print(f"[ANCE] Initial data written to {initial_data_dir}", flush=True)
-
-
-def _evaluate(ctx, config, model_path):
-    """Evaluate final model. Single-file eval if eval_corpus_file set, else multi-domain."""
-    args     = ctx['args']
-    temp_dir = get_path(args['temp_workdir'])
-
-    if args.get('eval_corpus_file'):
-        # Single eval set (e.g. MS MARCO dev)
-        p          = get_path("processed")
-        d_corpus   = p / args['eval_corpus_file']
-        d_queries  = p / args['eval_queries_file']
-        d_qrels    = p / args['eval_qrels_file']
-
-        if not all(x.exists() for x in [d_corpus, d_queries, d_qrels]):
-            print("[Eval] Skipping: eval files not found", flush=True)
-            return
-
-        eval_dir = temp_dir / "final_eval"
-        eval_dir.mkdir(parents=True, exist_ok=True)
-
-        encode_to_pickle(str(model_path), d_corpus,  eval_dir / "c.pkl", False, ctx, config)
-        encode_to_pickle(str(model_path), d_queries, eval_dir / "q.pkl", True,  ctx, config)
-
-        with open(eval_dir / "c.pkl", 'rb') as f: dc = pickle.load(f)
-        with open(eval_dir / "q.pkl", 'rb') as f: dq = pickle.load(f)
-
-        idx_e = faiss.IndexFlatIP(dc[0].shape[1])
-        idx_e.add(dc[0].astype(np.float32))
-        s_e, i_e = idx_e.search(dq[0].astype(np.float32), args.get('eval_top_k', 1000))
-
-        results = {
-            str(dq[1][j]): {
-                str(dc[1][i_e[j][k]]): float(s_e[j][k])
-                for k in range(len(i_e[j])) if i_e[j][k] >= 0
-            }
-            for j in range(len(dq[1]))
-        }
-
-        eval_qrels_data = []
-        with open(d_qrels) as f:
-            for line in f:
-                parts = line.strip().split()
-                if len(parts) >= 4:
-                    eval_qrels_data.append({'query_id': parts[0], 'doc_id': parts[2], 'relevance': parts[3]})
-        metric = args['eval_metric']
-        evaluator = TrecEvalWrapper(pd.DataFrame(eval_qrels_data))
-        metrics = evaluator.evaluate(results, {metric})
-        print(f"\n📈 Eval — {metric}={metrics.get(metric, 0):.4f}", flush=True)
-
-    else:
-        # Multi-domain eval (BRIGHT)
-        eval_summary = []
-        for domain in config['evaluation'].get('eval_domains', []):
-            d_corpus  = get_path("processed") / f"{domain}_corpus.jsonl"
-            d_queries = get_path("processed") / f"{domain}_queries.jsonl"
-            d_qrels   = get_path("processed") / f"{domain}_qrels.txt"
-
-            if not all(p.exists() for p in [d_corpus, d_queries, d_qrels]):
-                print(f"[Eval] Skipping {domain}: files not found", flush=True)
-                continue
-
-            eval_dir = temp_dir / "final_eval" / domain
-            eval_dir.mkdir(parents=True, exist_ok=True)
-
-            encode_to_pickle(str(model_path), d_corpus,  eval_dir / "c.pkl", False, ctx, config)
-            encode_to_pickle(str(model_path), d_queries, eval_dir / "q.pkl", True,  ctx, config)
-
-            with open(eval_dir / "c.pkl", 'rb') as f: dc = pickle.load(f)
-            with open(eval_dir / "q.pkl", 'rb') as f: dq = pickle.load(f)
-
-            idx_e = faiss.IndexFlatIP(dc[0].shape[1])
-            idx_e.add(dc[0].astype(np.float32))
-            eval_top_k = args.get('eval_top_k', 10)
-            s_e, i_e = idx_e.search(dq[0].astype(np.float32), eval_top_k)
-
-            results = {
-                str(dq[1][j]): {
-                    str(dc[1][i_e[j][k]]): float(s_e[j][k])
-                    for k in range(len(i_e[j])) if i_e[j][k] >= 0
-                }
-                for j in range(len(dq[1]))
-            }
-
-            eval_qrels_data = []
-            with open(d_qrels) as f:
-                for line in f:
-                    parts = line.strip().split()
-                    if len(parts) >= 4:
-                        eval_qrels_data.append({'query_id': parts[0], 'doc_id': parts[2], 'relevance': parts[3]})
-            evaluator = TrecEvalWrapper(pd.DataFrame(eval_qrels_data))
-            metrics = evaluator.evaluate(results, {'recip_rank', 'ndcg_cut_10'})
-            eval_summary.append({'domain': domain, 'ndcg10': metrics.get('ndcg_cut_10', 0)})
-            print(f"[Eval] {domain}: NDCG@10={metrics.get('ndcg_cut_10', 0):.4f}", flush=True)
-
-        if eval_summary:
-            mean_ndcg = pd.DataFrame(eval_summary)['ndcg10'].mean()
-            print(f"\n📈 Final Mean NDCG@10: {mean_ndcg:.4f}", flush=True)
 
 
 def main():
@@ -343,7 +235,7 @@ def main():
         print("[ANCE] Inferencer terminated.", flush=True)
 
     # ── EVALUATE (final model only) ───────────────────────────────────────────
-    _evaluate(ctx, config, output_model_dir)
+    evaluate_bright(ctx, config, output_model_dir)
 
 
 if __name__ == "__main__":
