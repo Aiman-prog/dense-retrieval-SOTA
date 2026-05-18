@@ -13,7 +13,7 @@ class EpsilonGreedyBandit:
 
     Heap uses lazy deletion: every update() pushes a fresh (priority, version, qid)
     entry; stale entries are skipped on pop via the version counter. No J_t, no
-    cooldown, no stale_cycles, no annealing. See plan §4.5.
+    cooldown, no stale_cycles, no annealing.
 
     Used by the sequential-bandit pipeline (scripts/run_grass_seq_bandit.py) and
     the async v2 pipeline (scripts/run_grass_async_v2_miner.py).

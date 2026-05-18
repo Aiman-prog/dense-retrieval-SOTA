@@ -107,7 +107,7 @@ training:
     ema_alpha: 0.999
     ema_batch_size: 64 # [AdamW8bit] doubled from 32 — safe once 8-bit Adam frees ~3.9GB VRAM
 
-    # --- CaseBandit MAB [S8] (EMA mode only) ---
+    # --- MAB [S8] (EMA mode only) ---
     mab_n_das:     5      # challengers mined per batch (out of ema_batch_size=32)
     mab_alpha:     1.0    # LinUCB exploration constant
     mab_epsilon:   0.05   # gap-index threshold for J_t graduation
@@ -119,11 +119,7 @@ training:
     query_batch_size: 128  # queries per GrassSampler outer batch
     batch_size: 64
 
-    # --- Async 2-GPU settings (used when --async_mining) ---
-    async_mining:            false        # true activates 2-GPU orchestrator
     selection:               "bandit"     # "bandit" or "random" (ablation switch)
-    miner_poll_interval:     5            # seconds between miner mining cycles
-    trainer_neg_poll_steps:  10           # trainer checks for neg updates every N steps
     bandit_epsilon:          0.2          # ε for epsilon-greedy: explore fraction
 
     # --- Sequential mode settings (run_grass_seq.py) ---

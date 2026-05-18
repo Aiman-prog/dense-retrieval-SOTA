@@ -1,0 +1,405 @@
+🔍 Starting evaluation for model: /scratch/aimanabdulwaha/dense-retrieval-SOTA/models/grass_mixed_bge_m3_ndas32_ema
+📊 Evaluating on all BRIGHT domains (settings from config.yaml)
+🕵️  Starting Evaluation Runner
+🏗️  Model: /scratch/aimanabdulwaha/dense-retrieval-SOTA/models/grass_mixed_bge_m3_ndas32_ema
+📄 Script: /home/aimanabdulwaha/dense-retrieval-SOTA/src/evaluation/evaluate.py
+
+✅ Data for 'biology' verified.
+✅ Data for 'earth_science' verified.
+✅ Data for 'economics' verified.
+✅ Data for 'psychology' verified.
+✅ Data for 'robotics' verified.
+✅ Data for 'stackoverflow' verified.
+✅ Data for 'sustainable_living' verified.
+✅ Data for 'pony' verified.
+✅ Data for 'leetcode' verified.
+✅ Data for 'aops' verified.
+✅ Data for 'theoremqa_theorems' verified.
+✅ Data for 'theoremqa_questions' verified.
+
+--- 🌐 Evaluating Domain: biology ---
+
+========================================
+🔍 HARDWARE DIAGNOSTIC
+========================================
+PyTorch Version:  2.10.0+cu128
+CUDA Available:   True
+GPU Device:       NVIDIA A100 80GB PCIe MIG 1g.10gb
+FAISS Version:    1.7.2
+========================================
+
+🚀 Step 1: Encoding with Tevatron Driver...
+
+📂 Step 2: Loading embeddings...
+🔍 Step 3: Running FAISS IndexFlatIP (CPU)...
+
+============================================================
+🕵️  VIGILANTE CHECK: QUERY 0
+============================================================
+Query ID: 0 | Top Result: reddish_adapt_to_color/Red_2_2.txt | Match: False
+============================================================
+
+📊 Step 5: Running Evaluation Wrapper...
+
+FINAL RESULTS: biology
+****************************************
+MRR:        0.2376
+NDCG@10:    0.1613
+Recall@1000: 0.8126
+****************************************
+📄 Results saved to: /scratch/aimanabdulwaha/dense-retrieval-SOTA/results/bright_benchmark/biology_results.json
+
+--- 🌐 Evaluating Domain: earth_science ---
+
+========================================
+🔍 HARDWARE DIAGNOSTIC
+========================================
+PyTorch Version:  2.10.0+cu128
+CUDA Available:   True
+GPU Device:       NVIDIA A100 80GB PCIe MIG 1g.10gb
+FAISS Version:    1.7.2
+========================================
+
+🚀 Step 1: Encoding with Tevatron Driver...
+
+📂 Step 2: Loading embeddings...
+🔍 Step 3: Running FAISS IndexFlatIP (CPU)...
+
+============================================================
+🕵️  VIGILANTE CHECK: QUERY 0
+============================================================
+Query ID: 0 | Top Result: number_of_hadley_cell/Hadley_cell6_2.txt | Match: False
+============================================================
+
+📊 Step 5: Running Evaluation Wrapper...
+
+FINAL RESULTS: earth_science
+****************************************
+MRR:        0.2288
+NDCG@10:    0.1637
+Recall@1000: 0.6519
+****************************************
+📄 Results saved to: /scratch/aimanabdulwaha/dense-retrieval-SOTA/results/bright_benchmark/earth_science_results.json
+
+--- 🌐 Evaluating Domain: economics ---
+
+========================================
+🔍 HARDWARE DIAGNOSTIC
+========================================
+PyTorch Version:  2.10.0+cu128
+CUDA Available:   True
+GPU Device:       NVIDIA A100 80GB PCIe MIG 1g.10gb
+FAISS Version:    1.7.2
+========================================
+
+🚀 Step 1: Encoding with Tevatron Driver...
+
+📂 Step 2: Loading embeddings...
+🔍 Step 3: Running FAISS IndexFlatIP (CPU)...
+
+============================================================
+🕵️  VIGILANTE CHECK: QUERY 0
+============================================================
+Query ID: 0 | Top Result: water_economic_nature/economicsandnaturedasgupta_56.txt | Match: False
+============================================================
+
+📊 Step 5: Running Evaluation Wrapper...
+
+FINAL RESULTS: economics
+****************************************
+MRR:        0.1840
+NDCG@10:    0.1486
+Recall@1000: 0.6759
+****************************************
+📄 Results saved to: /scratch/aimanabdulwaha/dense-retrieval-SOTA/results/bright_benchmark/economics_results.json
+
+--- 🌐 Evaluating Domain: psychology ---
+
+========================================
+🔍 HARDWARE DIAGNOSTIC
+========================================
+PyTorch Version:  2.10.0+cu128
+CUDA Available:   True
+GPU Device:       NVIDIA A100 80GB PCIe MIG 1g.10gb
+FAISS Version:    1.7.2
+========================================
+
+🚀 Step 1: Encoding with Tevatron Driver...
+
+📂 Step 2: Loading embeddings...
+🔍 Step 3: Running FAISS IndexFlatIP (CPU)...
+
+============================================================
+🕵️  VIGILANTE CHECK: QUERY 0
+============================================================
+Query ID: 0 | Top Result: change_belief/yourbeliefsrunyourlifebutyoucanchangethestoryreprise_17.txt | Match: False
+============================================================
+
+📊 Step 5: Running Evaluation Wrapper...
+
+FINAL RESULTS: psychology
+****************************************
+MRR:        0.2680
+NDCG@10:    0.2206
+Recall@1000: 0.7501
+****************************************
+📄 Results saved to: /scratch/aimanabdulwaha/dense-retrieval-SOTA/results/bright_benchmark/psychology_results.json
+
+--- 🌐 Evaluating Domain: robotics ---
+
+========================================
+🔍 HARDWARE DIAGNOSTIC
+========================================
+PyTorch Version:  2.10.0+cu128
+CUDA Available:   True
+GPU Device:       NVIDIA A100 80GB PCIe MIG 1g.10gb
+FAISS Version:    1.7.2
+========================================
+
+🚀 Step 1: Encoding with Tevatron Driver...
+
+📂 Step 2: Loading embeddings...
+🔍 Step 3: Running FAISS IndexFlatIP (CPU)...
+
+============================================================
+🕵️  VIGILANTE CHECK: QUERY 0
+============================================================
+Query ID: 0 | Top Result: ros2cpp/AboutLogginghtml_102.txt | Match: False
+============================================================
+
+📊 Step 5: Running Evaluation Wrapper...
+
+FINAL RESULTS: robotics
+****************************************
+MRR:        0.1338
+NDCG@10:    0.0837
+Recall@1000: 0.5616
+****************************************
+📄 Results saved to: /scratch/aimanabdulwaha/dense-retrieval-SOTA/results/bright_benchmark/robotics_results.json
+
+--- 🌐 Evaluating Domain: stackoverflow ---
+
+========================================
+🔍 HARDWARE DIAGNOSTIC
+========================================
+PyTorch Version:  2.10.0+cu128
+CUDA Available:   True
+GPU Device:       NVIDIA A100 80GB PCIe MIG 1g.10gb
+FAISS Version:    1.7.2
+========================================
+
+🚀 Step 1: Encoding with Tevatron Driver...
+
+📂 Step 2: Loading embeddings...
+🔍 Step 3: Running FAISS IndexFlatIP (CPU)...
+
+============================================================
+🕵️  VIGILANTE CHECK: QUERY 0
+============================================================
+Query ID: 0 | Top Result: snowflake_docs/functions-metadata_1_0.txt | Match: False
+============================================================
+
+📊 Step 5: Running Evaluation Wrapper...
+
+FINAL RESULTS: stackoverflow
+****************************************
+MRR:        0.0892
+NDCG@10:    0.0602
+Recall@1000: 0.5006
+****************************************
+📄 Results saved to: /scratch/aimanabdulwaha/dense-retrieval-SOTA/results/bright_benchmark/stackoverflow_results.json
+
+--- 🌐 Evaluating Domain: sustainable_living ---
+
+========================================
+🔍 HARDWARE DIAGNOSTIC
+========================================
+PyTorch Version:  2.10.0+cu128
+CUDA Available:   True
+GPU Device:       NVIDIA A100 80GB PCIe MIG 1g.10gb
+FAISS Version:    1.7.2
+========================================
+
+🚀 Step 1: Encoding with Tevatron Driver...
+
+📂 Step 2: Loading embeddings...
+🔍 Step 3: Running FAISS IndexFlatIP (CPU)...
+
+============================================================
+🕵️  VIGILANTE CHECK: QUERY 0
+============================================================
+Query ID: 0 | Top Result: incineration/Waste-to-energy_18.txt | Match: False
+============================================================
+
+📊 Step 5: Running Evaluation Wrapper...
+
+FINAL RESULTS: sustainable_living
+****************************************
+MRR:        0.1964
+NDCG@10:    0.1348
+Recall@1000: 0.8131
+****************************************
+📄 Results saved to: /scratch/aimanabdulwaha/dense-retrieval-SOTA/results/bright_benchmark/sustainable_living_results.json
+
+--- 🌐 Evaluating Domain: pony ---
+
+========================================
+🔍 HARDWARE DIAGNOSTIC
+========================================
+PyTorch Version:  2.10.0+cu128
+CUDA Available:   True
+GPU Device:       NVIDIA A100 80GB PCIe MIG 1g.10gb
+FAISS Version:    1.7.2
+========================================
+
+🚀 Step 1: Encoding with Tevatron Driver...
+
+📂 Step 2: Loading embeddings...
+🔍 Step 3: Running FAISS IndexFlatIP (CPU)...
+
+============================================================
+🕵️  VIGILANTE CHECK: QUERY 0
+============================================================
+Query ID: 0 | Top Result: Pony/src-math-is_prime-_5.txt | Match: False
+============================================================
+
+📊 Step 5: Running Evaluation Wrapper...
+
+FINAL RESULTS: pony
+****************************************
+MRR:        0.1405
+NDCG@10:    0.0539
+Recall@1000: 0.5056
+****************************************
+📄 Results saved to: /scratch/aimanabdulwaha/dense-retrieval-SOTA/results/bright_benchmark/pony_results.json
+
+--- 🌐 Evaluating Domain: leetcode ---
+
+========================================
+🔍 HARDWARE DIAGNOSTIC
+========================================
+PyTorch Version:  2.10.0+cu128
+CUDA Available:   True
+GPU Device:       NVIDIA A100 80GB PCIe MIG 1g.10gb
+FAISS Version:    1.7.2
+========================================
+
+🚀 Step 1: Encoding with Tevatron Driver...
+
+📂 Step 2: Loading embeddings...
+🔍 Step 3: Running FAISS IndexFlatIP (CPU)...
+
+============================================================
+🕵️  VIGILANTE CHECK: QUERY 0
+============================================================
+Query ID: 0 | Top Result: leetcode/leetcode_42.txt | Match: False
+============================================================
+
+📊 Step 5: Running Evaluation Wrapper...
+
+FINAL RESULTS: leetcode
+****************************************
+MRR:        0.1011
+NDCG@10:    0.0885
+Recall@1000: 0.4007
+****************************************
+📄 Results saved to: /scratch/aimanabdulwaha/dense-retrieval-SOTA/results/bright_benchmark/leetcode_results.json
+
+--- 🌐 Evaluating Domain: aops ---
+
+========================================
+🔍 HARDWARE DIAGNOSTIC
+========================================
+PyTorch Version:  2.10.0+cu128
+CUDA Available:   True
+GPU Device:       NVIDIA A100 80GB PCIe MIG 1g.10gb
+FAISS Version:    1.7.2
+========================================
+
+🚀 Step 1: Encoding with Tevatron Driver...
+
+📂 Step 2: Loading embeddings...
+🔍 Step 3: Running FAISS IndexFlatIP (CPU)...
+
+============================================================
+🕵️  VIGILANTE CHECK: QUERY 0
+============================================================
+Query ID: aops_2019_AMC_12A_Problems/Problem_17 | Top Result: aops_2019_AMC_12A_Problems/Problem_17 | Match: False
+============================================================
+
+📊 Step 5: Running Evaluation Wrapper...
+
+FINAL RESULTS: aops
+****************************************
+MRR:        0.0195
+NDCG@10:    0.0077
+Recall@1000: 0.1920
+****************************************
+📄 Results saved to: /scratch/aimanabdulwaha/dense-retrieval-SOTA/results/bright_benchmark/aops_results.json
+
+--- 🌐 Evaluating Domain: theoremqa_theorems ---
+
+========================================
+🔍 HARDWARE DIAGNOSTIC
+========================================
+PyTorch Version:  2.10.0+cu128
+CUDA Available:   True
+GPU Device:       NVIDIA A100 80GB PCIe MIG 1g.10gb
+FAISS Version:    1.7.2
+========================================
+
+🚀 Step 1: Encoding with Tevatron Driver...
+
+📂 Step 2: Loading embeddings...
+🔍 Step 3: Running FAISS IndexFlatIP (CPU)...
+
+============================================================
+🕵️  VIGILANTE CHECK: QUERY 0
+============================================================
+Query ID: TheoremQA_jianyu_xu/pigeonhole_3.json | Top Result: 21541 | Match: False
+============================================================
+
+📊 Step 5: Running Evaluation Wrapper...
+
+FINAL RESULTS: theoremqa_theorems
+****************************************
+MRR:        0.1045
+NDCG@10:    0.0845
+Recall@1000: 0.5191
+****************************************
+📄 Results saved to: /scratch/aimanabdulwaha/dense-retrieval-SOTA/results/bright_benchmark/theoremqa_theorems_results.json
+
+--- 🌐 Evaluating Domain: theoremqa_questions ---
+
+========================================
+🔍 HARDWARE DIAGNOSTIC
+========================================
+PyTorch Version:  2.10.0+cu128
+CUDA Available:   True
+GPU Device:       NVIDIA A100 80GB PCIe MIG 1g.10gb
+FAISS Version:    1.7.2
+========================================
+
+🚀 Step 1: Encoding with Tevatron Driver...
+
+📂 Step 2: Loading embeddings...
+🔍 Step 3: Running FAISS IndexFlatIP (CPU)...
+
+============================================================
+🕵️  VIGILANTE CHECK: QUERY 0
+============================================================
+Query ID: TheoremQA_elainewan/math_calculus_5_2.json | Top Result: aqua_rat_23237 | Match: False
+============================================================
+
+📊 Step 5: Running Evaluation Wrapper...
+
+FINAL RESULTS: theoremqa_questions
+****************************************
+MRR:        0.1196
+NDCG@10:    0.1236
+Recall@1000: 0.4497
+****************************************
+📄 Results saved to: /scratch/aimanabdulwaha/dense-retrieval-SOTA/results/bright_benchmark/theoremqa_questions_results.json
+
+🏁 All evaluations complete.
+✅ Evaluation completed successfully
