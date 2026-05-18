@@ -21,7 +21,7 @@ if not hasattr(DenseModel, "_keys_to_ignore_on_save"):
 
 
 def grass_sampler(model_path, stale_idx, stale_embs, c_id_to_idx, c_ids, corpus_lookup, mix_df,
-                  qrels_dict, cfg, config, out_dir):
+                  qrels_dict, cfg, config, out_dir, base_jsonl_dir=None):
     """
     GrassSampler (Algorithm 2): mines hard negatives for all training queries using
     a stale ANN index and MC-dropout uncertainty estimation.
@@ -163,9 +163,10 @@ def grass_sampler(model_path, stale_idx, stale_embs, c_id_to_idx, c_ids, corpus_
     gc.collect()
     torch.cuda.empty_cache()
 
-    # Write updated mixture files
+    # Write updated mixture files (base = previous epoch's output, or original mixture)
     out_dir.mkdir(exist_ok=True, parents=True)
-    for f_path in (get_path("processed") / "training_mixture").glob("*.jsonl"):
+    base_dir = base_jsonl_dir if base_jsonl_dir is not None else (get_path("processed") / "training_mixture")
+    for f_path in base_dir.glob("*.jsonl"):
         if f_path.name.startswith('.'): continue
         with open(f_path, 'r') as f_in, open(out_dir / f_path.name, 'w') as f_out:
             for line in f_in:

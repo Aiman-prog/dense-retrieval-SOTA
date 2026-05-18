@@ -65,7 +65,8 @@ def main():
     mc_dropout_p  = cfg.get('mc_dropout_p', 0.1)
     poll_interval = cfg.get('miner_poll_interval', 5)
     n_das         = args.n_das or cfg.get('mab_n_das', 5)
-    bandit_eps    = cfg.get('bandit_epsilon', 0.2)
+    bandit_eps       = cfg.get('bandit_epsilon', 0.2)
+    bandit_eps_start = cfg.get('bandit_epsilon_start', 0.8)
     q_max_len     = config['model']['query_max_len']
     p_max_len     = config['model']['passage_max_len']
 
@@ -101,11 +102,29 @@ def main():
                 n_layers += 1
         print(f"[Miner] MC-dropout p={mc_dropout_p} on {n_layers} layers", flush=True)
 
+    if device.type == 'cuda':
+        try:
+            model = torch.compile(model)
+            print("[Miner] torch.compile enabled", flush=True)
+        except Exception as e:
+            print(f"[Miner] torch.compile skipped ({e})", flush=True)
+
     bandit = None
     if args.selection == 'bandit':
-        bandit = CaseBandit(n_das=n_das, epsilon=bandit_eps)
+        one_sweep = max(1, len(all_query_ids) // n_das)
+        bandit = CaseBandit(
+            n_das=n_das, epsilon=bandit_eps,
+            epsilon_start=bandit_eps_start,
+            decay_cycles=one_sweep,
+            stale_cycles=one_sweep,
+        )
         bandit.init_all_queries(all_query_ids)
-        print(f"[Miner] CaseBandit ready: n_das={n_das}, ε={bandit_eps}", flush=True)
+        print(
+            f"[Miner] CaseBandit ready: n_das={n_das}, "
+            f"ε {bandit_eps_start}→{bandit_eps} over {one_sweep} cycles, "
+            f"stale_cycles={one_sweep}",
+            flush=True,
+        )
 
     cpu_exec       = ThreadPoolExecutor(max_workers=1)
     last_ckpt      = None
@@ -124,6 +143,11 @@ def main():
                 for module in model.modules():
                     if isinstance(module, torch.nn.Dropout):
                         module.p = mc_dropout_p
+            if device.type == 'cuda':
+                try:
+                    model = torch.compile(model)
+                except Exception:
+                    pass
             del old_model
             gc.collect()
             torch.cuda.empty_cache()
@@ -131,7 +155,7 @@ def main():
 
         # 2. Select queries to mine
         if bandit is not None:
-            selected_ids = bandit.select_global(n_das=n_das, epsilon=bandit_eps)
+            selected_ids = bandit.select_global(n_das=n_das)
         else:
             selected_ids = random.sample(all_query_ids, min(n_das, len(all_query_ids)))
 
@@ -183,9 +207,10 @@ def main():
             top_m = np.argsort(g)[::-1][:m]
             mined[qid] = [cands[k] for k in top_m]
             top_sigma = float(sigma[top_m[0]])
+            top_g     = float(g[top_m[0]])
             sigmas.append(top_sigma)
             if bandit is not None:
-                bandit.update(qid, top_sigma)
+                bandit.update(qid, top_g)
 
         # 5. Write update JSONL + ready marker
         if mined:
@@ -194,14 +219,15 @@ def main():
             # Diagnostic: σ distribution for this cycle
             if sigmas:
                 arr = np.array(sigmas)
-                n_exploit = int(n_das * (1 - bandit_eps)) if bandit else n_das
+                n_exploit = int(n_das * (1 - bandit._current_epsilon())) if bandit else n_das
                 n_explore = len(selected_ids) - n_exploit
                 print(
                     f"[Miner] #{update_num} | queries={len(mined)} | "
                     f"σ mean={arr.mean():.4f} std={arr.std():.4f} "
                     f"min={arr.min():.4f} max={arr.max():.4f} | "
                     f"exploit={n_exploit} explore={n_explore}" +
-                    (f" | J_t={len(bandit.J_t)} unseen={len(bandit.unseen)}"
+                    (f" | J_t={len(bandit.J_t)} explore_pool={len(bandit.unseen)}"
+                     f" ε={bandit._current_epsilon():.2f}"
                      if bandit else ""),
                     flush=True,
                 )
@@ -210,8 +236,6 @@ def main():
                       flush=True)
 
             update_num += 1
-
-        time.sleep(poll_interval)
 
 
 if __name__ == "__main__":
