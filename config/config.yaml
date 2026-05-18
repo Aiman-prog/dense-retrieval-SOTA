@@ -122,9 +122,6 @@ training:
     selection:               "bandit"     # "bandit" or "random" (ablation switch)
     bandit_epsilon:          0.2          # ε for epsilon-greedy: explore fraction
 
-    # --- Sequential mode settings (run_grass_seq.py) ---
-    mine_every:              2            # mine n_das queries every N training steps
-
     # --- Async v2 2-GPU settings (used when uncertainty_mode: "async_v2") ---
     # See grass-report.tex §5 and memory/project_grass_async_v2_plan.md.
     # Time constants are placeholders until Step 11 calibration is run on target hardware.
@@ -137,6 +134,7 @@ training:
       t_mine:              PLACEHOLDER    # seconds, one full bandit round (X·|D| queries)
       t_train:             PLACEHOLDER    # seconds, one trainer epoch over the mixture
       poll_interval_steps: 10             # trainer polls update_dir every N steps
+      miner_poll_seconds:  5              # miner polls output_model_dir every N seconds for new checkpoint
       save_steps:          1000           # checkpoint cadence (optimizer.pt written last)
   ance:
     base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_mixed_bge_m3"

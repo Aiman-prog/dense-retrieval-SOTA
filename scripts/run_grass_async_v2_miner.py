@@ -126,7 +126,7 @@ def _run_main_loop(args, cfg, config, ctx, update_dir, bandit):
     n_per_round = max(1, int(float(args.coverage) * len(all_qids)))
     cfg_round = {**cfg, 'lambda_val': float(args.lambda_val)}
 
-    poll_interval = int(cfg.get('miner_poll_interval', 5))
+    poll_interval = int(cfg.get('async_v2', {}).get('miner_poll_seconds', 5))
     selection     = args.selection
     round_num     = 1
     last_ckpt     = None

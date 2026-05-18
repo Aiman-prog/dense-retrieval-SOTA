@@ -170,7 +170,7 @@ def encode_batch(model, tokenizer, texts, device, max_len, batch_size):
     """
     Encode a list of texts in mini-batches, returning L2-normalised CLS embeddings.
     Runs under no_grad with bf16 autocast (disabled on CPU).
-    Used by both EMA mining (run_grass_ema) and MC-dropout mining (run_grass_mcd).
+    Used by MC-dropout mining (grass_sampler in run_grass_mcd).
     """
     all_embs = []
     for i in range(0, len(texts), batch_size):

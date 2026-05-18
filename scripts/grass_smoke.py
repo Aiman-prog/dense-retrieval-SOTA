@@ -49,7 +49,7 @@ def run_smoke():
         cfg_v2 = full['training']['grass']['async_v2']
         required = ['M', 'X', 'selection', 'lambda_val',
                     't_init', 't_mine', 't_train',
-                    'poll_interval_steps', 'save_steps']
+                    'poll_interval_steps', 'miner_poll_seconds', 'save_steps']
         missing = [k for k in required if k not in cfg_v2]
         checks.append((f"async_v2 config block has required keys "
                        f"(missing: {missing or 'none'})", not missing))

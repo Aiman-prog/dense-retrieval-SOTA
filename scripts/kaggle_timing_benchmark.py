@@ -94,7 +94,7 @@ for n_das in N_DAS_VALUES:
             torch.cuda.synchronize()
         t0 = time.perf_counter()
 
-        # Mirrors run_grass_miner.py exactly:
+        # Mirrors the MC-dropout encode pattern in grass_sampler:
         encode_batch(q_texts * T, q_max_len)   # MC query encode
         encode_batch(c_texts * T, p_max_len)   # MC candidate encode
 
