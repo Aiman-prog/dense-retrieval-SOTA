@@ -114,6 +114,7 @@ def main():
     loss_fn    = TemperatureScaledContrastiveLoss(temperature=temperature)
     _model_raw = model
     try:
+        torch._dynamo.config.suppress_errors = True
         model = torch.compile(model, dynamic=True)
         print("[Trainer] torch.compile enabled", flush=True)
     except Exception as e:

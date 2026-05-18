@@ -221,7 +221,8 @@ def _run_miner(output_model_dir, neg_update_dir, stale_embs, c_ids,
             c_flat  = encode_batch(model, tokenizer, sl_texts * T, device, 64, 8) if sl_texts else None
             c_stack = c_flat.reshape(T, len(sl_texts), -1) if c_flat is not None else None
 
-            mined = {}
+            mined  = {}
+            sigmas = []
             for i, qid in enumerate(selected):
                 cands = sl.get(qid, [])
                 if not cands or c_stack is None:
@@ -233,7 +234,9 @@ def _run_miner(output_model_dir, neg_update_dir, stale_embs, c_ids,
                 g     = s_hat + lam * sigma
                 top   = np.argsort(g)[::-1][:m]
                 mined[qid] = [cands[k] for k in top]
-                bandit.update(qid, float(sigma[top[0]]) if len(top) else 0.0)
+                top_sigma = float(sigma[top[0]]) if len(top) else 0.0
+                sigmas.append(top_sigma)
+                bandit.update(qid, top_sigma)
 
             if mined:
                 jpath = neg_update_dir / f"update_{update_num}.jsonl"
@@ -244,7 +247,16 @@ def _run_miner(output_model_dir, neg_update_dir, stale_embs, c_ids,
                                                 'neg_docid': negs[0]}) + '\n')
                 (neg_update_dir / f"ready_{update_num}").write_text(str(update_num))
                 results['miner_updates'] = update_num
-                print(f"[Miner] Update #{update_num}: {len(mined)} queries", flush=True)
+                if sigmas:
+                    arr = np.array(sigmas)
+                    print(
+                        f"[Miner] #{update_num} | queries={len(mined)} | "
+                        f"σ mean={arr.mean():.4f} std={arr.std():.4f} "
+                        f"min={arr.min():.4f} max={arr.max():.4f} | "
+                        f"exploit=2 explore=1 | "
+                        f"J_t={len(bandit.J_t)} unseen={len(bandit.unseen)}",
+                        flush=True,
+                    )
                 update_num += 1
 
             time.sleep(0.1)

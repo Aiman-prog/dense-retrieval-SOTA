@@ -55,6 +55,7 @@ def get_path(key: str, model_name: str = None) -> Path:
         "temp_ance": base / "temp_ance_workdir",
         "temp_grass": base / "temp_grass_workdir",
         "temp_grass_async": base / "temp_grass_async_workdir",
+        "temp_grass_seq": base / "temp_grass_seq_workdir",
     }
     
     if model_name:

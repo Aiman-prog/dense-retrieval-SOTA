@@ -68,7 +68,7 @@ def main():
 
     output_model_dir = get_path("models") / (cfg['model_name'] + '_async')
     output_model_dir.mkdir(parents=True, exist_ok=True)
-    neg_update_dir = workdir / "neg_updates"
+    neg_update_dir = workdir / f"neg_updates_{cfg['model_name']}"
     neg_update_dir.mkdir(exist_ok=True)
 
     # Remove stale checkpoints so miner doesn't load prior-run weights

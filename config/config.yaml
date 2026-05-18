@@ -84,9 +84,9 @@ training:
 
     # --- Shared ---
     P: 200             # candidates retrieved from stale ANN per query
-    L: 50              # shortlist size: top-L by cheap pass (L <= P)
+    L: 25              # shortlist size: top-L by cheap pass (L <= P) — [S9] halved from 50
     m: 1               # negatives per query (= train_group_size - 1)
-    lambda_val: 2.0    # uncertainty weight in g = s_hat + lambda * sigma
+    lambda_val: 1.0    # uncertainty weight in g = s_hat + lambda * sigma (seq_bandit default; was 2.0 for async)
     mc_batch_size: 512 # encoding batch size (controls peak GPU memory during mining)
     learning_rate: 1e-5
     num_epochs: 3
@@ -97,7 +97,7 @@ training:
     weight_decay: 0.01
     max_grad_norm: 1.0
     save_strategy: "steps"
-    save_steps: 500
+    save_steps: 1000   # [S12] doubled from 500 — saves ~2 min in checkpoint I/O per 3 epochs
     save_total_limit: 1
     logging_steps: 100
     eval_top_k: 10
@@ -105,7 +105,7 @@ training:
 
     # --- EMA-specific (used when uncertainty_mode: "ema") ---
     ema_alpha: 0.999
-    ema_batch_size: 32 # smaller batch for full backprop — avoids OOM with BGE-M3
+    ema_batch_size: 64 # [AdamW8bit] doubled from 32 — safe once 8-bit Adam frees ~3.9GB VRAM
 
     # --- CaseBandit MAB [S8] (EMA mode only) ---
     mab_n_das:     5      # challengers mined per batch (out of ema_batch_size=32)
@@ -118,6 +118,16 @@ training:
     mc_dropout_p: 0.3  # dropout probability for MC passes (0.1 default is too weak)
     query_batch_size: 128  # queries per GrassSampler outer batch
     batch_size: 64
+
+    # --- Async 2-GPU settings (used when --async_mining) ---
+    async_mining:            false        # true activates 2-GPU orchestrator
+    selection:               "bandit"     # "bandit" or "random" (ablation switch)
+    miner_poll_interval:     5            # seconds between miner mining cycles
+    trainer_neg_poll_steps:  10           # trainer checks for neg updates every N steps
+    bandit_epsilon:          0.2          # ε for epsilon-greedy: explore fraction
+
+    # --- Sequential mode settings (run_grass_seq.py) ---
+    mine_every:              2            # mine n_das queries every N training steps
   ance:
     base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_mixed_bge_m3"
     model_name: "ance_mixed_bge_m3"
