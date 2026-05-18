@@ -13,7 +13,6 @@ sys.path.append(str(project_root / 'src'))
 from utils.helpers import get_path, get_training_context, load_config, \
                           encode_to_pickle, build_faiss_index, set_seed
 from data.preprocessor import run_setup
-from run_grass_ema import train_with_ema_grass
 from run_grass_mcd import run_mcd_pipeline
 from run_grass_seq_bandit import run_seq_bandit_pipeline
 
@@ -23,7 +22,7 @@ def main():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--mode', type=str, default=None,
-                        help='Override uncertainty_mode from config: "ema", "mc_dropout", or "seq_bandit"')
+                        help='Override uncertainty_mode from config: "mc_dropout" or "seq_bandit"')
     parser.add_argument('--n_das', type=int, default=None,
                         help='Override mab_n_das from config (challengers per batch)')
     parser.add_argument('--selection', type=str, default='bandit', choices=['bandit', 'random'],
@@ -32,8 +31,6 @@ def main():
                         help='[seq_bandit mode] Fraction of queries to mine per epoch (X in Algorithm 1)')
     parser.add_argument('--lambda_val', type=float, default=None,
                         help='[seq_bandit mode] Override gap-index lambda (default keeps cfg value)')
-    parser.add_argument('--async_mining', action='store_true',
-                        help='2-GPU async mode: miner on GPU 1, trainer on GPU 0')
     parser.add_argument('--build_index_only', action='store_true',
                         help='Build stale ANN index then exit — run this before parallel sweeps')
     parser.add_argument('--model_suffix', type=str, default=None,
@@ -48,11 +45,6 @@ def main():
     config = load_config()
     cfg    = config['training']['grass']
     set_seed(config.get('seed', 42))
-
-    if cli_args.async_mining or cfg.get('async_mining', False):
-        from train_grass_async import main as async_main
-        async_main()
-        return
 
     workdir = get_path("temp_grass")
     workdir.mkdir(exist_ok=True, parents=True)
@@ -116,12 +108,7 @@ def main():
     print(f"  GRASS MODE: {uncertainty_mode.upper()}", flush=True)
     print(f"{'='*50}\n", flush=True)
 
-    if uncertainty_mode == 'ema':
-        output_model_dir = train_with_ema_grass(
-            stale_idx, stale_embs, c_id_to_idx, c_ids,
-            corpus_lookup, qrels_dict, cfg, config, ctx, debug=cli_args.debug
-        )
-    elif uncertainty_mode == 'seq_bandit':
+    if uncertainty_mode == 'seq_bandit':
         model_suffix = cli_args.model_suffix or ''
         num_epochs   = cli_args.num_epochs if cli_args.num_epochs is not None else cfg.get('num_epochs', 3)
         output_model_dir = run_seq_bandit_pipeline(

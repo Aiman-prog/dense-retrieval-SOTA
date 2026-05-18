@@ -18,7 +18,7 @@ CLI flags (see main()):
   --model_suffix str              appended to output model name (avoid collisions)
   --lambda_val float              override gap-index λ in cfg (default 1.0)
 
-Algorithm 3 (CaseBandit) lives in src/utils/bandit.py as EpsilonGreedyBandit.
+Algorithm 3 lives in src/utils/bandit.py as EpsilonGreedyBandit.
 """
 
 import gc

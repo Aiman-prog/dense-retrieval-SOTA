@@ -1,7 +1,7 @@
 """
 GRASS n_das Ablation — Recall@1000 by Domain Group + Training Time.
 
-Compares GRASS runs with different n_das values (challengers per batch in CaseBandit).
+Compares GRASS runs with different n_das values (challengers per batch).
 Fill in the placeholder values (None → float) then run:
     python scripts/plot_results.py
 
@@ -136,7 +136,7 @@ ax2.set_ylabel("Training time (hours)", fontsize=12, color=TIME_COLOR)
 ax2.tick_params(axis='y', labelcolor=TIME_COLOR)
 ax2.set_ylim(0, max_time * 1.35)
 
-ax1.set_xlabel("CaseBandit challengers per batch (n_das)", fontsize=12, labelpad=8)
+ax1.set_xlabel("Challengers per batch (n_das)", fontsize=12, labelpad=8)
 ax1.set_title(
     "GRASS n_das Ablation — Recall@1000 by Domain Group",
     fontsize=13, fontweight='bold', pad=12,
