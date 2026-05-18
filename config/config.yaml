@@ -128,6 +128,20 @@ training:
 
     # --- Sequential mode settings (run_grass_seq.py) ---
     mine_every:              2            # mine n_das queries every N training steps
+
+    # --- Async v2 2-GPU settings (used when uncertainty_mode: "async_v2") ---
+    # See grass-report.tex §5 and memory/project_grass_async_v2_plan.md.
+    # Time constants are placeholders until Step 11 calibration is run on target hardware.
+    async_v2:
+      M:                   3              # target mining rounds (matches sequential 3-epoch envelope)
+      X:                   0.25           # coverage fraction per round (queries mined / |D|)
+      selection:           "bandit"       # "bandit" or "random"
+      lambda_val:          1.0            # gap-index lambda (overrides cfg.lambda_val for async mining)
+      t_init:              PLACEHOLDER    # seconds, init pass cost (L=1 over all queries)
+      t_mine:              PLACEHOLDER    # seconds, one full bandit round (X·|D| queries)
+      t_train:             PLACEHOLDER    # seconds, one trainer epoch over the mixture
+      poll_interval_steps: 10             # trainer polls update_dir every N steps
+      save_steps:          1000           # checkpoint cadence (optimizer.pt written last)
   ance:
     base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_mixed_bge_m3"
     model_name: "ance_mixed_bge_m3"

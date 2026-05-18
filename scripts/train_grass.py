@@ -23,7 +23,7 @@ def main():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--mode', type=str, default=None,
-                        help='Override uncertainty_mode from config: "ema", "mc_dropout", or "seq_bandit"')
+                        help='Override uncertainty_mode from config: "ema", "mc_dropout", "seq_bandit", or "async_v2"')
     parser.add_argument('--n_das', type=int, default=None,
                         help='Override mab_n_das from config (challengers per batch)')
     parser.add_argument('--selection', type=str, default='bandit', choices=['bandit', 'random'],
@@ -52,6 +52,26 @@ def main():
     if cli_args.async_mining or cfg.get('async_mining', False):
         from train_grass_async import main as async_main
         async_main()
+        return
+
+    uncertainty_mode = cli_args.mode or cfg.get('uncertainty_mode', 'mc_dropout')
+    if uncertainty_mode == 'async_v2':
+        # Hand off to the 2-GPU async v2 orchestrator. Strip --mode from argv so the
+        # v2 main() can re-parse cleanly with strict argparse.
+        filtered, skip_next = [], False
+        for tok in sys.argv[1:]:
+            if skip_next:
+                skip_next = False
+                continue
+            if tok == '--mode':
+                skip_next = True
+                continue
+            if tok.startswith('--mode='):
+                continue
+            filtered.append(tok)
+        sys.argv = [sys.argv[0]] + filtered
+        from train_grass_async_v2 import main as v2_main
+        v2_main()
         return
 
     workdir = get_path("temp_grass")
