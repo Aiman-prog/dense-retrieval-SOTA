@@ -37,11 +37,13 @@ CONTAINER="/scratch/${USER}/containers/pytorch_2.1.sif"
 # GRASS_V2_LAMBDA          gap-index lambda (default 1.0)
 # GRASS_V2_MODEL_SUFFIX    appended to model output dir (e.g. "M3_X25_bandit")
 # GRASS_V2_DEBUG=1         restrict to 100 queries (smoke test)
+# GRASS_V2_CASE_LITE_ENABLED=1  enable CASE-Lite candidate-level sampling (§6)
+# GRASS_V2_CASE_LITE_K     CASE-Lite Pareto knob (candidates evaluated per query; default 6)
 
 mkdir -p logs
 
 echo "🌿 Starting GRASS Async v2 Training (2-GPU)..."
-echo "   M=${GRASS_V2_M:-cfg} | X=${GRASS_V2_X:-cfg} | SELECTION=${GRASS_V2_SELECTION:-bandit} | LAMBDA=${GRASS_V2_LAMBDA:-cfg} | SUFFIX=${GRASS_V2_MODEL_SUFFIX:-}"
+echo "   M=${GRASS_V2_M:-cfg} | X=${GRASS_V2_X:-cfg} | SELECTION=${GRASS_V2_SELECTION:-bandit} | LAMBDA=${GRASS_V2_LAMBDA:-cfg} | SUFFIX=${GRASS_V2_MODEL_SUFFIX:-} | CASE_LITE=${GRASS_V2_CASE_LITE_ENABLED:-0} | K=${GRASS_V2_CASE_LITE_K:-cfg}"
 
 singularity exec --nv \
     --bind /scratch/${USER}:/scratch/${USER} \
@@ -54,7 +56,9 @@ singularity exec --nv \
         ${GRASS_V2_SELECTION:+--selection $GRASS_V2_SELECTION} \
         ${GRASS_V2_LAMBDA:+--lambda_val $GRASS_V2_LAMBDA} \
         ${GRASS_V2_MODEL_SUFFIX:+--model_suffix $GRASS_V2_MODEL_SUFFIX} \
-        ${GRASS_V2_DEBUG:+--debug}
+        ${GRASS_V2_DEBUG:+--debug} \
+        ${GRASS_V2_CASE_LITE_ENABLED:+--case_lite_enabled} \
+        ${GRASS_V2_CASE_LITE_K:+--case_lite_K $GRASS_V2_CASE_LITE_K}
 
 EXIT_CODE=$?
 

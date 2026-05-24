@@ -77,6 +77,11 @@ def main():
                         help='Gap-index lambda. Overrides cfg.lambda_val for the miner round.')
     parser.add_argument('--model_suffix',  type=str,   default=None)
     parser.add_argument('--debug',         action='store_true')
+    parser.add_argument('--case_lite_enabled', action='store_true',
+                        help='Enable CASE-Lite candidate-level sampling on the miner (§6). '
+                             'Overrides config.async_v2.case_lite.enabled.')
+    parser.add_argument('--case_lite_K',   type=int, default=None,
+                        help='Override config.async_v2.case_lite.K (CASE-Lite Pareto knob).')
     args = parser.parse_args()
 
     ctx    = get_training_context(args.recipe)
@@ -93,6 +98,16 @@ def main():
     if args.X          is not None: cfg_v2['X']         = args.X
     if args.selection  is not None: cfg_v2['selection'] = args.selection
     if args.lambda_val is not None: cfg_v2['lambda_val'] = args.lambda_val
+
+    # CASE-Lite CLI overrides. Toggle and K only; other hyperparams stay in config.yaml.
+    cl_cfg = cfg_v2.setdefault('case_lite', {})
+    if args.case_lite_enabled:
+        cl_cfg['enabled'] = True
+    if args.case_lite_K is not None:
+        cl_cfg['K'] = args.case_lite_K
+    # Propagate override back into cfg so the miner subprocess sees it via load_config()
+    # (load_config re-reads the file, so we also pass --case_lite_enabled as a CLI flag below).
+    case_lite_on = bool(cl_cfg.get('enabled', False))
 
     corpus_file, query_file, qrels_file = run_setup()
 
@@ -169,6 +184,10 @@ def main():
         ]
         if args.debug:
             init_cmd.append('--debug')
+        if case_lite_on:
+            init_cmd.append('--case_lite_enabled')
+            if args.case_lite_K is not None:
+                init_cmd += ['--case_lite_K', str(args.case_lite_K)]
         subprocess.run(init_cmd, env=init_env, check=True)
         print(f"[async_v2] Init pass done: {init_data_dir}", flush=True)
 
@@ -189,6 +208,10 @@ def main():
     ]
     if args.debug:
         miner_cmd.append('--debug')
+    if case_lite_on:
+        miner_cmd.append('--case_lite_enabled')
+        if args.case_lite_K is not None:
+            miner_cmd += ['--case_lite_K', str(args.case_lite_K)]
     miner_proc = subprocess.Popen(miner_cmd, env=miner_env)
     print(f"[async_v2] Miner started on GPU {miner_gpu} (pid {miner_proc.pid})", flush=True)
 

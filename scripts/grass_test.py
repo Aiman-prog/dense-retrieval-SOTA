@@ -430,6 +430,69 @@ def test_s12_config_save_steps():
     assert save_steps >= 1000, f"save_steps={save_steps} should be >= 1000 after [S12]"
 
 
+def test_cl_bucket_of_maps_ranks():
+    """[CASE-Lite] CaseLiteBandit.bucket_of maps 1-indexed cheap ranks into buckets correctly."""
+    from utils.bandit import CaseLiteBandit
+    b = CaseLiteBandit(bucket_boundaries=[5, 10, 25], initial_slots=[3, 1, 1])
+    # Boundaries are upper-inclusive.
+    assert b.bucket_of(1)  == 0
+    assert b.bucket_of(5)  == 0
+    assert b.bucket_of(6)  == 1
+    assert b.bucket_of(10) == 1
+    assert b.bucket_of(11) == 2
+    assert b.bucket_of(25) == 2
+    # Out-of-range clamps to last bucket.
+    assert b.bucket_of(100) == 2
+
+
+def test_cl_allocate_slots_round1_initial_prior():
+    """[CASE-Lite] Round 1 returns the static initial_slots prior summing to K-1."""
+    from utils.bandit import CaseLiteBandit
+    b = CaseLiteBandit(bucket_boundaries=[5, 10, 25], initial_slots=[3, 1, 1])
+    slots = b.allocate_slots(K=6, round_idx=1)
+    assert slots == [3, 1, 1], f"round-1 slots {slots} != initial_slots [3,1,1]"
+    assert sum(slots) == 5, "slots should sum to K-1=5"
+
+
+def test_cl_pick_e_t_backfills_short_buckets():
+    """[CASE-Lite] _pick_e_t must hit K targets exactly when shortlist size allows it,
+    backfilling from other buckets when a bucket runs short."""
+    from utils.bandit import CaseLiteBandit
+    from run_grass_case_lite import _pick_e_t
+
+    bandit = CaseLiteBandit(bucket_boundaries=[5, 10, 25], initial_slots=[3, 1, 1])
+    # Shortlist of 7 docs total: 6 fall in bucket 0 (ranks 1-5 + a spillover),
+    # 1 in bucket 1 (rank 6), 0 in bucket 2. Slots [3,1,1] sum to K-1=5.
+    # Bucket 2 is empty → slot 1 must be backfilled from another bucket.
+    shortlist_ids = [f"d{i}" for i in range(1, 8)]   # d1..d7
+    cheap_rank    = {d: i + 1 for i, d in enumerate(shortlist_ids)}  # 1-indexed
+    corpus_lookup = {d: f"text_{d}" for d in shortlist_ids}
+    corpus_lookup['d_inc'] = 'incumbent_text'
+
+    E_t = _pick_e_t(qid='q1', shortlist_ids=shortlist_ids,
+                    shortlist_to_cheap_rank=cheap_rank, corpus_lookup=corpus_lookup,
+                    incumbent_docid='d_inc', slots=[3, 1, 1], bandit=bandit)
+    challengers = [c for c in E_t if not c['is_incumbent']]
+    assert len(challengers) == 5, \
+        f"backfill failed: got {len(challengers)} challengers, expected 5"
+    assert E_t[0]['is_incumbent'], "incumbent must be first in E_t"
+
+
+def test_cl_update_round_ema_biases_high_reward_bucket():
+    """[CASE-Lite] update_round EMA pushes mu_b toward observed mean per bucket."""
+    from utils.bandit import CaseLiteBandit
+    b = CaseLiteBandit(bucket_boundaries=[5, 10, 25], initial_slots=[3, 1, 1],
+                       alpha_b=0.5)
+    # Bucket 0 sees high rewards, buckets 1+2 see zeros.
+    b.update_round({0: [1.0] * 10, 1: [0.0] * 5, 2: [0.0] * 5})
+    assert b.mu_b[0] > b.mu_b[1], f"μ_b[0]={b.mu_b[0]} should exceed μ_b[1]={b.mu_b[1]}"
+    assert b.mu_b[1] == b.mu_b[2] == 0.0
+    assert b.N_b == [10, 5, 5]
+    # After a second equally biased round, μ_b[0] should still dominate.
+    b.update_round({0: [1.0] * 10, 1: [0.0] * 5, 2: [0.0] * 5})
+    assert b.mu_b[0] > 0.5, f"after 2 high-reward rounds μ_b[0]={b.mu_b[0]} should be >0.5"
+
+
 def test_s13_torch_compile_correct_shape():
     """torch.compile(model, dynamic=True) must produce same output shape as uncompiled [S13]."""
     model     = MockModel().to(DEVICE)
@@ -483,6 +546,11 @@ if __name__ == '__main__':
         ("S11 zero_grad(set_to_none=True) sets grads=None",   test_s11_zero_grad_set_to_none),
         ("S12 config save_steps >= 1000",                     test_s12_config_save_steps),
         ("S13 torch.compile produces correct shape+norms",    test_s13_torch_compile_correct_shape),
+        # CASE-Lite (§6 grass-report.tex) — CaseLiteBandit unit tests
+        ("CL  bucket_of maps 1-indexed ranks correctly",      test_cl_bucket_of_maps_ranks),
+        ("CL  allocate_slots round-1 uses initial_slots",     test_cl_allocate_slots_round1_initial_prior),
+        ("CL  _pick_e_t backfills short buckets to hit K",    test_cl_pick_e_t_backfills_short_buckets),
+        ("CL  update_round EMA biases high-reward bucket",    test_cl_update_round_ema_biases_high_reward_bucket),
     ]
 
     passed = sum(_run(name, fn) for name, fn in suite)

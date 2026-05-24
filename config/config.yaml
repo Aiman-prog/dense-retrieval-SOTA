@@ -120,7 +120,7 @@ training:
     batch_size: 64
 
     selection:               "bandit"     # "bandit" or "random" (ablation switch)
-    bandit_epsilon:          0.2          # ε for epsilon-greedy: explore fraction
+    bandit_epsilon:          0.3          # ε for epsilon-greedy: explore fraction (grass-report.tex §4.3.2, eq. ε=0.3)
 
     # --- Async v2 2-GPU settings (used when uncertainty_mode: "async_v2") ---
     # See grass-report.tex §5 and memory/project_grass_async_v2_plan.md.
@@ -136,6 +136,20 @@ training:
       poll_interval_steps: 10             # trainer polls update_dir every N steps
       miner_poll_seconds:  5              # miner polls output_model_dir every N seconds for new checkpoint
       save_steps:          1000           # checkpoint cadence (optimizer.pt written last)
+      # --- CASE-Lite candidate-level sampling (grass-report.tex §6) ---
+      # When enabled, miner uses case_lite_sampler instead of grass_sampler.
+      # Query coverage X stays unchanged; only the per-query candidate evaluation changes.
+      case_lite:
+        enabled:           false        # toggle (default off — existing async v2 unaffected)
+        K:                 6            # evaluated candidates/query (incumbent + K-1 challengers); Pareto knob
+        L_mem:             25           # candidate memory size (shortlist after cheap-rank)
+        P:                 50           # FAISS retrieved pool
+        bucket_boundaries: [5, 10, 25]  # upper bounds for cheap-rank buckets (1-indexed)
+        initial_slots:     [3, 1, 1]    # round-1 challenger slots per bucket (sums to K-1)
+        alpha_b:           0.5          # round-level bucket EMA weight (§6.6)
+        beta:              0.5          # Bucket-UCB exploration constant
+        gamma:             0.05         # margin in margin-violation reward
+        tau:               0.0          # promotion threshold for B_t
   ance:
     base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_mixed_bge_m3"
     model_name: "ance_mixed_bge_m3"
