@@ -130,11 +130,15 @@ def main():
     stale_dir.mkdir(exist_ok=True, parents=True)
     update_dir.mkdir(exist_ok=True, parents=True)
 
-    # Build stale FAISS index from base model (skip if cached).
+    # Stale FAISS index already built (reused across parallel ablation jobs).
+    # If it ever needs rebuilding: serialise that — submit a single job first to
+    # populate stale_dir/corpus.pkl, then fan out the rest.
     stale_pkl = stale_dir / "corpus.pkl"
     if not stale_pkl.exists():
-        print("[async_v2] Building stale ANN index from base model...", flush=True)
-        encode_to_pickle(cfg['base_model'], corpus_file, stale_pkl, False, ctx, config)
+        raise FileNotFoundError(
+            f"Stale index missing at {stale_pkl}. Submit one job at a time to build it, "
+            f"or run scripts/calibrate_async_v2_times.py to populate it."
+        )
     print(f"[async_v2] Stale index: {stale_pkl}", flush=True)
 
     # Compute total_epochs from M (M-targeted termination, Eq. 5.1).
