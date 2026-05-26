@@ -26,6 +26,8 @@ export TRANSFORMERS_OFFLINE=1
 export PYTORCH_ALLOC_CONF="expandable_segments:True"
 export OMP_NUM_THREADS=8
 export CC=gcc
+export MKL_THREADING_LAYER=GNU
+export MKL_SERVICE_FORCE_INTEL=0
 
 # Container path
 CONTAINER="/scratch/${USER}/containers/pytorch_2.1.sif"

@@ -120,10 +120,13 @@ def main():
     os.environ['CUDA_VISIBLE_DEVICES'] = '0'
     print(f"[async_v2] {n_gpus} GPU(s) detected. Trainer→GPU 0, Miner→GPU {miner_gpu}", flush=True)
 
-    # Workdir layout (kept distinct from old async-grass under temp_grass_async/v2/)
+    # Workdir layout (kept distinct from old async-grass under temp_grass_async/v2/).
+    # update_dir is suffix-isolated so parallel sbatch jobs don't clobber each other's
+    # mining IPC; stale_index is shared (read-only after first build).
+    suffix = f"_{args.model_suffix}" if args.model_suffix else ''
     base_workdir   = get_path("temp_grass_async") / "v2"
     stale_dir      = base_workdir / "stale_index"
-    update_dir     = base_workdir / "updates"
+    update_dir     = base_workdir / f"updates{suffix}"
     stale_dir.mkdir(exist_ok=True, parents=True)
     update_dir.mkdir(exist_ok=True, parents=True)
 
@@ -148,7 +151,6 @@ def main():
           f"{total_epochs} epochs | {max_steps} total steps", flush=True)
 
     # Output model dir (suffix avoids collision across sweep cells).
-    suffix = f"_{args.model_suffix}" if args.model_suffix else ''
     output_model_dir = get_path("models") / f"{cfg['model_name']}_asyncv2{suffix}"
     stale_ckpts = sorted(output_model_dir.glob("checkpoint-*"))
     if stale_ckpts:

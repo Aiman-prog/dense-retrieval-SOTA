@@ -130,9 +130,10 @@ training:
       X:                   0.25           # coverage fraction per round (queries mined / |D|)
       selection:           "bandit"       # "bandit" or "random"
       lambda_val:          1.0            # gap-index lambda (overrides cfg.lambda_val for async mining)
-      t_init:              PLACEHOLDER    # seconds, init pass cost (L=1 over all queries)
-      t_mine:              PLACEHOLDER    # seconds, one full bandit round (X·|D| queries)
-      t_train:             PLACEHOLDER    # seconds, one trainer epoch over the mixture
+      t_init:              4758           # ~79.3 min, calibrated (job 9966836, A100 80GB)
+      t_mine:              11044          # ~184.1 min, full GRASS L=25 X=0.25
+      # t_mine:            3962           # ~66.0 min, CASE-Lite K=6 X=0.25 — switch when case_lite.enabled=true
+      t_train:             5994           # ~99.9 min, one trainer epoch (5157 steps over 330K mixture)
       poll_interval_steps: 10             # trainer polls update_dir every N steps
       miner_poll_seconds:  5              # miner polls output_model_dir every N seconds for new checkpoint
       save_steps:          1000           # checkpoint cadence (optimizer.pt written last)

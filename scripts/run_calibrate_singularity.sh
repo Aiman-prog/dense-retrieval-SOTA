@@ -2,7 +2,7 @@
 
 #SBATCH --job-name=grass_calibrate
 #SBATCH --partition=gpu-a100
-#SBATCH --time=01:00:00
+#SBATCH --time=00:30:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --gpus-per-task=1
@@ -29,6 +29,8 @@ export TRANSFORMERS_OFFLINE=1
 export PYTORCH_ALLOC_CONF="expandable_segments:True"
 export OMP_NUM_THREADS=8
 export CC=gcc
+export MKL_THREADING_LAYER=GNU
+export MKL_SERVICE_FORCE_INTEL=0
 
 CONTAINER="/scratch/${USER}/containers/pytorch_2.1.sif"
 

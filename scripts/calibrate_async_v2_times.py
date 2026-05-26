@@ -178,33 +178,42 @@ def main():
           f"n_mine_per_round (X={X}) = {n_mine_per_round}, "
           f"training mixture {n_examples} examples, {steps_per_epoch} steps/epoch", flush=True)
 
-    # ── T_INIT ──────────────────────────────────────────────────────────────
-    print(f"\n[calibrate] Phase 1/{3 if not args.skip_train else 3}: "
-          f"T_INIT — grass_sampler(L=1) on {args.n_init} queries...", flush=True)
-    t_init_sub  = measure_init(args, cfg, config, stale_idx, stale_embs, c_id_to_idx, c_ids,
-                               corpus_lookup, qrels_dict, mix_df, work)
-    t_init_full = t_init_sub * (n_total / args.n_init)
-    print(f"  ⇒ subset {t_init_sub:.0f}s → extrapolated to {n_total} queries: "
-          f"{t_init_full:.0f}s ({t_init_full/60:.1f} min)", flush=True)
+    # ── T_INIT / T_MINE phases skipped — already measured on job 9966835 ──
+    # Hardcoded extrapolated values from the prior successful run on full A100:
+    t_init_full = 3999.0    # 66.6 min, grass_sampler(L=1) over 330K queries
+    t_mfull     = 10183.0   # 169.7 min, full GRASS L=25 T=5 over 82.5K queries (X=0.25)
+    t_mcase     = 3846.0    # 64.1 min, CASE-Lite K=6 L_mem=25 over 82.5K queries (X=0.25)
+    cl_cfg      = cfg['async_v2']['case_lite']
+    print(f"[calibrate] Reusing prior measurements: t_init={t_init_full:.0f}s, "
+          f"t_mine_full={t_mfull:.0f}s, t_mine_case_lite={t_mcase:.0f}s", flush=True)
 
-    # ── T_MINE (full GRASS) ─────────────────────────────────────────────────
-    print(f"\n[calibrate] Phase 2: T_MINE (full GRASS L={cfg.get('L', 10)}, T={cfg['T']}) "
-          f"on {args.n_mine} queries...", flush=True)
-    t_mfull_sub = measure_mine_full(args, cfg, config, stale_idx, stale_embs, c_id_to_idx, c_ids,
-                                    corpus_lookup, qrels_dict, mix_df, work)
-    t_mfull     = t_mfull_sub * (n_mine_per_round / args.n_mine)
-    print(f"  ⇒ subset {t_mfull_sub:.0f}s → extrapolated to {n_mine_per_round} queries: "
-          f"{t_mfull:.0f}s ({t_mfull/60:.1f} min)", flush=True)
-
-    # ── T_MINE (CASE-Lite) ──────────────────────────────────────────────────
-    cl_cfg = cfg['async_v2']['case_lite']
-    print(f"\n[calibrate] Phase 3: T_MINE (CASE-Lite K={cl_cfg['K']} L_mem={cl_cfg['L_mem']}) "
-          f"on {args.n_mine} queries...", flush=True)
-    t_mcase_sub = measure_mine_case_lite(args, cfg, config, stale_idx, stale_embs, c_id_to_idx, c_ids,
-                                         corpus_lookup, qrels_dict, mix_df, work)
-    t_mcase     = t_mcase_sub * (n_mine_per_round / args.n_mine)
-    print(f"  ⇒ subset {t_mcase_sub:.0f}s → extrapolated to {n_mine_per_round} queries: "
-          f"{t_mcase:.0f}s ({t_mcase/60:.1f} min)", flush=True)
+    # # ── T_INIT ──────────────────────────────────────────────────────────────
+    # print(f"\n[calibrate] Phase 1/{3 if not args.skip_train else 3}: "
+    #       f"T_INIT — grass_sampler(L=1) on {args.n_init} queries...", flush=True)
+    # t_init_sub  = measure_init(args, cfg, config, stale_idx, stale_embs, c_id_to_idx, c_ids,
+    #                            corpus_lookup, qrels_dict, mix_df, work)
+    # t_init_full = t_init_sub * (n_total / args.n_init)
+    # print(f"  ⇒ subset {t_init_sub:.0f}s → extrapolated to {n_total} queries: "
+    #       f"{t_init_full:.0f}s ({t_init_full/60:.1f} min)", flush=True)
+    #
+    # # ── T_MINE (full GRASS) ─────────────────────────────────────────────────
+    # print(f"\n[calibrate] Phase 2: T_MINE (full GRASS L={cfg.get('L', 10)}, T={cfg['T']}) "
+    #       f"on {args.n_mine} queries...", flush=True)
+    # t_mfull_sub = measure_mine_full(args, cfg, config, stale_idx, stale_embs, c_id_to_idx, c_ids,
+    #                                 corpus_lookup, qrels_dict, mix_df, work)
+    # t_mfull     = t_mfull_sub * (n_mine_per_round / args.n_mine)
+    # print(f"  ⇒ subset {t_mfull_sub:.0f}s → extrapolated to {n_mine_per_round} queries: "
+    #       f"{t_mfull:.0f}s ({t_mfull/60:.1f} min)", flush=True)
+    #
+    # # ── T_MINE (CASE-Lite) ──────────────────────────────────────────────────
+    # cl_cfg = cfg['async_v2']['case_lite']
+    # print(f"\n[calibrate] Phase 3: T_MINE (CASE-Lite K={cl_cfg['K']} L_mem={cl_cfg['L_mem']}) "
+    #       f"on {args.n_mine} queries...", flush=True)
+    # t_mcase_sub = measure_mine_case_lite(args, cfg, config, stale_idx, stale_embs, c_id_to_idx, c_ids,
+    #                                      corpus_lookup, qrels_dict, mix_df, work)
+    # t_mcase     = t_mcase_sub * (n_mine_per_round / args.n_mine)
+    # print(f"  ⇒ subset {t_mcase_sub:.0f}s → extrapolated to {n_mine_per_round} queries: "
+    #       f"{t_mcase:.0f}s ({t_mcase/60:.1f} min)", flush=True)
 
     # ── T_TRAIN ─────────────────────────────────────────────────────────────
     t_train_full = None
