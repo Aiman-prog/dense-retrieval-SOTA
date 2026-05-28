@@ -46,7 +46,7 @@ training:
     model_name: "inbatch_mixed_bge_m3"
     batch_size: 64
     learning_rate: 1e-5
-    num_epochs: 2
+    num_epochs: 3
     train_group_size: 2
     bf16: True
     dataloader_num_workers: 4
@@ -92,7 +92,7 @@ training:
     num_epochs: 3
     train_group_size: 2
     bf16: true
-    dataloader_num_workers: 2
+    dataloader_num_workers: 4
     warmup_ratio: 0.1
     weight_decay: 0.01
     max_grad_norm: 1.0
