@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 
-#SBATCH --job-name=grass
+#SBATCH --job-name=grass_seq
 #SBATCH --partition=gpu-a100
-#SBATCH --time=20:00:00
+#SBATCH --time=07:00:00
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16           # Needed for FAISS operations
+#SBATCH --cpus-per-task=16
 #SBATCH --gpus-per-task=1
 #SBATCH --mem-per-cpu=8000M
 #SBATCH --account=Education-EEMCS-MSc-DSAIT
-#SBATCH --output=logs/grass_%j.out
-#SBATCH --error=logs/grass_%j.err
+#SBATCH --output=logs/grass_seq_%j.out
+#SBATCH --error=logs/grass_seq_%j.err
 #SBATCH --chdir=/home/aimanabdulwaha/dense-retrieval-SOTA
 
 # --- Environment Setup ---
@@ -22,38 +22,42 @@ export HF_HOME="${DATA_BASE_DIR}/data/bright"
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 
-# Memory & Performance Tuning
+# Memory & Performance
 export PYTORCH_ALLOC_CONF="expandable_segments:True"
-export OMP_NUM_THREADS=16            # Matches cpus-per-task for FAISS speed
+export OMP_NUM_THREADS=8
+export CC=gcc
 
 # Container path
 CONTAINER="/scratch/${USER}/containers/pytorch_2.1.sif"
 
-# --- Pre-flight ---
+# --- Experiment Knobs (override via env vars before sbatch) ---
+# GRASS_N_DAS=30          number of queries mined per mining round
+# GRASS_MINE_EVERY=2      mine every N training steps (coverage knob)
+# GRASS_SELECTION=bandit  or "random" for ablation baseline
+# GRASS_MODEL_SUFFIX=seq_ndas30_me2_bandit   appended to model output dir
+
 mkdir -p logs
 
-# --- Run GRASS Pipeline in Container ---
-echo "🌿 Starting GRASS Training Loop..."
-echo "📋 GRASS: mine hard negatives (stale ANN + MC-dropout) → train → evaluate"
+echo "🌿 Starting GRASS Sequential Training (1-GPU)..."
+echo "   N_DAS=${GRASS_N_DAS:-5} | MINE_EVERY=${GRASS_MINE_EVERY:-2} | SELECTION=${GRASS_SELECTION:-bandit} | SUFFIX=${GRASS_MODEL_SUFFIX:-}"
 
 singularity exec --nv \
     --bind /scratch/${USER}:/scratch/${USER} \
     --bind /home/${USER}:/home/${USER} \
     ${CONTAINER} \
-    python -u scripts/train_grass.py \
-        ${GRASS_MODE:+--mode $GRASS_MODE} \
+    python -u scripts/run_grass_seq.py \
         ${GRASS_N_DAS:+--n_das $GRASS_N_DAS} \
+        ${GRASS_MINE_EVERY:+--mine_every $GRASS_MINE_EVERY} \
+        ${GRASS_SELECTION:+--selection $GRASS_SELECTION} \
         ${GRASS_MODEL_SUFFIX:+--model_suffix $GRASS_MODEL_SUFFIX} \
-        ${GRASS_NUM_EPOCHS:+--num_epochs $GRASS_NUM_EPOCHS} \
-        ${GRASS_P:+--P $GRASS_P} \
-        ${GRASS_L:+--L $GRASS_L}
+        ${GRASS_NUM_EPOCHS:+--num_epochs $GRASS_NUM_EPOCHS}
 
 EXIT_CODE=$?
 
 if [ $EXIT_CODE -eq 0 ]; then
-    echo "✅ GRASS training completed successfully"
+    echo "✅ GRASS sequential training completed successfully"
 else
-    echo "❌ GRASS training failed with code $EXIT_CODE"
+    echo "❌ GRASS sequential training failed with code $EXIT_CODE"
 fi
 
 echo "=========================================="

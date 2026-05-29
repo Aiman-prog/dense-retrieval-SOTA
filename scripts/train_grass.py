@@ -15,6 +15,8 @@ from utils.helpers import get_path, get_training_context, load_config, \
 from data.preprocessor import run_setup
 from run_grass_mcd import run_mcd_pipeline
 from run_grass_seq_bandit import run_seq_bandit_pipeline
+from run_grass_ema import train_with_ema_grass
+from run_grass_seq import run_seq_pipeline
 
 
 def main():
@@ -22,7 +24,12 @@ def main():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--mode', type=str, default=None,
-                        help='Override uncertainty_mode from config: "mc_dropout" or "seq_bandit"')
+                        choices=['mc_dropout', 'seq_bandit', 'ema', 'seq'],
+                        help='Override uncertainty_mode from config')
+    parser.add_argument('--mine_every', type=int, default=None,
+                        help='[seq mode] Override mine_every from config')
+    parser.add_argument('--ema_alpha', type=float, default=None,
+                        help='[ema mode] Override ema_alpha from config')
     parser.add_argument('--n_das', type=int, default=None,
                         help='Override mab_n_das from config (challengers per batch)')
     parser.add_argument('--selection', type=str, default='bandit', choices=['bandit', 'random'],
@@ -37,6 +44,10 @@ def main():
                         help='Append suffix to model output dir (e.g. "ndas5") to avoid collisions')
     parser.add_argument('--num_epochs', type=int, default=None,
                         help='Override num_epochs from config')
+    parser.add_argument('--P', type=int, default=None,
+                        help='Override FAISS top-P from config')
+    parser.add_argument('--L', type=int, default=None,
+                        help='Override top-L shortlist from config')
     cli_args, _ = parser.parse_known_args()
 
     corpus_file, query_file, qrels_file = run_setup()
@@ -64,6 +75,18 @@ def main():
     if cli_args.lambda_val is not None:
         cfg = {**cfg, 'lambda_val': cli_args.lambda_val}
         print(f"  CLI override: lambda_val={cli_args.lambda_val}", flush=True)
+
+    if cli_args.ema_alpha is not None:
+        cfg = {**cfg, 'ema_alpha': cli_args.ema_alpha}
+        print(f"  CLI override: ema_alpha={cli_args.ema_alpha}", flush=True)
+
+    if cli_args.P is not None:
+        cfg = {**cfg, 'P': cli_args.P}
+        print(f"  CLI override: P={cli_args.P}", flush=True)
+
+    if cli_args.L is not None:
+        cfg = {**cfg, 'L': cli_args.L}
+        print(f"  CLI override: L={cli_args.L}", flush=True)
 
     stale_dir = workdir / "stale_index"
     stale_dir.mkdir(exist_ok=True)
@@ -118,6 +141,20 @@ def main():
             coverage=cli_args.coverage,
             num_epochs=num_epochs,
             model_suffix=model_suffix,
+        )
+    elif uncertainty_mode == 'ema':
+        output_model_dir = train_with_ema_grass(
+            stale_idx, stale_embs, c_id_to_idx, c_ids,
+            corpus_lookup, qrels_dict, cfg, config, ctx,
+            debug=cli_args.debug,
+        )
+    elif uncertainty_mode == 'seq':
+        output_model_dir = run_seq_pipeline(
+            stale_idx, stale_embs, c_id_to_idx, c_ids,
+            corpus_lookup, qrels_dict, cfg, config, ctx,
+            debug=cli_args.debug,
+            n_das_override=cli_args.n_das,
+            mine_every_override=cli_args.mine_every,
         )
     else:
         output_model_dir = run_mcd_pipeline(

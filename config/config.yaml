@@ -118,12 +118,22 @@ training:
     mc_dropout_p: 0.3  # dropout probability for MC passes (0.1 default is too weak)
     query_batch_size: 128  # queries per GrassSampler outer batch
     batch_size: 64
+    max_pool_per_query: 200  # cap on FAISS+memory combined candidate pool
 
     selection:               "bandit"     # "bandit" or "random" (ablation switch)
     bandit_epsilon:          0.2          # ε for epsilon-greedy: explore fraction
 
     # --- Sequential mode settings (run_grass_seq.py) ---
     mine_every:              2            # mine n_das queries every N training steps
+    n_das:                   30           # queries mined per mining tick (seq mode)
+
+    # --- Active candidate memory (Phase 3 architecture refactor) ---
+    candidate_cache:
+      enabled:                  false     # default off — backward compatible
+      max_candidates_per_query: 64
+      ttl_rounds:               2
+      top_g_to_store:           8
+      top_sigma_to_store:       8
   ance:
     base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_mixed_bge_m3"
     model_name: "ance_mixed_bge_m3"

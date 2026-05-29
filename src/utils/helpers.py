@@ -233,39 +233,122 @@ def _load_corpus_lookup(corpus_file) -> dict:
     return lookup
 
 
-def _shortlist_batch(batch_ids, indices, q_embs_det, qrels_dict, c_ids,
-                     c_id_to_idx, stale_embs, corpus_lookup, P, L):
-    """
-    CPU shortlisting: filter true positives from P ANN candidates per query,
-    then keep top-L by cheap stale_embs @ q_cur dot product.
-    Safe for background thread execution (numpy BLAS releases the GIL).
-    Returns (batch_query_shortlist, shortlist_ids, shortlist_texts, shortlist_to_idx, n_filtered).
-    """
-    batch_query_cands = {}
-    for i, qid in enumerate(batch_ids):
-        cands = [c_ids[j] for j in indices[i]
-                 if j >= 0 and c_ids[j] not in qrels_dict.get(qid, set())]
-        batch_query_cands[qid] = cands
+def _pool_and_fresh_rerank(model, tokenizer, batch_qids, batch_q_embs_det,
+                           faiss_indices, memory_per_query, memory_expired_map,
+                           qrels_dict, c_ids, corpus_lookup,
+                           p_max_len, mc_batch_size, device,
+                           L, max_pool_per_query):
+    """Build candidate pool (memory first, then FAISS), encode with the CURRENT
+    model in eval+no_grad, pick top-L per query by current_q . current_d.
 
-    batch_query_shortlist  = {}
-    shortlist_cand_ids_set = set()
-    for i, qid in enumerate(batch_ids):
-        cands = batch_query_cands[qid]
-        if not cands:
-            batch_query_shortlist[qid] = []
+    Deterministic capping rule per query:
+      1. Take all memory candidates in stored order, capped at max_pool_per_query.
+      2. Fill remaining slots with FAISS hits in FAISS rank order.
+      3. Filter qrels positives.
+      4. Dedupe while preserving order (memory first, then FAISS extras).
+
+    The pool docs are encoded ONCE per batch (deduped across queries). Model
+    mode is saved at entry, set to eval, restored at exit; encoding runs under
+    torch.no_grad(). The returned embeddings are NOT reused for MCDP/EMA
+    uncertainty scoring — callers re-encode top-L cleanly.
+
+    Returns:
+      batch_shortlist: {qid: [docid] top-L}
+      source_map:      {qid: {docid: 'faiss' | 'memory' | 'both'}}
+      pool_stats:      {qid: {retrieved, memory_count, pool_count,
+                              positives_filtered, cache_used, faiss_used,
+                              memory_expired}}
+    """
+    # Per-query: build pool with deterministic capping
+    batch_pool      = {}      # qid -> [docid] (post-cap, post-filter, post-dedupe)
+    source_map      = {}      # qid -> {docid: source}
+    pool_stats      = {}
+    all_pool_docids = set()
+
+    for i, qid in enumerate(batch_qids):
+        memory_ids     = memory_per_query.get(qid, []) if memory_per_query else []
+        memory_expired = memory_expired_map.get(qid, False) if memory_expired_map else False
+        faiss_ids      = [c_ids[j] for j in faiss_indices[i] if j >= 0]
+        positives      = qrels_dict.get(qid, set())
+
+        # Stage 1: memory first, capped at max_pool_per_query
+        ordered = []
+        seen    = set()
+        sources = {}
+        n_pos_filtered = 0
+
+        for docid in memory_ids:
+            if len(ordered) >= max_pool_per_query:
+                break
+            if docid in positives:
+                n_pos_filtered += 1
+                continue
+            if docid in seen:
+                continue
+            seen.add(docid)
+            ordered.append(docid)
+            sources[docid] = 'memory'
+
+        # Stage 2: fill remaining with FAISS hits in rank order
+        for docid in faiss_ids:
+            if len(ordered) >= max_pool_per_query:
+                break
+            if docid in positives:
+                n_pos_filtered += 1
+                continue
+            if docid in seen:
+                # Already added from memory — mark as both sources
+                sources[docid] = 'both'
+                continue
+            seen.add(docid)
+            ordered.append(docid)
+            sources[docid] = 'faiss'
+
+        batch_pool[qid] = ordered
+        source_map[qid] = sources
+        all_pool_docids.update(ordered)
+        pool_stats[qid] = {
+            'retrieved':          len(faiss_ids),
+            'memory_count':       len(memory_ids),
+            'pool_count':         len(ordered),
+            'positives_filtered': n_pos_filtered,
+            'cache_used':         any(s in ('memory', 'both') for s in sources.values()),
+            'faiss_used':         any(s in ('faiss',  'both') for s in sources.values()),
+            'memory_expired':     memory_expired,
+        }
+
+    # Encode pool once across the batch — eval + no_grad, restore train state
+    pool_docids = list(all_pool_docids)
+    if not pool_docids:
+        empty_shortlist = {qid: [] for qid in batch_qids}
+        return empty_shortlist, source_map, pool_stats
+
+    pool_texts = [corpus_lookup.get(d, "") for d in pool_docids]
+    pool_idx   = {d: i for i, d in enumerate(pool_docids)}
+
+    prev_training = model.training
+    model.eval()
+    try:
+        # encode_batch already wraps in no_grad
+        pool_embs = encode_batch(model, tokenizer, pool_texts,
+                                 device, p_max_len, mc_batch_size)
+    finally:
+        if prev_training:
+            model.train()
+
+    # Per query: dot product current_q . current_d on its pool slice; top-L
+    batch_shortlist = {}
+    for i, qid in enumerate(batch_qids):
+        pool_for_qid = batch_pool[qid]
+        if not pool_for_qid:
+            batch_shortlist[qid] = []
             continue
-        stale_idxs = [c_id_to_idx[d] for d in cands]
-        scores     = stale_embs[stale_idxs] @ q_embs_det[i]
-        top_l      = np.argsort(scores)[::-1][:L]
-        shortlist  = [cands[k] for k in top_l]
-        batch_query_shortlist[qid] = shortlist
-        shortlist_cand_ids_set.update(shortlist)
+        idxs   = [pool_idx[d] for d in pool_for_qid]
+        scores = pool_embs[idxs] @ batch_q_embs_det[i]
+        top_l  = np.argsort(scores)[::-1][:L]
+        batch_shortlist[qid] = [pool_for_qid[k] for k in top_l]
 
-    shortlist_ids    = list(shortlist_cand_ids_set)
-    shortlist_texts  = [corpus_lookup.get(did, "") for did in shortlist_ids]
-    shortlist_to_idx = {did: idx for idx, did in enumerate(shortlist_ids)}
-    n_filtered = sum(len(v) for v in batch_query_cands.values())
-    return batch_query_shortlist, shortlist_ids, shortlist_texts, shortlist_to_idx, n_filtered
+    return batch_shortlist, source_map, pool_stats
 
 
 def evaluate_bright(ctx, config, model_path, temp_workdir_key=None):

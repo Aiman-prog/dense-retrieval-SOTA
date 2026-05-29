@@ -12,6 +12,7 @@ project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root / 'src'))
 
 from utils.bandit import EpsilonGreedyBandit
+from utils.grass_candidate_memory import CandidateMemory
 
 
 def run_smoke():
@@ -42,6 +43,46 @@ def run_smoke():
         with open(p) as f:
             rec = json.loads(f.readline())
         checks.append(("Mining log record contains query_id + g_selected", "query_id" in rec and "g_selected" in rec))
+
+    # 4) Phase 3 config knobs present
+    import yaml
+    with open(project_root / "config" / "config.yaml") as f:
+        cfg = yaml.safe_load(f)
+    grass_cfg = cfg["training"]["grass"]
+    cc = grass_cfg.get("candidate_cache", {})
+    cc_ok = all(k in cc for k in (
+        "enabled", "max_candidates_per_query", "ttl_rounds",
+        "top_g_to_store", "top_sigma_to_store",
+    ))
+    pool_ok = "max_pool_per_query" in grass_cfg
+    checks.append(("candidate_cache.* config keys present", cc_ok))
+    checks.append(("max_pool_per_query config key present", pool_ok))
+
+    # 5) CandidateMemory pickle round-trip
+    mem = CandidateMemory(max_per_query=8, ttl_rounds=2,
+                          top_g_to_store=4, top_sigma_to_store=4)
+    mem.update("q0", current_round=3, selected_negs=["d1"],
+               top_g_docids=["d2"], top_sigma_docids=["d3"])
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "mem.pkl"
+        mem.save(path)
+        loaded = CandidateMemory.load(path, max_per_query=8, ttl_rounds=2,
+                                      top_g_to_store=4, top_sigma_to_store=4)
+    ids_orig,   _ = mem.get("q0", current_round=3)
+    ids_loaded, _ = loaded.get("q0", current_round=3)
+    checks.append(("CandidateMemory save/load round-trip preserves ids",
+                   ids_orig == ids_loaded and ids_orig == ["d1", "d2", "d3"]))
+
+    # 6) TTL validity on fresh insertion
+    mem2 = CandidateMemory(max_per_query=8, ttl_rounds=2,
+                           top_g_to_store=4, top_sigma_to_store=4)
+    mem2.update("q0", current_round=5, selected_negs=["d_valid"])
+    _, exp_valid   = mem2.get("q0", current_round=7)   # within TTL (5+2)
+    _, exp_invalid = mem2.get("q0", current_round=8)   # outside TTL
+    checks.append(("CandidateMemory TTL: valid at round 7 after insert at 5",
+                   exp_valid is False))
+    checks.append(("CandidateMemory TTL: expired at round 8 (ttl_rounds=2)",
+                   exp_invalid is True))
 
     passed = 0
     for name, ok in checks:
