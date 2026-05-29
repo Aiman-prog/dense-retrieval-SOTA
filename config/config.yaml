@@ -84,7 +84,7 @@ training:
 
     # --- Shared ---
     P: 200             # candidates retrieved from stale ANN per query
-    L: 25              # shortlist size: top-L by cheap pass (L <= P) — [S9] halved from 50
+    L: 25              # shortlist size after fresh current-model rerank (L <= P) — [S9] halved from 50
     m: 1               # negatives per query (= train_group_size - 1)
     lambda_val: 1.0    # uncertainty weight in g = s_hat + lambda * sigma (seq_bandit default; was 2.0 for async)
     mc_batch_size: 512 # encoding batch size (controls peak GPU memory during mining)

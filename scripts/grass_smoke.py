@@ -84,6 +84,68 @@ def run_smoke():
     checks.append(("CandidateMemory TTL: expired at round 8 (ttl_rounds=2)",
                    exp_invalid is True))
 
+    # 7) MCD repeated-mining control flow present (epoch loop + per-epoch helpers)
+    mcd_src = (project_root / "scripts" / "run_grass_mcd.py").read_text()
+    loop_ok  = "for epoch in range(start_epoch, num_epochs + 1)" in mcd_src
+    chain_ok = "base_jsonl_dir=prev_mining_dir" in mcd_src and "current_model" in mcd_src
+    helper_ok = "def train_one_epoch_mcd" in mcd_src
+    mem_persist_ok = "memory.save(memory_path)" in mcd_src
+    checks.append(("run_grass_mcd: per-epoch loop present", loop_ok))
+    checks.append(("run_grass_mcd: chains JSONL + checkpoint across epochs", chain_ok))
+    checks.append(("run_grass_mcd: train_one_epoch_mcd helper defined", helper_ok))
+    checks.append(("run_grass_mcd: persists CandidateMemory after mining", mem_persist_ok))
+
+    # 8) MCD training continuity: shared output_dir + cumulative epochs + resume-safe flags
+    shared_out_ok    = "output_dir = get_path(\"models\") / f\"{base_name}_mcdp\"" in mcd_src
+    cumulative_ok    = "cumulative_epochs=epoch" in mcd_src and "cumulative_epochs" in mcd_src
+    ignore_skip_ok   = "'--ignore_data_skip'" in mcd_src and "'True'" in mcd_src
+    save_epoch_ok    = "'--save_strategy'" in mcd_src and "'epoch'" in mcd_src
+    checks.append(("run_grass_mcd: shared output_dir for resume continuity", shared_out_ok))
+    checks.append(("run_grass_mcd: cumulative_epochs grows per call", cumulative_ok))
+    checks.append(("run_grass_mcd: ignore_data_skip True for new-mined data", ignore_skip_ok))
+    checks.append(("run_grass_mcd: save_strategy=epoch for clean resume boundary", save_epoch_ok))
+
+    # 9) MCD resume-after-preemption: detects completed epochs, never wipes output_dir
+    no_wipe_ok       = "shutil.rmtree(output_dir)" not in mcd_src and "rmtree" not in mcd_src
+    detect_helper_ok = "def _detect_completed_epochs" in mcd_src
+    resume_loop_ok   = "range(start_epoch, num_epochs + 1)" in mcd_src
+    short_circuit_ok = "completed_epochs >= num_epochs" in mcd_src
+    checks.append(("run_grass_mcd: no destructive wipe of output_dir", no_wipe_ok))
+    checks.append(("run_grass_mcd: _detect_completed_epochs helper present", detect_helper_ok))
+    checks.append(("run_grass_mcd: loop starts at resumed epoch", resume_loop_ok))
+    checks.append(("run_grass_mcd: skips work if all epochs already done", short_circuit_ok))
+
+    # 10) _detect_completed_epochs unit behavior on synthetic checkpoint dirs
+    import sys as _sys
+    _sys.path.insert(0, str(project_root / "scripts"))
+    from run_grass_mcd import _detect_completed_epochs
+    with tempfile.TemporaryDirectory() as td:
+        # absent dir -> 0
+        absent = Path(td) / "absent"
+        ok_absent = _detect_completed_epochs(absent) == 0
+        # empty dir -> 0
+        empty = Path(td) / "empty"
+        empty.mkdir()
+        ok_empty = _detect_completed_epochs(empty) == 0
+        # dir with checkpoint-100/trainer_state.json (epoch=2.0) -> 2
+        good = Path(td) / "good"
+        ckpt = good / "checkpoint-100"
+        ckpt.mkdir(parents=True)
+        with open(ckpt / "trainer_state.json", "w") as f:
+            json.dump({"epoch": 2.0, "global_step": 100}, f)
+        ok_good = _detect_completed_epochs(good) == 2
+        # corrupted trainer_state -> 0 (safe fallback)
+        bad = Path(td) / "bad"
+        bad_ckpt = bad / "checkpoint-50"
+        bad_ckpt.mkdir(parents=True)
+        with open(bad_ckpt / "trainer_state.json", "w") as f:
+            f.write("not json {")
+        ok_bad = _detect_completed_epochs(bad) == 0
+    checks.append(("_detect_completed_epochs: absent dir -> 0",          ok_absent))
+    checks.append(("_detect_completed_epochs: empty dir -> 0",           ok_empty))
+    checks.append(("_detect_completed_epochs: epoch=2.0 ckpt -> 2",      ok_good))
+    checks.append(("_detect_completed_epochs: corrupted state -> 0",     ok_bad))
+
     passed = 0
     for name, ok in checks:
         print(f"  {'✅ PASS' if ok else '❌ FAIL'}  {name}")
