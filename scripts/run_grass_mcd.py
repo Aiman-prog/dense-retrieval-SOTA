@@ -390,6 +390,8 @@ def run_mcd_pipeline(stale_idx, stale_embs, c_id_to_idx, c_ids, corpus_lookup, m
             print(f"  No prior mining dir at {prev_candidate}; epoch {start_epoch} "
                   f"will mine from the original training mixture.", flush=True)
 
+    epoch_timings = []  # list of (epoch, mine_min, train_min)
+
     for epoch in range(start_epoch, num_epochs + 1):
         t_epoch = time.time()
         print(f"\n=== MCD repeated mining — epoch {epoch}/{num_epochs} ===", flush=True)
@@ -404,7 +406,8 @@ def run_mcd_pipeline(stale_idx, stale_embs, c_id_to_idx, c_ids, corpus_lookup, m
             current_round=epoch,
             memory=memory,
         )
-        print(f"  Mining (epoch {epoch}): {(time.time() - t_mine) / 60:.1f} min", flush=True)
+        mine_min = (time.time() - t_mine) / 60
+        print(f"  Mining (epoch {epoch}): {mine_min:.1f} min", flush=True)
 
         if cache_enabled and memory is not None:
             memory.save(memory_path)
@@ -419,14 +422,29 @@ def run_mcd_pipeline(stale_idx, stale_embs, c_id_to_idx, c_ids, corpus_lookup, m
             train_model_path, mining_dir, output_dir, cfg, ctx, config,
             cumulative_epochs=epoch,
         )
-        print(f"  Training (epoch {epoch}): {(time.time() - t_train) / 60:.1f} min", flush=True)
+        train_min = (time.time() - t_train) / 60
+        print(f"  Training (epoch {epoch}): {train_min:.1f} min", flush=True)
 
         current_model   = output_dir
         prev_mining_dir = mining_dir
+        epoch_timings.append((epoch, mine_min, train_min))
 
         gc.collect()
         torch.cuda.empty_cache()
         print(f"  Epoch {epoch} total: {(time.time() - t_epoch) / 60:.1f} min", flush=True)
 
-    print(f"\n✅ MCD repeated mining done. Final model: {output_dir}", flush=True)
+    # End-of-run summary
+    total_mine  = sum(t[1] for t in epoch_timings)
+    total_train = sum(t[2] for t in epoch_timings)
+    print(f"\n========== TIMING SUMMARY ==========", flush=True)
+    for ep, m, t in epoch_timings:
+        print(f"  epoch {ep}: mining {m:6.1f} min | training {t:6.1f} min "
+              f"| total {m + t:6.1f} min", flush=True)
+    print(f"  TOTAL: mining {total_mine:.1f} min | training {total_train:.1f} min "
+          f"| overall {total_mine + total_train:.1f} min "
+          f"({(total_mine + total_train) / 60:.1f} h)", flush=True)
+    print(f"  mining/training ratio: {total_mine / max(total_train, 0.01):.2f}", flush=True)
+    print(f"====================================\n", flush=True)
+
+    print(f"✅ MCD repeated mining done. Final model: {output_dir}", flush=True)
     return output_dir
