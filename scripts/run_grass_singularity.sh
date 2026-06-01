@@ -32,13 +32,16 @@ CONTAINER="/scratch/${USER}/containers/pytorch_2.1.sif"
 
 # --- Experiment Knobs (override via env vars before sbatch) ---
 # GRASS_UNCERTAINTY=mc_dropout    # Algorithm 2 σ estimator (mc_dropout | ema)
-# GRASS_MODEL_SUFFIX=run1          # appended to model output dir
+# GRASS_MODEL_SUFFIX=run1         # appended to model output dir
 # GRASS_NUM_EPOCHS=3              # override config
+# GRASS_P=200                     # override cfg.P (pool size)
+# GRASS_L=25                      # override cfg.L (shortlist)
+# GRASS_LAMBDA=1.0                # override cfg.lambda_val (σ weight)
 
 mkdir -p logs
 
 echo "🌿 Starting GRASS Training (1-GPU, Algorithm 1)..."
-echo "   UNCERTAINTY=${GRASS_UNCERTAINTY:-mc_dropout} | SUFFIX=${GRASS_MODEL_SUFFIX:-} | EPOCHS=${GRASS_NUM_EPOCHS:-cfg}"
+echo "   UNCERTAINTY=${GRASS_UNCERTAINTY:-mc_dropout} | SUFFIX=${GRASS_MODEL_SUFFIX:-} | EPOCHS=${GRASS_NUM_EPOCHS:-cfg} | P=${GRASS_P:-cfg} | L=${GRASS_L:-cfg} | LAMBDA=${GRASS_LAMBDA:-cfg}"
 
 singularity exec --nv \
     --bind /scratch/${USER}:/scratch/${USER} \
@@ -47,7 +50,10 @@ singularity exec --nv \
     python -u scripts/run_grass.py \
         ${GRASS_UNCERTAINTY:+--uncertainty $GRASS_UNCERTAINTY} \
         ${GRASS_MODEL_SUFFIX:+--model_suffix $GRASS_MODEL_SUFFIX} \
-        ${GRASS_NUM_EPOCHS:+--num_epochs $GRASS_NUM_EPOCHS}
+        ${GRASS_NUM_EPOCHS:+--num_epochs $GRASS_NUM_EPOCHS} \
+        ${GRASS_P:+--P $GRASS_P} \
+        ${GRASS_L:+--L $GRASS_L} \
+        ${GRASS_LAMBDA:+--lambda_val $GRASS_LAMBDA}
 
 EXIT_CODE=$?
 

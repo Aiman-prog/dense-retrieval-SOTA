@@ -468,6 +468,9 @@ def main():
                         help='Algorithm 2 σ estimator')
     parser.add_argument('--model_suffix', type=str, default=None)
     parser.add_argument('--num_epochs',   type=int, default=None)
+    parser.add_argument('--P',            type=int,   default=None, help='override cfg.P (pool size)')
+    parser.add_argument('--L',            type=int,   default=None, help='override cfg.L (shortlist)')
+    parser.add_argument('--lambda_val',   type=float, default=None, help='override cfg.lambda_val (σ weight)')
     parser.add_argument('--debug',        action='store_true')
     args = parser.parse_args()
 
@@ -478,6 +481,12 @@ def main():
 
     if args.num_epochs is not None:
         cfg = {**cfg, 'num_epochs': args.num_epochs}
+    if args.P is not None:
+        cfg = {**cfg, 'P': args.P}
+    if args.L is not None:
+        cfg = {**cfg, 'L': args.L}
+    if args.lambda_val is not None:
+        cfg = {**cfg, 'lambda_val': args.lambda_val}
     if args.model_suffix is not None:
         cfg = {**cfg, 'model_name': cfg['model_name'] + '_' + args.model_suffix}
 
