@@ -81,7 +81,7 @@ training:
     L: 25              # shortlist size after fresh current-model rerank (L <= P) — [S9] halved from 50
     m: 1               # negatives per query (= train_group_size - 1)
     lambda_val: 1.0    # uncertainty weight in g = s_hat + lambda * sigma
-    mc_batch_size: 8    # encoding batch size (controls peak GPU memory during mining) — SMOKE: was 1024
+    mc_batch_size: 1024 # encoding batch size (controls peak GPU memory during mining)
     learning_rate: 1e-5
     num_epochs: 2
     train_group_size: 2
@@ -103,7 +103,7 @@ training:
     # --- MC-dropout-specific (used when --uncertainty mc_dropout) ---
     T: 3               # MC-dropout forward passes
     mc_dropout_p: 0.3  # dropout probability for MC passes (0.1 default is too weak)
-    batch_size: 32           # SMOKE: was 64
+    batch_size: 64
     max_pool_per_query: 200  # cap on FAISS+memory combined candidate pool
 
     # --- Active candidate memory (Phase 3 architecture refactor) ---

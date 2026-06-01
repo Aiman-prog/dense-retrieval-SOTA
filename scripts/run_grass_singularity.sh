@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 
 #SBATCH --job-name=grass
-#SBATCH --partition=gpu-a100-small
-#SBATCH --time=01:00:00
+#SBATCH --partition=gpu-a100
+#SBATCH --time=07:00:00
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=2
+#SBATCH --cpus-per-task=16
 #SBATCH --gpus-per-task=1
 #SBATCH --mem-per-cpu=8000M
 #SBATCH --account=Education-EEMCS-MSc-DSAIT
