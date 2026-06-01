@@ -6,7 +6,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
 #SBATCH --gpus-per-task=1
-#SBATCH --mem-per-cpu=4000M
+#SBATCH --mem-per-cpu=8000M
 #SBATCH --account=Education-EEMCS-MSc-DSAIT
 #SBATCH --output=logs/grass_%j.out
 #SBATCH --error=logs/grass_%j.err
