@@ -5,9 +5,8 @@ high-g, high-sigma) so they remain reachable after the stale FAISS top-P stops
 surfacing them. Unioned with FAISS hits before fresh current-model rerank.
 
 Round semantics:
-    current_round is a monotonically increasing mining-call counter, not an
-    epoch. For run_grass_seq.py it ticks every mine_every training steps; for
-    grass_sampler / mine_ema_batch it ticks once per full mining pass.
+    current_round is a monotonically increasing mining-call counter. In
+    run_grass.py (paper Algorithm 1) it ticks once per training minibatch.
 
     Validity: current_round - last_update_round <= ttl_rounds.
 """

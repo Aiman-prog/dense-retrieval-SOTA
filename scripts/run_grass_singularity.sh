@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 
 #SBATCH --job-name=grass
-#SBATCH --partition=gpu-a100
-#SBATCH --time=24:00:00
+#SBATCH --partition=gpu-a100-small
+#SBATCH --time=01:00:00
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16          # Needed for FAISS operations
+#SBATCH --cpus-per-task=2
 #SBATCH --gpus-per-task=1
-#SBATCH --mem-per-cpu=8000M
+#SBATCH --mem=8000M
 #SBATCH --account=Education-EEMCS-MSc-DSAIT
 #SBATCH --output=logs/grass_%j.out
 #SBATCH --error=logs/grass_%j.err
@@ -22,31 +22,32 @@ export HF_HOME="${DATA_BASE_DIR}/data/bright"
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 
-# Memory & Performance Tuning
+# Memory & Performance
 export PYTORCH_ALLOC_CONF="expandable_segments:True"
-export OMP_NUM_THREADS=16            # Matches cpus-per-task for FAISS speed
+export OMP_NUM_THREADS=8
+export CC=gcc
 
 # Container path
 CONTAINER="/scratch/${USER}/containers/pytorch_2.1.sif"
 
-# --- Pre-flight ---
+# --- Experiment Knobs (override via env vars before sbatch) ---
+# GRASS_UNCERTAINTY=mc_dropout    # Algorithm 2 σ estimator (mc_dropout | ema)
+# GRASS_MODEL_SUFFIX=run1          # appended to model output dir
+# GRASS_NUM_EPOCHS=3              # override config
+
 mkdir -p logs
 
-# --- Run GRASS Pipeline in Container ---
-echo "🌿 Starting GRASS Training Loop..."
-echo "📋 GRASS: mine hard negatives (stale ANN + MC-dropout) → train → evaluate"
+echo "🌿 Starting GRASS Training (1-GPU, Algorithm 1)..."
+echo "   UNCERTAINTY=${GRASS_UNCERTAINTY:-mc_dropout} | SUFFIX=${GRASS_MODEL_SUFFIX:-} | EPOCHS=${GRASS_NUM_EPOCHS:-cfg}"
 
 singularity exec --nv \
     --bind /scratch/${USER}:/scratch/${USER} \
     --bind /home/${USER}:/home/${USER} \
     ${CONTAINER} \
-    python -u scripts/train_grass.py \
-        ${GRASS_MODE:+--mode $GRASS_MODE} \
-        ${GRASS_N_DAS:+--n_das $GRASS_N_DAS} \
+    python -u scripts/run_grass.py \
+        ${GRASS_UNCERTAINTY:+--uncertainty $GRASS_UNCERTAINTY} \
         ${GRASS_MODEL_SUFFIX:+--model_suffix $GRASS_MODEL_SUFFIX} \
-        ${GRASS_NUM_EPOCHS:+--num_epochs $GRASS_NUM_EPOCHS} \
-        ${GRASS_P:+--P $GRASS_P} \
-        ${GRASS_L:+--L $GRASS_L}
+        ${GRASS_NUM_EPOCHS:+--num_epochs $GRASS_NUM_EPOCHS}
 
 EXIT_CODE=$?
 

@@ -152,7 +152,7 @@ def test_s1_mc_dropout_diversity():
 
 
 def test_s1_partial_last_batch():
-    """Vectorization must handle the last batch where len(batch_texts) < query_batch_size."""
+    """Vectorization must handle the last batch where len(batch_texts) < batch_size."""
     model     = MockModel().to(DEVICE)
     tokenizer = MockTokenizer()
     model.train()
@@ -223,7 +223,7 @@ def test_s6_log_fields_and_values():
     g     = s_hat + 2.0 * sigma
     cands = [f"doc{i}" for i in range(N)]
     top_m = np.argsort(g)[::-1][:1]
-    # rank_by_shat — same formula as in train_grass.py
+    # rank_by_shat — same formula as in run_grass.py
     rank_by_shat = int(np.argsort(np.argsort(-s_hat))[top_m[0]])
 
     with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
@@ -261,14 +261,14 @@ def test_s6_log_fields_and_values():
 # -----------------------------------------------------------------------
 
 def test_s9_config_L_and_batch():
-    """L must be <= 25 [S9] and ema_batch_size must be >= 64 [AdamW8bit]."""
+    """L must be <= 25 [S9] and batch_size must be >= 64 [AdamW8bit]."""
     import yaml
     with open(project_root / 'config' / 'config.yaml') as f:
         config = yaml.safe_load(f)
     grass = config['training']['grass']
     assert grass['L'] <= 25, f"L={grass['L']} should be <= 25 after [S9]"
-    assert grass['ema_batch_size'] >= 64, \
-        f"ema_batch_size={grass['ema_batch_size']} should be >= 64 after AdamW8bit change"
+    assert grass['batch_size'] >= 64, \
+        f"batch_size={grass['batch_size']} should be >= 64 after AdamW8bit change"
 
 
 def test_s10_foreach_ema_matches_loop():

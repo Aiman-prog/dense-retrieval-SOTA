@@ -72,24 +72,18 @@ training:
     logging_steps: 10
     dataloader_num_workers: 4
   grass:
-    # ============================================================
-    # MODE SWITCH — change ONE line to swap algorithms:
-    #   uncertainty_mode: "ema"         → EMA Teacher-Student  (~4h,  paper Algorithm 2 EMA branch)
-    #   uncertainty_mode: "mc_dropout"  → MC-Dropout           (~22h, paper Algorithm 2 MC-dropout branch)
-    # ============================================================
-    uncertainty_mode: "mc_dropout"
-
-    model_name: "grass_mixed_bge_m3"   # base name — code appends _ema or _mcdp automatically
+    # σ estimator is selected at the CLI: --uncertainty {mc_dropout, ema}
+    model_name: "grass_mixed_bge_m3"   # base name — code appends _mc_dropout or _ema
     base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_mixed_bge_m3"
 
     # --- Shared ---
     P: 200             # candidates retrieved from stale ANN per query
     L: 25              # shortlist size after fresh current-model rerank (L <= P) — [S9] halved from 50
     m: 1               # negatives per query (= train_group_size - 1)
-    lambda_val: 1.0    # uncertainty weight in g = s_hat + lambda * sigma (seq_bandit default; was 2.0 for async)
-    mc_batch_size: 512 # encoding batch size (controls peak GPU memory during mining)
+    lambda_val: 1.0    # uncertainty weight in g = s_hat + lambda * sigma
+    mc_batch_size: 8    # encoding batch size (controls peak GPU memory during mining) — SMOKE: was 1024
     learning_rate: 1e-5
-    num_epochs: 3
+    num_epochs: 2
     train_group_size: 2
     bf16: true
     dataloader_num_workers: 2
@@ -103,29 +97,14 @@ training:
     eval_top_k: 10
     per_device_eval_batch_size: 256
 
-    # --- EMA-specific (used when uncertainty_mode: "ema") ---
+    # --- EMA-specific (used when --uncertainty ema) ---
     ema_alpha: 0.999
-    ema_batch_size: 64 # [AdamW8bit] doubled from 32 — safe once 8-bit Adam frees ~3.9GB VRAM
 
-    # --- MAB [S8] (EMA mode only) ---
-    mab_n_das:     5      # challengers mined per batch (out of ema_batch_size=32)
-    mab_alpha:     1.0    # LinUCB exploration constant
-    mab_epsilon:   0.05   # gap-index threshold for J_t graduation
-    mab_min_pulls: 2      # min mines before J_t eligibility
-
-    # --- MC-dropout-specific (used when uncertainty_mode: "mc_dropout") ---
-    T: 5               # MC-dropout forward passes
+    # --- MC-dropout-specific (used when --uncertainty mc_dropout) ---
+    T: 3               # MC-dropout forward passes
     mc_dropout_p: 0.3  # dropout probability for MC passes (0.1 default is too weak)
-    query_batch_size: 128  # queries per GrassSampler outer batch
-    batch_size: 64
+    batch_size: 32           # SMOKE: was 64
     max_pool_per_query: 200  # cap on FAISS+memory combined candidate pool
-
-    selection:               "bandit"     # "bandit" or "random" (ablation switch)
-    bandit_epsilon:          0.2          # ε for epsilon-greedy: explore fraction
-
-    # --- Sequential mode settings (run_grass_seq.py) ---
-    mine_every:              2            # mine n_das queries every N training steps
-    n_das:                   30           # queries mined per mining tick (seq mode)
 
     # --- Active candidate memory (Phase 3 architecture refactor) ---
     candidate_cache:

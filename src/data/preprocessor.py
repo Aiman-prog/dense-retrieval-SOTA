@@ -316,7 +316,7 @@ class BRIGHTPreprocessor:
 def run_setup():
     """
     Prepares the three processed files required by any training script that does
-    encoding or hard-negative mining (i.e. train_ance.py, train_grass.py).
+    encoding or hard-negative mining (i.e. train_ance.py, run_grass.py).
     Skips silently if all three files already exist and are non-empty.
 
     What it does:

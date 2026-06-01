@@ -54,8 +54,6 @@ def get_path(key: str, model_name: str = None) -> Path:
         "results": base / p_cfg['results_dir'],
         "temp_ance": base / "temp_ance_workdir",
         "temp_grass": base / "temp_grass_workdir",
-        "temp_grass_async": base / "temp_grass_async_workdir",
-        "temp_grass_seq": base / "temp_grass_seq_workdir",
     }
     
     if model_name:
@@ -170,7 +168,7 @@ def encode_batch(model, tokenizer, texts, device, max_len, batch_size):
     """
     Encode a list of texts in mini-batches, returning L2-normalised CLS embeddings.
     Runs under no_grad with bf16 autocast (disabled on CPU).
-    Used by both EMA mining (run_grass_ema) and MC-dropout mining (run_grass_mcd).
+    Used by run_grass.py for deterministic encodes (Algorithm 2 lines 1–3, 6–13).
     """
     all_embs = []
     for i in range(0, len(texts), batch_size):
@@ -197,7 +195,7 @@ def count_jsonl_examples(pattern: str) -> int:
     return total
 
 
-# ── Shared IPC / IO utilities (used by ANCE + GRASS async) ──────────────────
+# ── Shared IPC / IO utilities (used by ANCE) ────────────────────────────────
 
 def is_valid_checkpoint(ckpt_path: str) -> bool:
     """Checkpoint is fully written once optimizer.pt exists (trainer writes it last)."""
@@ -359,7 +357,7 @@ def evaluate_bright(ctx, config, model_path, temp_workdir_key=None):
 
     args = ctx['args']
     if temp_workdir_key is None:
-        temp_workdir_key = args.get('temp_workdir', 'temp_grass_async')
+        temp_workdir_key = args.get('temp_workdir', 'temp_grass')
     temp_dir = get_path(temp_workdir_key)
 
     if args.get('eval_corpus_file'):
