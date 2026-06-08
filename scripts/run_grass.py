@@ -51,7 +51,7 @@ from utils.helpers import (
     _load_qrels, _load_corpus_lookup,
     _pool_and_fresh_rerank, set_seed, evaluate_bright,
 )
-from utils.grass_candidate_memory import CandidateMemory
+
 
 
 def encode_batch_train(model, tokenizer, texts, device, max_len, batch_size):
@@ -81,12 +81,12 @@ def _update_ema(student, teacher, alpha):
 def _mine_queries(student, teacher, tokenizer, qids, qid_to_text,
                   stale_idx, c_ids, corpus_lookup, qrels_dict,
                   cfg, config, device,
-                  current_round=1, memory=None, uncertainty='mc_dropout'):
+                  uncertainty='mc_dropout'):
     """Algorithm 2: mine top-m hard negatives for `qids` with the current model.
 
     Shared shell:
       student.eval() query encode → FAISS top-P
-      → optional memory union → _pool_and_fresh_rerank → top-L
+      → _pool_and_fresh_rerank → top-L
     Estimator branches:
       mc_dropout — T stochastic student passes; σ = std over T, ŝ = mean over T.
       ema        — clean student + teacher passes; σ = |s_cur − s_ema|, ŝ = s_cur.
@@ -102,12 +102,6 @@ def _mine_queries(student, teacher, tokenizer, qids, qid_to_text,
     q_max = config['model']['query_max_len']
     p_max = config['model']['passage_max_len']
 
-    cache_cfg          = cfg.get('candidate_cache', {})
-    cache_enabled      = cache_cfg.get('enabled', False)
-    top_g_to_store     = cache_cfg.get('top_g_to_store', 8)
-    top_sigma_to_store = cache_cfg.get('top_sigma_to_store', 8)
-    use_memory         = cache_enabled and memory is not None
-
     texts = [qid_to_text[q] for q in qids]
 
     # Deterministic student query encode (eval + no_grad inside encode_batch).
@@ -119,18 +113,9 @@ def _mine_queries(student, teacher, tokenizer, qids, qid_to_text,
     # filtering d+ in _pool_and_fresh_rerank still leaves P FAISS candidates.
     _, indices = stale_idx.search(q_det, P + 1)
 
-    memory_per_query   = {}
-    memory_expired_map = {}
-    if use_memory:
-        for qid in qids:
-            ids, expired = memory.get(qid, current_round)
-            memory_per_query[qid]   = ids
-            memory_expired_map[qid] = expired
-
-    batch_query_shortlist, source_map, pool_stats = _pool_and_fresh_rerank(
+    batch_query_shortlist, pool_stats = _pool_and_fresh_rerank(
         student, tokenizer, qids, q_det,
-        indices, memory_per_query, memory_expired_map,
-        qrels_dict, c_ids, corpus_lookup,
+        indices, qrels_dict, c_ids, corpus_lookup,
         p_max, mc_bs, device,
         L, max_pool_per_query,
     )
@@ -197,41 +182,23 @@ def _mine_queries(student, teacher, tokenizer, qids, qid_to_text,
         selected_docid = top_m_docs[0]
         rank_by_shat   = int(np.argsort(np.argsort(-s_hat))[top_m_idxs[0]])
 
-        if use_memory:
-            top_g_idxs     = np.argsort(g)[::-1][:top_g_to_store]
-            top_sigma_idxs = np.argsort(sigma)[::-1][:top_sigma_to_store]
-            memory.update(
-                qid, current_round,
-                selected_negs    = top_m_docs,
-                top_g_docids     = [cands[k] for k in top_g_idxs],
-                top_sigma_docids = [cands[k] for k in top_sigma_idxs],
-                top_g_value      = float(g[top_m_idxs[0]]),
-            )
-
-        log_record = {
-            "query_id":             qid,
-            "neg_docid":            selected_docid,
-            "s_hat_selected":       float(s_hat[top_m_idxs[0]]),
-            "sigma_selected":       float(sigma[top_m_idxs[0]]),
-            "g_selected":           float(g[top_m_idxs[0]]),
-            "rank_by_shat":         rank_by_shat,
-            "sigma_mean_shortlist": float(sigma.mean()),
-        }
         stats = pool_stats.get(qid, {})
-        log_record.update({
-            "retrieved_count":          stats.get('retrieved', 0),
-            "memory_count":             stats.get('memory_count', 0),
-            "candidate_pool_count":     stats.get('pool_count', 0),
-            "positives_filtered_count": stats.get('positives_filtered', 0),
-            "L":                        L,
-            "m":                        m,
-            "neg_docids":               top_m_docs,
+        log_record = {
+            "query_id":                      qid,
+            "neg_docid":                     selected_docid,
+            "s_hat_selected":                float(s_hat[top_m_idxs[0]]),
+            "sigma_selected":                float(sigma[top_m_idxs[0]]),
+            "g_selected":                    float(g[top_m_idxs[0]]),
+            "rank_by_shat":                  rank_by_shat,
+            "sigma_mean_shortlist":          float(sigma.mean()),
+            "retrieved_count":               stats.get('retrieved', 0),
+            "candidate_pool_count":          stats.get('pool_count', 0),
+            "positives_filtered_count":      stats.get('positives_filtered', 0),
+            "L":                             L,
+            "m":                             m,
+            "neg_docids":                    top_m_docs,
             "selected_cheap_rank_zero_based": int(top_m_idxs[0]),
-            "selected_source":          source_map.get(qid, {}).get(selected_docid, 'faiss'),
-            "cache_used":               bool(stats.get('cache_used', False)),
-            "faiss_used":               bool(stats.get('faiss_used', False)),
-            "memory_expired":           bool(stats.get('memory_expired', False)),
-        })
+        }
         log_records.append(log_record)
 
     return mined, log_records
@@ -335,22 +302,6 @@ def run_grass_pipeline(stale_idx, c_ids, corpus_lookup, qrels_dict,
           f"batch_size={batch_size} | m={m} | {total_steps} total steps",
           flush=True)
 
-    # Active candidate memory (optional)
-    cache_cfg     = cfg.get('candidate_cache', {})
-    cache_enabled = cache_cfg.get('enabled', False)
-    memory_path   = get_path("temp_grass") / "candidate_memory.pkl"
-    memory = None
-    if cache_enabled:
-        memory = CandidateMemory.load(
-            memory_path,
-            max_per_query      = cache_cfg.get('max_candidates_per_query', 64),
-            ttl_rounds         = cache_cfg.get('ttl_rounds', 2),
-            top_g_to_store     = cache_cfg.get('top_g_to_store', 8),
-            top_sigma_to_store = cache_cfg.get('top_sigma_to_store', 8),
-        )
-        print(f"[GRASS] Active memory loaded: {len(memory)} queries (ttl={memory.ttl_rounds})",
-              flush=True)
-
     mining_log_path = output_model_dir / "mining_log.jsonl"
     mining_log_f    = open(mining_log_path, 'w')
 
@@ -365,11 +316,7 @@ def run_grass_pipeline(stale_idx, c_ids, corpus_lookup, qrels_dict,
 
         for b in range(n_batches):
             batch_items = train_items[b * batch_size:(b + 1) * batch_size]
-            seen, batch_qids = set(), []
-            for it in batch_items:
-                if it['query_id'] not in seen:
-                    seen.add(it['query_id'])
-                    batch_qids.append(it['query_id'])
+            batch_qids = list(dict.fromkeys(it['query_id'] for it in batch_items))
             if not batch_qids:
                 continue
 
@@ -378,7 +325,6 @@ def run_grass_pipeline(stale_idx, c_ids, corpus_lookup, qrels_dict,
                 student, teacher, tokenizer, batch_qids, qid_to_text,
                 stale_idx, c_ids, corpus_lookup, qrels_dict,
                 cfg, config, device,
-                current_round=mining_round, memory=memory,
                 uncertainty=uncertainty,
             )
             for rec in log_records:
@@ -443,10 +389,6 @@ def run_grass_pipeline(stale_idx, c_ids, corpus_lookup, qrels_dict,
     _student_raw.save_pretrained(str(output_model_dir))
     tokenizer.save_pretrained(str(output_model_dir))
     mining_log_f.close()
-    if memory is not None:
-        memory.save(memory_path)
-        print(f"[GRASS] Active memory saved: {len(memory)} queries -> {memory_path}",
-              flush=True)
     print(f"[GRASS] Training complete. Model at {output_model_dir}", flush=True)
 
     del student, _student_raw

@@ -20,7 +20,6 @@ project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root / 'src'))
 
 from utils.helpers import encode_batch, _pool_and_fresh_rerank
-from utils.grass_candidate_memory import CandidateMemory
 
 # -----------------------------------------------------------------------
 # Shared helpers
@@ -370,11 +369,11 @@ class ScriptedEncoder(nn.Module):
         return MockOutput(last_hidden_state=out)
 
 
-def _make_pool_inputs(memory, faiss_hits, dim=8, c_lookup=None, qrels=None):
-    """Build minimal args for _pool_and_fresh_rerank. `memory`/`faiss_hits`/`qrels`
+def _make_pool_inputs(faiss_hits, dim=8, c_lookup=None, qrels=None):
+    """Build minimal args for _pool_and_fresh_rerank. `faiss_hits`/`qrels`
     are dicts keyed by qid; values are lists of docid strings."""
-    qids       = sorted(memory.keys() | faiss_hits.keys())
-    c_ids_all  = sorted({d for v in list(memory.values()) + list(faiss_hits.values()) for d in v})
+    qids        = sorted(faiss_hits.keys())
+    c_ids_all   = sorted({d for v in faiss_hits.values() for d in v})
     c_id_to_idx = {d: i for i, d in enumerate(c_ids_all)}
 
     # FAISS indices: pad with -1 to a fixed P
@@ -393,81 +392,42 @@ def _make_pool_inputs(memory, faiss_hits, dim=8, c_lookup=None, qrels=None):
 
 
 def test_fr_positive_filtering():
-    """Positives in qrels must be filtered out of the pool even when present in both
-    FAISS and active memory."""
-    memory     = {"q0": ["d_pos", "d3"]}
+    """Positives in qrels must be filtered out of the FAISS pool."""
     faiss_hits = {"q0": ["d_pos", "d1", "d2"]}
     qrels      = {"q0": {"d_pos"}}
     qids, q_embs_det, indices, c_ids, c_id_to_idx, c_lookup, qrels = _make_pool_inputs(
-        memory, faiss_hits, qrels=qrels
+        faiss_hits, qrels=qrels
     )
     model = ScriptedEncoder({t: np.zeros(8, dtype=np.float32) for t in c_lookup.values()})
     tokenizer = MockTokenizer()
-    shortlist, _, stats = _pool_and_fresh_rerank(
+    shortlist, stats = _pool_and_fresh_rerank(
         model, tokenizer, qids, q_embs_det,
-        indices, memory, {q: False for q in qids},
-        qrels, c_ids, c_lookup,
+        indices, qrels, c_ids, c_lookup,
         p_max_len=8, mc_batch_size=8, device=DEVICE,
         L=10, max_pool_per_query=64,
     )
     assert "d_pos" not in shortlist["q0"], f"positive leaked: {shortlist['q0']}"
-    assert stats["q0"]["positives_filtered"] == 2, \
-        f"expected 2 positive filtrations (memory+faiss), got {stats['q0']['positives_filtered']}"
+    assert stats["q0"]["positives_filtered"] == 1, \
+        f"expected 1 positive filtration, got {stats['q0']['positives_filtered']}"
 
 
-def test_fr_pool_combines_faiss_and_memory():
-    """Pool is the union; memory candidates appear first, then FAISS extras."""
-    memory     = {"q0": ["m1", "m2"]}
-    faiss_hits = {"q0": ["m2", "f1", "f2"]}  # m2 in both
-    qids, q_embs_det, indices, c_ids, c_id_to_idx, c_lookup, qrels = _make_pool_inputs(
-        memory, faiss_hits
-    )
-    model = ScriptedEncoder({t: np.zeros(8, dtype=np.float32) for t in c_lookup.values()})
-    tokenizer = MockTokenizer()
-    shortlist, source_map, _ = _pool_and_fresh_rerank(
-        model, tokenizer, qids, q_embs_det,
-        indices, memory, {q: False for q in qids},
-        qrels, c_ids, c_lookup,
-        p_max_len=8, mc_batch_size=8, device=DEVICE,
-        L=10, max_pool_per_query=64,
-    )
-    # m2 should be flagged 'both'
-    assert source_map["q0"]["m2"] == "both", \
-        f"m2 should be 'both', got {source_map['q0']['m2']}"
-    assert source_map["q0"]["m1"] == "memory"
-    assert source_map["q0"]["f1"] == "faiss"
-    # All non-positive docs appear
-    assert set(shortlist["q0"]) == {"m1", "m2", "f1", "f2"}
-
-
-def test_fr_pool_capping_keeps_memory_first():
-    """When memory + FAISS exceeds max_pool_per_query, all memory entries are kept
-    first (subject to cap), FAISS fills the remainder by rank."""
-    memory     = {"q0": ["m1", "m2", "m3"]}
+def test_fr_pool_faiss_by_rank():
+    """Pool contains FAISS hits in rank order, capped at max_pool_per_query."""
     faiss_hits = {"q0": ["f1", "f2", "f3", "f4"]}
     qids, q_embs_det, indices, c_ids, c_id_to_idx, c_lookup, qrels = _make_pool_inputs(
-        memory, faiss_hits
+        faiss_hits
     )
     model = ScriptedEncoder({t: np.zeros(8, dtype=np.float32) for t in c_lookup.values()})
     tokenizer = MockTokenizer()
-    shortlist, source_map, stats = _pool_and_fresh_rerank(
+    shortlist, stats = _pool_and_fresh_rerank(
         model, tokenizer, qids, q_embs_det,
-        indices, memory, {q: False for q in qids},
-        qrels, c_ids, c_lookup,
+        indices, qrels, c_ids, c_lookup,
         p_max_len=8, mc_batch_size=8, device=DEVICE,
-        L=5, max_pool_per_query=5,
+        L=10, max_pool_per_query=3,
     )
-    sources = source_map["q0"]
-    # All 3 memory items must be present
-    for m in ["m1", "m2", "m3"]:
-        assert m in sources, f"memory entry {m} dropped despite available pool slots"
-    # Only 2 FAISS extras admitted (5 - 3 memory)
-    faiss_admitted = [d for d, s in sources.items() if s == "faiss"]
-    assert len(faiss_admitted) == 2, f"expected 2 FAISS extras, got {faiss_admitted}"
-    # The two admitted FAISS docs should be the top-ranked ones (f1, f2)
-    assert set(faiss_admitted) == {"f1", "f2"}, \
-        f"expected top-rank FAISS docs, got {faiss_admitted}"
-    assert stats["q0"]["pool_count"] == 5
+    # Only top-3 FAISS hits admitted due to cap
+    assert stats["q0"]["pool_count"] == 3
+    assert set(shortlist["q0"]) == {"f1", "f2", "f3"}
 
 
 def test_fr_top_L_uses_current_embs():
@@ -488,10 +448,9 @@ def test_fr_top_L_uses_current_embs():
     d_mid  = np.zeros(dim, dtype=np.float32); d_mid[0]  = 1.0; d_mid[1] = 1.0
     d_low  = np.zeros(dim, dtype=np.float32); d_low[0]  = 1.0; d_low[1] = 5.0
 
-    memory     = {"q0": []}
     faiss_hits = {"q0": ["d_low", "d_high", "d_mid"]}  # FAISS order does NOT match scores
     qids, _, indices, c_ids, c_id_to_idx, c_lookup, qrels = _make_pool_inputs(
-        memory, faiss_hits
+        faiss_hits
     )
     text_to_emb = {
         c_lookup["d_high"]: d_high,
@@ -505,10 +464,9 @@ def test_fr_top_L_uses_current_embs():
     q_embs_det = q_emb.reshape(1, dim)
     model     = ScriptedEncoder(text_to_emb, dim=dim)
     tokenizer = MockTokenizer()
-    shortlist, _, _ = _pool_and_fresh_rerank(
+    shortlist, _ = _pool_and_fresh_rerank(
         model, tokenizer, qids, q_embs_det,
-        indices, memory, {q: False for q in qids},
-        qrels, c_ids, c_lookup,
+        indices, qrels, c_ids, c_lookup,
         p_max_len=8, mc_batch_size=64, device=DEVICE,
         L=1, max_pool_per_query=10,
     )
@@ -517,19 +475,16 @@ def test_fr_top_L_uses_current_embs():
 
 
 def test_fr_pool_encoded_once_per_batch():
-    """The pool encode pass is one call to model.forward (modulo batching of
-    mc_batch_size), and each unique pool doc is encoded exactly once."""
-    memory     = {"q0": ["d_a"], "q1": ["d_a", "d_b"]}  # d_a shared
-    faiss_hits = {"q0": ["d_c"], "q1": ["d_d"]}
+    """Each unique pool doc is encoded exactly once across the batch."""
+    faiss_hits = {"q0": ["d_a", "d_c"], "q1": ["d_a", "d_b", "d_d"]}  # d_a shared
     qids, q_embs_det, indices, c_ids, c_id_to_idx, c_lookup, qrels = _make_pool_inputs(
-        memory, faiss_hits
+        faiss_hits
     )
     model = ScriptedEncoder({t: np.zeros(8, dtype=np.float32) for t in c_lookup.values()})
     tokenizer = MockTokenizer()
     _pool_and_fresh_rerank(
         model, tokenizer, qids, q_embs_det,
-        indices, memory, {q: False for q in qids},
-        qrels, c_ids, c_lookup,
+        indices, qrels, c_ids, c_lookup,
         p_max_len=8, mc_batch_size=64, device=DEVICE,
         L=5, max_pool_per_query=10,
     )
@@ -540,10 +495,9 @@ def test_fr_pool_encoded_once_per_batch():
 
 def test_fr_model_mode_restored():
     """model.training state at entry must be preserved at exit."""
-    memory     = {"q0": []}
     faiss_hits = {"q0": ["d1", "d2"]}
     qids, q_embs_det, indices, c_ids, c_id_to_idx, c_lookup, qrels = _make_pool_inputs(
-        memory, faiss_hits
+        faiss_hits
     )
     model = ScriptedEncoder({t: np.zeros(8, dtype=np.float32) for t in c_lookup.values()})
     tokenizer = MockTokenizer()
@@ -551,8 +505,7 @@ def test_fr_model_mode_restored():
     model.train()
     _pool_and_fresh_rerank(
         model, tokenizer, qids, q_embs_det,
-        indices, memory, {q: False for q in qids},
-        qrels, c_ids, c_lookup,
+        indices, qrels, c_ids, c_lookup,
         p_max_len=8, mc_batch_size=8, device=DEVICE,
         L=5, max_pool_per_query=10,
     )
@@ -561,112 +514,11 @@ def test_fr_model_mode_restored():
     model.eval()
     _pool_and_fresh_rerank(
         model, tokenizer, qids, q_embs_det,
-        indices, memory, {q: False for q in qids},
-        qrels, c_ids, c_lookup,
+        indices, qrels, c_ids, c_lookup,
         p_max_len=8, mc_batch_size=8, device=DEVICE,
         L=5, max_pool_per_query=10,
     )
     assert model.training is False, "eval() mode not preserved after rerank"
-
-
-# -----------------------------------------------------------------------
-# CM — active candidate memory — Phase 3
-# -----------------------------------------------------------------------
-
-def test_cm_stores_selected_and_top_g_sigma():
-    """update() stores selected + top-g + top-sigma deduped. Fresh-first order:
-    selected -> top_g -> top_sigma -> existing."""
-    mem = CandidateMemory(max_per_query=32, ttl_rounds=2,
-                          top_g_to_store=4, top_sigma_to_store=4)
-    mem.update("q0", current_round=1,
-               selected_negs=["s1", "s2"],
-               top_g_docids=["s1", "g1", "g2"],     # s1 duplicates with selected
-               top_sigma_docids=["sig1", "sig2"])
-    ids, expired = mem.get("q0", current_round=1)
-    assert not expired
-    # Selected first, then top_g, then top_sigma (after dedup)
-    assert ids == ["s1", "s2", "g1", "g2", "sig1", "sig2"], f"order: {ids}"
-
-
-def test_cm_fresh_evidence_kicks_old_when_full():
-    """When memory is at cap, fresh evidence MUST displace old entries —
-    never be silently dropped. This is what the fresh-first merge order
-    protects against."""
-    mem = CandidateMemory(max_per_query=3, ttl_rounds=10,
-                          top_g_to_store=4, top_sigma_to_store=4)
-    # Round 1: fill memory with 3 entries
-    mem.update("q0", current_round=1, selected_negs=["old1", "old2", "old3"])
-    ids, _ = mem.get("q0", current_round=1)
-    assert ids == ["old1", "old2", "old3"], f"setup expected full: {ids}"
-
-    # Round 2: a NEW selected negative arrives — must enter despite cap
-    mem.update("q0", current_round=2, selected_negs=["new_pick"])
-    ids, _ = mem.get("q0", current_round=2)
-    assert "new_pick" in ids, f"fresh selected dropped from full memory: {ids}"
-    assert ids[0] == "new_pick", f"fresh selected not at front: {ids}"
-    assert len(ids) == 3, f"cap violated: {ids}"
-    # The oldest existing entry (last in existing list) is pushed out
-    assert "old3" not in ids, f"old3 should have been evicted: {ids}"
-
-    # Round 3: a NEW top-g candidate arrives — same protection
-    mem.update("q0", current_round=3,
-               selected_negs=[],
-               top_g_docids=["new_g"])
-    ids, _ = mem.get("q0", current_round=3)
-    assert "new_g" in ids, f"fresh top-g dropped from full memory: {ids}"
-    assert ids[0] == "new_g", f"fresh top-g not at front: {ids}"
-
-
-def test_cm_max_per_query_cap():
-    """Memory size must never exceed max_candidates_per_query.
-    Order under fresh-first: selected first, then top_g, then top_sigma."""
-    mem = CandidateMemory(max_per_query=3, ttl_rounds=2,
-                          top_g_to_store=8, top_sigma_to_store=8)
-    mem.update("q0", current_round=1,
-               selected_negs=["a", "b"],
-               top_g_docids=["c", "d", "e"],
-               top_sigma_docids=["f", "g"])
-    ids, _ = mem.get("q0", current_round=1)
-    assert len(ids) == 3, f"cap violated, got {len(ids)}"
-    assert ids == ["a", "b", "c"], f"order: {ids}"
-
-
-def test_cm_ttl_validity():
-    """get() returns (ids, False) if within TTL, ([], True) if expired,
-    ([], False) if absent."""
-    mem = CandidateMemory(max_per_query=8, ttl_rounds=2,
-                          top_g_to_store=4, top_sigma_to_store=4)
-    mem.update("q0", current_round=5, selected_negs=["d1"])
-    # Within TTL: round 5, 6, 7 valid
-    for r in [5, 6, 7]:
-        ids, expired = mem.get("q0", current_round=r)
-        assert ids == ["d1"] and expired is False, \
-            f"round {r}: ids={ids}, expired={expired}"
-    # Round 8: 8 - 5 = 3 > 2 -> expired
-    ids, expired = mem.get("q0", current_round=8)
-    assert ids == [] and expired is True, f"round 8: ids={ids}, expired={expired}"
-    # Absent qid
-    ids, expired = mem.get("q_absent", current_round=5)
-    assert ids == [] and expired is False, \
-        f"absent qid should not be flagged expired: expired={expired}"
-
-
-def test_cm_persist_round_trip():
-    """save() then load() preserves state."""
-    mem = CandidateMemory(max_per_query=8, ttl_rounds=2,
-                          top_g_to_store=4, top_sigma_to_store=4)
-    mem.update("q0", current_round=3, selected_negs=["a", "b"],
-               top_g_docids=["c"], top_sigma_docids=["d"])
-    with tempfile.TemporaryDirectory() as td:
-        p = Path(td) / "mem.pkl"
-        mem.save(p)
-        loaded = CandidateMemory.load(p, max_per_query=8, ttl_rounds=2,
-                                      top_g_to_store=4, top_sigma_to_store=4)
-    ids_orig,   _ = mem.get("q0", current_round=3)
-    ids_loaded, _ = loaded.get("q0", current_round=3)
-    assert ids_orig == ids_loaded, f"orig {ids_orig} != loaded {ids_loaded}"
-    assert loaded.max_per_query == 8
-    assert loaded.ttl_rounds == 2
 
 
 # -----------------------------------------------------------------------
@@ -715,19 +567,12 @@ if __name__ == '__main__':
         ("S11 zero_grad(set_to_none=True) sets grads=None",   test_s11_zero_grad_set_to_none),
         ("S12 config save_steps >= 1000",                     test_s12_config_save_steps),
         ("S13 torch.compile produces correct shape+norms",    test_s13_torch_compile_correct_shape),
-        # FR — fresh rerank (Phase 3 architecture)
-        ("FR  positives filtered from pool (memory + faiss)",  test_fr_positive_filtering),
-        ("FR  pool combines memory and faiss, sources marked", test_fr_pool_combines_faiss_and_memory),
-        ("FR  capping keeps memory first then FAISS by rank",  test_fr_pool_capping_keeps_memory_first),
+        # FR — fresh rerank
+        ("FR  positives filtered from FAISS pool",             test_fr_positive_filtering),
+        ("FR  FAISS pool capped by rank at max_pool_per_query",test_fr_pool_faiss_by_rank),
         ("FR  top-L uses current-model embeddings",            test_fr_top_L_uses_current_embs),
         ("FR  pool docs encoded once per batch (dedup)",       test_fr_pool_encoded_once_per_batch),
         ("FR  model.training mode restored after rerank",      test_fr_model_mode_restored),
-        # CM — active candidate memory
-        ("CM  stores selected + top-g + top-sigma deduped",    test_cm_stores_selected_and_top_g_sigma),
-        ("CM  fresh evidence kicks old when memory is full",   test_cm_fresh_evidence_kicks_old_when_full),
-        ("CM  max_per_query cap respected",                    test_cm_max_per_query_cap),
-        ("CM  TTL validity (within/expired/absent)",           test_cm_ttl_validity),
-        ("CM  save/load pickle round-trip preserves state",    test_cm_persist_round_trip),
         # EMA scoring formula
         ("EMA sigma = |s_cur - s_ema|",                        test_ema_sigma_is_abs_diff),
     ]

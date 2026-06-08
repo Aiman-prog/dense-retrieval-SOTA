@@ -232,18 +232,15 @@ def _load_corpus_lookup(corpus_file) -> dict:
 
 
 def _pool_and_fresh_rerank(model, tokenizer, batch_qids, batch_q_embs_det,
-                           faiss_indices, memory_per_query, memory_expired_map,
-                           qrels_dict, c_ids, corpus_lookup,
+                           faiss_indices, qrels_dict, c_ids, corpus_lookup,
                            p_max_len, mc_batch_size, device,
                            L, max_pool_per_query):
-    """Build candidate pool (memory first, then FAISS), encode with the CURRENT
-    model in eval+no_grad, pick top-L per query by current_q . current_d.
+    """Build candidate pool from FAISS, encode with the CURRENT model in
+    eval+no_grad, pick top-L per query by current_q . current_d.
 
-    Deterministic capping rule per query:
-      1. Take all memory candidates in stored order, capped at max_pool_per_query.
-      2. Fill remaining slots with FAISS hits in FAISS rank order.
-      3. Filter qrels positives.
-      4. Dedupe while preserving order (memory first, then FAISS extras).
+    Pool construction per query:
+      1. Take FAISS hits in rank order, capped at max_pool_per_query.
+      2. Filter qrels positives.
 
     The pool docs are encoded ONCE per batch (deduped across queries). Model
     mode is saved at entry, set to eval, restored at exit; encoding runs under
@@ -252,42 +249,20 @@ def _pool_and_fresh_rerank(model, tokenizer, batch_qids, batch_q_embs_det,
 
     Returns:
       batch_shortlist: {qid: [docid] top-L}
-      source_map:      {qid: {docid: 'faiss' | 'memory' | 'both'}}
-      pool_stats:      {qid: {retrieved, memory_count, pool_count,
-                              positives_filtered, cache_used, faiss_used,
-                              memory_expired}}
+      pool_stats:      {qid: {retrieved, pool_count, positives_filtered}}
     """
-    # Per-query: build pool with deterministic capping
-    batch_pool      = {}      # qid -> [docid] (post-cap, post-filter, post-dedupe)
-    source_map      = {}      # qid -> {docid: source}
+    batch_pool      = {}
     pool_stats      = {}
     all_pool_docids = set()
 
     for i, qid in enumerate(batch_qids):
-        memory_ids     = memory_per_query.get(qid, []) if memory_per_query else []
-        memory_expired = memory_expired_map.get(qid, False) if memory_expired_map else False
         faiss_ids      = [c_ids[j] for j in faiss_indices[i] if j >= 0]
         positives      = qrels_dict.get(qid, set())
 
-        # Stage 1: memory first, capped at max_pool_per_query
-        ordered = []
-        seen    = set()
-        sources = {}
+        ordered        = []
+        seen           = set()
         n_pos_filtered = 0
 
-        for docid in memory_ids:
-            if len(ordered) >= max_pool_per_query:
-                break
-            if docid in positives:
-                n_pos_filtered += 1
-                continue
-            if docid in seen:
-                continue
-            seen.add(docid)
-            ordered.append(docid)
-            sources[docid] = 'memory'
-
-        # Stage 2: fill remaining with FAISS hits in rank order
         for docid in faiss_ids:
             if len(ordered) >= max_pool_per_query:
                 break
@@ -295,31 +270,23 @@ def _pool_and_fresh_rerank(model, tokenizer, batch_qids, batch_q_embs_det,
                 n_pos_filtered += 1
                 continue
             if docid in seen:
-                # Already added from memory — mark as both sources
-                sources[docid] = 'both'
                 continue
             seen.add(docid)
             ordered.append(docid)
-            sources[docid] = 'faiss'
 
         batch_pool[qid] = ordered
-        source_map[qid] = sources
         all_pool_docids.update(ordered)
         pool_stats[qid] = {
             'retrieved':          len(faiss_ids),
-            'memory_count':       len(memory_ids),
             'pool_count':         len(ordered),
             'positives_filtered': n_pos_filtered,
-            'cache_used':         any(s in ('memory', 'both') for s in sources.values()),
-            'faiss_used':         any(s in ('faiss',  'both') for s in sources.values()),
-            'memory_expired':     memory_expired,
         }
 
     # Encode pool once across the batch — eval + no_grad, restore train state
     pool_docids = list(all_pool_docids)
     if not pool_docids:
         empty_shortlist = {qid: [] for qid in batch_qids}
-        return empty_shortlist, source_map, pool_stats
+        return empty_shortlist, pool_stats
 
     pool_texts = [corpus_lookup.get(d, "") for d in pool_docids]
     pool_idx   = {d: i for i, d in enumerate(pool_docids)}
@@ -346,7 +313,7 @@ def _pool_and_fresh_rerank(model, tokenizer, batch_qids, batch_q_embs_det,
         top_l  = np.argsort(scores)[::-1][:L]
         batch_shortlist[qid] = [pool_for_qid[k] for k in top_l]
 
-    return batch_shortlist, source_map, pool_stats
+    return batch_shortlist, pool_stats
 
 
 def evaluate_bright(ctx, config, model_path, temp_workdir_key=None):

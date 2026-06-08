@@ -104,15 +104,7 @@ training:
     T: 3               # MC-dropout forward passes
     mc_dropout_p: 0.3  # dropout probability for MC passes (0.1 default is too weak)
     batch_size: 64
-    max_pool_per_query: 200  # cap on FAISS+memory combined candidate pool
-
-    # --- Active candidate memory (Phase 3 architecture refactor) ---
-    candidate_cache:
-      enabled:                  false     # default off — backward compatible
-      max_candidates_per_query: 64
-      ttl_rounds:               2
-      top_g_to_store:           8
-      top_sigma_to_store:       8
+    max_pool_per_query: 200  # FAISS candidate pool cap per query
   ance:
     base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_mixed_bge_m3"
     model_name: "ance_mixed_bge_m3"
