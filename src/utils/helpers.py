@@ -6,6 +6,7 @@ import pickle
 import json
 import yaml
 import os
+import contextlib
 import numpy as np
 import faiss
 import torch
@@ -164,25 +165,53 @@ def set_seed(seed: int):
         _torch.cuda.manual_seed_all(seed)
 
 
-def encode_batch(model, tokenizer, texts, device, max_len, batch_size):
+def encode_batch_tensor(model, tokenizer, texts, device, max_len, batch_size,
+                        *, requires_grad, autocast_enabled=True):
     """
-    Encode a list of texts in mini-batches, returning L2-normalised CLS embeddings.
-    Runs under no_grad with bf16 autocast (disabled on CPU).
-    Used by run_grass.py for deterministic encodes (Algorithm 2 lines 1–3, 6–13).
+    Single in-process encoder for GRASS. Encodes texts in mini-batches into
+    L2-normalised CLS embeddings, returned as a torch.Tensor on `device`.
+
+    CLS pooling (last_hidden_state[:, 0, :]) + L2 normalize, with bf16 autocast
+    on CUDA (no-op on CPU so tests run locally).
+
+      requires_grad=False — forward under torch.no_grad(); deterministic mining
+                            encodes (Algorithm 2 lines 1–3, 6–13).
+      requires_grad=True  — gradients flow; the Algorithm 1 training step.
+
+    See encode_batch() for the CPU float32 numpy variant used for FAISS/scoring.
     """
+    if not texts:
+        # Empty pool — return a well-formed empty tensor instead of crashing in
+        # torch.cat. dim from model.config when available (real AutoModel), else
+        # 0 (mocks). Callers already guard, this just hardens the helper.
+        dim = getattr(getattr(model, 'config', None), 'hidden_size', 0)
+        return torch.zeros((0, dim), device=device)
+    use_autocast = autocast_enabled and device.type == 'cuda'
     all_embs = []
     for i in range(0, len(texts), batch_size):
         batch  = texts[i:i + batch_size]
         inputs = tokenizer(batch, padding=True, truncation=True,
                            max_length=max_len, return_tensors='pt').to(device)
-        # [S3] autocast — enabled=False on CPU so safe to run locally.
-        with torch.no_grad(), torch.autocast(device_type='cuda', dtype=torch.bfloat16,
-                                              enabled=device.type == 'cuda'):
+        grad_ctx = contextlib.nullcontext() if requires_grad else torch.no_grad()
+        with grad_ctx, torch.autocast(device_type='cuda', dtype=torch.bfloat16,
+                                      enabled=use_autocast):
             out = model(**inputs)
         embs = out.last_hidden_state[:, 0, :]
         embs = torch.nn.functional.normalize(embs, dim=-1)
-        all_embs.append(embs.cpu().float().numpy())
-    return np.concatenate(all_embs, axis=0)
+        all_embs.append(embs)
+    return torch.cat(all_embs, dim=0)
+
+
+def encode_batch(model, tokenizer, texts, device, max_len, batch_size):
+    """
+    Deterministic no-grad encode returning CPU float32 numpy (FAISS search,
+    fresh-rerank scoring, MC/EMA σ). Thin wrapper over encode_batch_tensor —
+    see it for the encoding contract.
+    """
+    return encode_batch_tensor(
+        model, tokenizer, texts, device, max_len, batch_size,
+        requires_grad=False,
+    ).cpu().float().numpy()
 
 
 def count_jsonl_examples(pattern: str) -> int:

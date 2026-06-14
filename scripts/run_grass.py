@@ -47,26 +47,10 @@ sys.path.append(str(project_root / 'src'))
 
 from utils.helpers import (
     get_path, get_training_context, load_config,
-    encode_batch, encode_to_pickle, build_faiss_index,
+    encode_batch, encode_batch_tensor, encode_to_pickle, build_faiss_index,
     _load_qrels, _load_corpus_lookup,
     _pool_and_fresh_rerank, set_seed, evaluate_bright,
 )
-
-
-
-def encode_batch_train(model, tokenizer, texts, device, max_len, batch_size):
-    """Gradient-tracked forward pass for training (no no_grad wrapper)."""
-    all_embs = []
-    for i in range(0, len(texts), batch_size):
-        batch  = texts[i:i + batch_size]
-        inputs = tokenizer(batch, padding=True, truncation=True,
-                           max_length=max_len, return_tensors='pt').to(device)
-        with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-            out = model(**inputs)
-        embs = out.last_hidden_state[:, 0, :]
-        embs = torch.nn.functional.normalize(embs, dim=-1)
-        all_embs.append(embs)
-    return torch.cat(all_embs, dim=0)
 
 
 def _update_ema(student, teacher, alpha):
@@ -78,32 +62,16 @@ def _update_ema(student, teacher, alpha):
         torch._foreach_add_(t_params, s_params, alpha=1.0 - alpha)
 
 
-def _mine_queries(student, teacher, tokenizer, qids, qid_to_text,
-                  stale_idx, c_ids, corpus_lookup, qrels_dict,
-                  cfg, config, device,
-                  uncertainty='mc_dropout'):
-    """Algorithm 2: mine top-m hard negatives for `qids` with the current model.
+def _fresh_shortlists(student, tokenizer, qids, texts, stale_idx, c_ids,
+                      corpus_lookup, qrels_dict, P, L, max_pool_per_query,
+                      q_max, mc_bs, p_max, device):
+    """Shared shell (Algorithm 2 lines 1–3): deterministic student query encode
+    → FAISS top-(P+1) → _pool_and_fresh_rerank → per-query top-L shortlist.
 
-    Shared shell:
-      student.eval() query encode → FAISS top-P
-      → _pool_and_fresh_rerank → top-L
-    Estimator branches:
-      mc_dropout — T stochastic student passes; σ = std over T, ŝ = mean over T.
-      ema        — clean student + teacher passes; σ = |s_cur − s_ema|, ŝ = s_cur.
-
-    Returns ({qid: [neg_docid_1..neg_docid_m]}, log_records).
-    Queries whose pool is empty after positive filtering are absent from the dict.
+    Returns (q_det, batch_query_shortlist, pool_stats, shortlist_texts,
+    shortlist_to_idx). `q_det` is exposed so the EMA estimator can reuse it as
+    s_cur's query side instead of re-encoding.
     """
-    P, L = cfg['P'], cfg['L']
-    T    = cfg.get('T', 5)
-    m, lv = cfg['m'], cfg['lambda_val']
-    mc_bs = cfg.get('mc_batch_size', 512)
-    max_pool_per_query = cfg.get('max_pool_per_query', P)
-    q_max = config['model']['query_max_len']
-    p_max = config['model']['passage_max_len']
-
-    texts = [qid_to_text[q] for q in qids]
-
     # Deterministic student query encode (eval + no_grad inside encode_batch).
     # _pool_and_fresh_rerank saves/restores model.training, so we don't need to.
     student.eval()
@@ -127,44 +95,63 @@ def _mine_queries(student, teacher, tokenizer, qids, qid_to_text,
     shortlist_texts  = [corpus_lookup.get(d, "") for d in shortlist_ids]
     shortlist_to_idx = {d: i for i, d in enumerate(shortlist_ids)}
 
-    if not shortlist_texts:
-        return {}, []
+    return q_det, batch_query_shortlist, pool_stats, shortlist_texts, shortlist_to_idx
 
-    # --- Estimator branch ---
-    if uncertainty == 'mc_dropout':
-        # T stochastic passes under student.train(); dropout active.
-        student.train()
-        q_mc = encode_batch(student, tokenizer, texts * T,
-                            device, q_max, mc_bs).reshape(T, len(texts), -1)
-        c_mc = encode_batch(student, tokenizer, shortlist_texts * T,
-                            device, p_max, mc_bs).reshape(T, len(shortlist_texts), -1)
-        student.eval()  # restored to a known state; caller resets to train()
 
-        def score(i, cidxs):
-            sims  = np.einsum('td,tnd->tn', q_mc[:, i, :], c_mc[:, cidxs, :])
-            s_hat = sims.mean(axis=0)
-            sigma = sims.std(axis=0)
-            return s_hat, sigma
+def _score_mc_dropout(student, tokenizer, texts, shortlist_texts,
+                      T, q_max, p_max, mc_bs, device):
+    """MC-dropout σ estimator: T stochastic student passes (dropout active),
+    σ = std over T, ŝ = mean over T. Returns a score(i, cidxs) -> (s_hat, sigma).
 
-    elif uncertainty == 'ema':
-        # Clean student + teacher passes, both eval + no_grad.
-        if teacher is None:
-            raise ValueError("uncertainty='ema' requires a teacher model")
-        student.eval()
-        q_cur = encode_batch(student, tokenizer, texts, device, q_max, mc_bs)
-        q_ema = encode_batch(teacher, tokenizer, texts, device, q_max, mc_bs)
-        c_cur = encode_batch(student, tokenizer, shortlist_texts, device, p_max, mc_bs)
-        c_ema = encode_batch(teacher, tokenizer, shortlist_texts, device, p_max, mc_bs)
+    Post-condition: leaves the student in eval(); the Algorithm 1 caller resets
+    to train() before the training encode.
+    """
+    student.train()
+    q_mc = encode_batch(student, tokenizer, texts * T,
+                        device, q_max, mc_bs).reshape(T, len(texts), -1)
+    c_mc = encode_batch(student, tokenizer, shortlist_texts * T,
+                        device, p_max, mc_bs).reshape(T, len(shortlist_texts), -1)
+    student.eval()  # restored to a known state; caller resets to train()
 
-        def score(i, cidxs):
-            s_cur = q_cur[i] @ c_cur[cidxs].T
-            s_ema = q_ema[i] @ c_ema[cidxs].T
-            sigma = np.abs(s_cur - s_ema)
-            return s_cur, sigma
+    def score(i, cidxs):
+        sims  = np.einsum('td,tnd->tn', q_mc[:, i, :], c_mc[:, cidxs, :])
+        s_hat = sims.mean(axis=0)
+        sigma = sims.std(axis=0)
+        return s_hat, sigma
 
-    else:
-        raise ValueError(f"unknown uncertainty estimator: {uncertainty!r}")
+    return score
 
+
+def _score_ema(student, teacher, tokenizer, texts, shortlist_texts, q_det,
+               q_max, p_max, mc_bs, device):
+    """EMA teacher–student σ estimator: σ = |s_cur − s_ema|, ŝ = s_cur. Clean
+    student + teacher passes (eval + no_grad). Returns score(i, cidxs).
+
+    The student query side reuses `q_det` (already encoded under the same
+    eval+no_grad state) instead of re-encoding the query batch.
+    """
+    if teacher is None:
+        raise ValueError("uncertainty='ema' requires a teacher model")
+    student.eval()
+    q_cur = q_det  # reuse deterministic student query encode (same eval+no_grad state)
+    q_ema = encode_batch(teacher, tokenizer, texts, device, q_max, mc_bs)
+    c_cur = encode_batch(student, tokenizer, shortlist_texts, device, p_max, mc_bs)
+    c_ema = encode_batch(teacher, tokenizer, shortlist_texts, device, p_max, mc_bs)
+
+    def score(i, cidxs):
+        s_cur = q_cur[i] @ c_cur[cidxs].T
+        s_ema = q_ema[i] @ c_ema[cidxs].T
+        sigma = np.abs(s_cur - s_ema)
+        return s_cur, sigma
+
+    return score
+
+
+def _select_and_log_negatives(qids, batch_query_shortlist, shortlist_to_idx,
+                              score, pool_stats, m, lv, L):
+    """g = ŝ + λσ → top-m by g per query → mined dict + mining-log records.
+    Queries with an empty shortlist are absent from the dict (and unlogged).
+    """
     mined       = {}
     log_records = []
     for i, qid in enumerate(qids):
@@ -202,6 +189,53 @@ def _mine_queries(student, teacher, tokenizer, qids, qid_to_text,
         log_records.append(log_record)
 
     return mined, log_records
+
+
+def _mine_queries(student, teacher, tokenizer, qids, qid_to_text,
+                  stale_idx, c_ids, corpus_lookup, qrels_dict,
+                  cfg, config, device,
+                  uncertainty='mc_dropout'):
+    """Algorithm 2: mine top-m hard negatives for `qids` with the current model.
+
+    Shared shell (_fresh_shortlists):
+      student.eval() query encode → FAISS top-P → _pool_and_fresh_rerank → top-L
+    Estimator branch:
+      mc_dropout (_score_mc_dropout) — σ = std over T, ŝ = mean over T.
+      ema        (_score_ema)        — σ = |s_cur − s_ema|, ŝ = s_cur.
+    Selection (_select_and_log_negatives): g = ŝ + λσ → top-m.
+
+    Returns ({qid: [neg_docid_1..neg_docid_m]}, log_records).
+    Queries whose pool is empty after positive filtering are absent from the dict.
+    """
+    P, L = cfg['P'], cfg['L']
+    T    = cfg.get('T', 5)
+    m, lv = cfg['m'], cfg['lambda_val']
+    mc_bs = cfg.get('mc_batch_size', 512)
+    max_pool_per_query = cfg.get('max_pool_per_query', P)
+    q_max = config['model']['query_max_len']
+    p_max = config['model']['passage_max_len']
+
+    texts = [qid_to_text[q] for q in qids]
+
+    q_det, batch_query_shortlist, pool_stats, shortlist_texts, shortlist_to_idx = \
+        _fresh_shortlists(student, tokenizer, qids, texts, stale_idx, c_ids,
+                          corpus_lookup, qrels_dict, P, L, max_pool_per_query,
+                          q_max, mc_bs, p_max, device)
+
+    if not shortlist_texts:
+        return {}, []
+
+    if uncertainty == 'mc_dropout':
+        score = _score_mc_dropout(student, tokenizer, texts, shortlist_texts,
+                                  T, q_max, p_max, mc_bs, device)
+    elif uncertainty == 'ema':
+        score = _score_ema(student, teacher, tokenizer, texts, shortlist_texts,
+                           q_det, q_max, p_max, mc_bs, device)
+    else:
+        raise ValueError(f"unknown uncertainty estimator: {uncertainty!r}")
+
+    return _select_and_log_negatives(qids, batch_query_shortlist, shortlist_to_idx,
+                                     score, pool_stats, m, lv, L)
 
 
 def run_grass_pipeline(stale_idx, c_ids, corpus_lookup, qrels_dict,
@@ -255,13 +289,16 @@ def run_grass_pipeline(stale_idx, c_ids, corpus_lookup, qrels_dict,
     output_model_dir.mkdir(parents=True, exist_ok=True)
 
     device    = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    tokenizer = AutoTokenizer.from_pretrained(cfg['base_model'])
-    student   = AutoModel.from_pretrained(cfg['base_model'],
+    # base_model from ctx (get_training_context) for HF-snapshot resolution; must
+    # match the model used to build the stale FAISS index in main().
+    base_model = ctx['base_model']
+    tokenizer = AutoTokenizer.from_pretrained(base_model)
+    student   = AutoModel.from_pretrained(base_model,
                                           torch_dtype=torch.bfloat16).to(device)
 
     teacher = None
     if uncertainty == 'ema':
-        teacher = AutoModel.from_pretrained(cfg['base_model'],
+        teacher = AutoModel.from_pretrained(base_model,
                                             torch_dtype=torch.bfloat16).to(device)
         teacher.eval()
         for p in teacher.parameters():
@@ -342,11 +379,13 @@ def run_grass_pipeline(stale_idx, c_ids, corpus_lookup, qrels_dict,
                 continue
 
             student.train()
-            q_embs  = encode_batch_train(student, tokenizer, queries,
-                                         device, q_max_len, mc_batch_size)
+            q_embs  = encode_batch_tensor(student, tokenizer, queries,
+                                          device, q_max_len, mc_batch_size,
+                                          requires_grad=True)
             d_texts = [t for pos, negs in zip(positives, negatives) for t in [pos] + negs]
-            d_embs  = encode_batch_train(student, tokenizer, d_texts,
-                                          device, p_max_len, mc_batch_size)
+            d_embs  = encode_batch_tensor(student, tokenizer, d_texts,
+                                          device, p_max_len, mc_batch_size,
+                                          requires_grad=True)
             loss = loss_fn(q_embs, d_embs)
 
             optimizer.zero_grad(set_to_none=True)
@@ -441,7 +480,9 @@ def main():
     stale_pkl.parent.mkdir(exist_ok=True)
     if not stale_pkl.exists():
         print("[GRASS] Building stale ANN index...", flush=True)
-        encode_to_pickle(cfg['base_model'], corpus_file, stale_pkl, False, ctx, config)
+        # Same base_model source as the in-process encoder (run_grass_pipeline)
+        # so the stale index and the query/pool encoder share one checkpoint.
+        encode_to_pickle(ctx['base_model'], corpus_file, stale_pkl, False, ctx, config)
     print(f"[GRASS] Stale index ready: {stale_pkl}", flush=True)
 
     stale_idx, stale_embs, c_ids = build_faiss_index(stale_pkl)
