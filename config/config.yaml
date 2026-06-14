@@ -7,8 +7,8 @@ model:
   pooling: "cls"  # BGE-M3 uses CLS pooling for dense retrieval
   normalize: true
   temperature: 0.02  # Standard for dense retrieval contrastive learning
-  query_max_len: 256   # ✅ Verified: 100% coverage (all datasets)
-  passage_max_len: 128  # ✅ Verified: 99% coverage, 4x faster training (1% truncation acceptable)
+  query_max_len: 1024  # Measured (BGE-M3 tokenizer): BRIGHT eval queries are long reasoning prompts (median ~666 tok); 256 covered ~0% of them, 1024 covers ~95%. Train queries (reasonir, median ~79) fit easily. Dynamic padding => negligible cost on short queries.
+  passage_max_len: 512  # Measured token coverage (BGE-M3 tokenizer): ~90% of reasonir/BRIGHT passages retained at 512 vs only ~57% at 128. 128 truncated 70-79% of theoremqa/aops/leetcode passages. Re-encode stale index after changing.
 
 # --- Paths Configuration ---
 paths:
