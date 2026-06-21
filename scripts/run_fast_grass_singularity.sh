@@ -38,11 +38,14 @@ CONTAINER="/scratch/${USER}/containers/pytorch_2.1.sif"
 # FAST_GRASS_SELECTION_MODE=topk   # topk | softmax
 # FAST_GRASS_M=1                   # negatives per query
 # FAST_GRASS_NO_REGISTRY=1         # ablation: fully disable the retired registry R
+# FAST_GRASS_NO_EVAL=1             # skip post-train BRIGHT eval (run it later, sequentially,
+#                                 #   via run_fast_grass_eval.py — required for parallel sweeps,
+#                                 #   the eval scratch dir is shared across runs)
 
 mkdir -p logs
 
 echo "🌿 Starting Fast-GRASS Training (1-GPU, Algorithm 1 over the global cache)..."
-echo "   SUFFIX=${FAST_GRASS_MODEL_SUFFIX:-} | EPOCHS=${FAST_GRASS_NUM_EPOCHS:-cfg} | B_doc=${FAST_GRASS_B_DOC:-cfg} | LAMBDA=${FAST_GRASS_LAMBDA:-cfg} | SELECT=${FAST_GRASS_SELECTION_MODE:-cfg} | M=${FAST_GRASS_M:-cfg} | NO_R=${FAST_GRASS_NO_REGISTRY:-0}"
+echo "   SUFFIX=${FAST_GRASS_MODEL_SUFFIX:-} | EPOCHS=${FAST_GRASS_NUM_EPOCHS:-cfg} | B_doc=${FAST_GRASS_B_DOC:-cfg} | LAMBDA=${FAST_GRASS_LAMBDA:-cfg} | SELECT=${FAST_GRASS_SELECTION_MODE:-cfg} | M=${FAST_GRASS_M:-cfg} | NO_R=${FAST_GRASS_NO_REGISTRY:-0} | NO_EVAL=${FAST_GRASS_NO_EVAL:-0}"
 
 singularity exec --nv \
     --bind /scratch/${USER}:/scratch/${USER} \
@@ -55,7 +58,8 @@ singularity exec --nv \
         ${FAST_GRASS_LAMBDA:+--lambda_val $FAST_GRASS_LAMBDA} \
         ${FAST_GRASS_SELECTION_MODE:+--selection_mode $FAST_GRASS_SELECTION_MODE} \
         ${FAST_GRASS_M:+--m $FAST_GRASS_M} \
-        ${FAST_GRASS_NO_REGISTRY:+--no_registry}
+        ${FAST_GRASS_NO_REGISTRY:+--no_registry} \
+        ${FAST_GRASS_NO_EVAL:+--no_eval}
 
 EXIT_CODE=$?
 

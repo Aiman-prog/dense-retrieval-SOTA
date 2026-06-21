@@ -428,6 +428,10 @@ def main():
                         help='v0 estimator (ema only)')
     parser.add_argument('--no_registry',    action='store_true',
                         help='ablation: fully disable the retired registry R')
+    parser.add_argument('--no_eval',        action='store_true',
+                        help='skip the post-training BRIGHT eval (run it later, '
+                             'sequentially, via run_fast_grass_eval.py — avoids the '
+                             'shared eval-scratch race when sweeps run in parallel)')
     parser.add_argument('--debug',          action='store_true')
     args = parser.parse_args()
 
@@ -485,8 +489,8 @@ def main():
 
     run_fast_grass_pipeline(cache, c_ids, corpus_lookup, qrels_dict, qid_to_text,
                             train_items, fg_cfg, config, ctx, device,
-                            models=None, compile_model=True, do_eval=True,
-                            debug=args.debug)
+                            models=None, compile_model=True,
+                            do_eval=not args.no_eval, debug=args.debug)
 
 
 if __name__ == "__main__":
