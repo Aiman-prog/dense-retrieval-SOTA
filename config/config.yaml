@@ -105,6 +105,56 @@ training:
     mc_dropout_p: 0.3  # dropout probability for MC passes (0.1 default is too weak)
     batch_size: 64
     max_pool_per_query: 200  # FAISS candidate pool cap per query
+  fast_grass:
+    # Negative-Cache-inspired mining: one bounded global cache H replaces the
+    # per-query stale top-P pools. See fast_grass_*.md. v0 = EMA + TopK.
+    model_name: "fast_grass_mixed_bge_m3"
+    base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_mixed_bge_m3"
+
+    # --- Cache / selection (v0 defaults from fast_grass_implementation_details.md) ---
+    B_doc: 100000            # global cache size; ablate 32k / 100k / 512k
+    m: 1                     # negatives per query (= train_group_size - 1)
+    selection_mode: "topk"   # topk | softmax
+    lambda_val: 1.0          # g = s_hat + lambda * sigma; baseline ablation = 0
+    beta: 5.0                # softmax-mode temperature only
+    L: 1024                  # softmax / MCDP lazy shortlist inside H
+    uncertainty: "ema"       # v0 estimator
+    ema_alpha: 0.999         # EMA-teacher decay (== ema_decay in the design doc)
+
+    # --- Cache maintenance ---
+    rho_start: 0.50          # linear-decay maintenance fraction (start)
+    rho_end: 0.10            # linear-decay maintenance fraction (end)
+    cache_update_interval: 100   # steps between maintenance cycles
+    max_age_epochs: 4        # -> max_age_steps = max_age_epochs * steps_per_epoch (runtime)
+    utility_ema_decay: 0.95
+    utility_floor: 0.01      # low-utility replacement threshold
+    utility_remember_threshold: 0.05  # min peak utility to admit to R if never selected
+    K: 3                     # replace after K intervals with zero selections
+    R_fraction: 0.25         # fraction of replacement candidates from registry R
+    uniform_candidate_fraction: 0.75  # uniform corpus candidates stay dominant (>=0.75)
+    replacement_candidate_multiplier: 2   # recertify 2x the final replacement slots
+    recent_query_reservoir_size: 128  # recertification query probe size
+    reentry_top_k: 5         # avg top-5 g for candidate re-entry
+    R_size_factor: 0.5       # R_size = R_size_factor * B_doc
+    cache_init_seed: 42      # reproducible uniform H init
+
+    # --- Training knobs (copied from grass so the block is self-contained) ---
+    learning_rate: 1e-5
+    num_epochs: 2
+    batch_size: 64           # minibatch size for the Algorithm-1 outer loop
+    train_group_size: 2
+    mc_batch_size: 1024      # encode batch size for queries / cache maintenance
+    bf16: true
+    dataloader_num_workers: 2
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+    max_grad_norm: 1.0
+    save_strategy: "steps"
+    save_steps: 1000
+    save_total_limit: 1
+    logging_steps: 100
+    eval_top_k: 10
+    per_device_eval_batch_size: 256
   ance:
     base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_mixed_bge_m3"
     model_name: "ance_mixed_bge_m3"
