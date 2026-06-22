@@ -27,6 +27,10 @@ sys.path.append(str(project_root / 'src'))
 
 from utils.helpers import load_config, get_training_context, get_path, encode_to_pickle
 
+# Encode batch for the eval corpus/query encodes. Sized for the gpu-a100-small MIG
+# slice (~9.5GB GPU): the config default (256) OOMs at passage_max_len=512 there.
+EVAL_ENCODE_BATCH_SIZE = 64
+
 
 def evaluate_bright_isolated(ctx, config, model_path, scratch_dir):
     """BRIGHT multi-domain (or single-set) eval writing to an isolated scratch_dir.
@@ -120,6 +124,11 @@ def main():
 
     config = load_config()
     ctx    = get_training_context('fast_grass')
+    # Shrink the encode batch so it fits the gpu-a100-small MIG slice (~9.5GB):
+    # the config default (256) at passage_max_len=512 OOMs on the small GPU.
+    # ctx['args'] is the fast_grass recipe dict encode_to_pickle reads it from.
+    ctx['args'] = {**ctx['args'], 'per_device_eval_batch_size': EVAL_ENCODE_BATCH_SIZE}
+    print(f"[FAST-GRASS EVAL] encode batch size -> {EVAL_ENCODE_BATCH_SIZE}", flush=True)
     print(f"[FAST-GRASS EVAL] Evaluating {model_dir}", flush=True)
     print(f"[FAST-GRASS EVAL] scratch  {scratch_dir}", flush=True)
     evaluate_bright_isolated(ctx, config, model_dir, scratch_dir)
