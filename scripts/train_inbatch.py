@@ -87,9 +87,10 @@ def main():
         '--save_strategy', 'steps',
         '--save_steps', str(save_steps),
         '--save_total_limit', '6',
-        '--attn_implementation', 'eager',
+b        '--attn_implementation', 'sdpa',      # memory-efficient attention; eager OOMs
+                                              # at batch 64 @ q1024/p512 (matches fast_grass)
         '--dataloader_num_workers', str(ctx['args']['dataloader_num_workers']),
-        '--optim', 'adamw_torch_fused',       # Uses more efficient GPU kernels
+        '--optim', 'adamw_bnb_8bit',          # 8-bit Adam states (bitsandbytes); frees ~3.4GB
         '--warmup_ratio', str(ctx['args']['warmup_ratio']),
         '--weight_decay', str(ctx['args']['weight_decay']),
         '--max_grad_norm', str(ctx['args']['max_grad_norm']),

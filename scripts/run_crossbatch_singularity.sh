@@ -2,7 +2,7 @@
 
 #SBATCH --job-name=rocketqa-a100-2048
 #SBATCH --partition=gpu-a100
-#SBATCH --time=12:00:00             # bge-m3 from raw, 2 epochs, 2 GPUs — 12h ceiling
+#SBATCH --time=24:00:00             # bge-m3 from raw, 2 epochs, 2 GPUs, 2048 pool
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=2         # 2 GPUs (like V100 test)
 #SBATCH --cpus-per-task=4          # 2 CPUs per GPU (for 4 workers)

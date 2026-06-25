@@ -55,12 +55,11 @@ training:
     max_grad_norm: 1.0
   crossbatch:
     model_name: "crossbatch_mixed_bge_m3_epoch2"
-    batch_size: 16
-    target_batch_size: 2048
-    per_device_batch_size: 64
-    gradient_accumulation_steps: 16
-    gc_q_chunk_size: 16
-    gc_p_chunk_size: 16
+    target_batch_size: 1024   # = per_device_batch_size * num_gpus (negative pool); accum does NOT enlarge it
+    per_device_batch_size: 512   # 512 * 2 GPUs (DistributedContrastiveLoss all_gather) = 1024 query pool
+    gradient_accumulation_steps: 1   # accumulation does not pool cross-batch negatives in GradCache
+    gc_q_chunk_size: 32       # GradCache bounds PEAK MEMORY by chunk (not per_device); raise/lower this to tune memory
+    gc_p_chunk_size: 32
     learning_rate: 1e-5  # Lower LR for BGE-M3 continued training
     warmup_ratio: 0.1
     weight_decay: 0.01

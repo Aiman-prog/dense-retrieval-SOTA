@@ -50,8 +50,8 @@ def main():
         '--fp16', 'False',
         '--bf16', 'True',
         '--dtype', 'bfloat16',           # Force model weights to BF16 on load
-        '--attn_implementation', 'eager',
-        '--optim', 'adamw_torch_fused',      # Uses more efficient GPU kernels
+        '--attn_implementation', 'sdpa',     # memory-efficient attention (matches inbatch/fast_grass)
+        '--optim', 'adamw_bnb_8bit',         # 8-bit Adam states (bitsandbytes); frees ~3.4GB
 
         # Core Hyperparameters [cite: 244, 245]
         '--learning_rate', str(recipe['learning_rate']),
