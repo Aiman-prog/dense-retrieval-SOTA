@@ -2,9 +2,9 @@
 
 #SBATCH --job-name=inbatch-reasonir
 #SBATCH --partition=gpu-a100
-#SBATCH --time=04:00:00
+#SBATCH --time=24:00:00
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
+#SBATCH --cpus-per-task=16
 #SBATCH --gpus-per-task=1
 #SBATCH --mem-per-cpu=8000M
 #SBATCH --account=Education-EEMCS-MSc-DSAIT
@@ -24,6 +24,7 @@ export TRANSFORMERS_OFFLINE=1
 
 # Memory Management
 export PYTORCH_ALLOC_CONF="expandable_segments:True"
+export OMP_NUM_THREADS=8
 
 # Container path
 CONTAINER="/scratch/${USER}/containers/pytorch_2.1.sif"

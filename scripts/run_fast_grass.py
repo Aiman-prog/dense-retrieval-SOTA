@@ -98,9 +98,30 @@ def _mine_batch(cache, student, teacher, tokenizer, batch_qids, qid_to_text,
 
     mined = {qid: neg_docids[i] for i, qid in enumerate(batch_qids)}
     flat = [d for row in neg_docids for d in row]
+
+    # --- σ-testability diagnostics (no extra encodes; reuse g/s_hat/sigma) -----
+    # The headline question for the uncertainty study: does the σ term actually
+    # change which negative gets picked? Logged per step into mining_log.jsonl.
+    lam = float(fg_cfg['lambda_val'])
+    with torch.no_grad():
+        # score components of the actually-selected negatives (top-m)
+        sel_s_hat = float(s_hat.gather(1, slots).float().mean())
+        sel_sigma = float(sigma.gather(1, slots).float().mean())
+        # selection flip rate vs λ=0: top-1 by g (= s_hat + λ·σ, masked) vs
+        # top-1 by s_hat alone under the same positive mask. Nonzero ⇒ σ moves
+        # the pick; ~0 ⇒ uncertainty is inert at this λ/estimator.
+        s_hat_masked = cache.mask_positives(s_hat.clone(), batch_qids,
+                                            qrels_dict, inplace=True)
+        flip_rate = float((g.argmax(dim=1) != s_hat_masked.argmax(dim=1))
+                          .float().mean())
     stats = {
         's_hat_mean': float(s_hat.float().mean()),
         'sigma_mean': float(sigma.float().mean()),
+        'sel_s_hat_mean': sel_s_hat,
+        'sel_sigma_mean': sel_sigma,
+        'sel_lambda_sigma_mean': lam * sel_sigma,
+        'sel_sigma_over_s_hat': (sel_sigma / sel_s_hat) if sel_s_hat else 0.0,
+        'flip_rate_vs_lambda0': flip_rate,
         'selected_doc_diversity': (len(set(flat)) / len(flat)) if flat else 0.0,
     }
     return mined, slots, q_student, q_teacher, stats
@@ -120,6 +141,8 @@ def _build_fast_grass_cfg(config, args, steps_per_epoch):
         cfg['B_doc'] = args.B_doc
     if getattr(args, 'lambda_val', None) is not None:
         cfg['lambda_val'] = args.lambda_val
+    if getattr(args, 'ema_alpha', None) is not None:
+        cfg['ema_alpha'] = args.ema_alpha
     if getattr(args, 'selection_mode', None) is not None:
         cfg['selection_mode'] = args.selection_mode
     if getattr(args, 'm', None) is not None:
@@ -422,6 +445,9 @@ def main():
     parser.add_argument('--num_epochs',     type=int,   default=None)
     parser.add_argument('--B_doc',          type=int,   default=None)
     parser.add_argument('--lambda_val',     type=float, default=None)
+    parser.add_argument('--ema_alpha',      type=float, default=None,
+                        help='EMA teacher decay; 1.0 = frozen base-model teacher '
+                             '(σ = how much fine-tuning moved each doc score)')
     parser.add_argument('--selection_mode', choices=['topk', 'softmax'], default=None)
     parser.add_argument('--m',              type=int,   default=None)
     parser.add_argument('--uncertainty',    choices=['ema'], default='ema',

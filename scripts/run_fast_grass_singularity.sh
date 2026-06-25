@@ -35,6 +35,7 @@ CONTAINER="/scratch/${USER}/containers/pytorch_2.1.sif"
 # FAST_GRASS_NUM_EPOCHS=1          # override config
 # FAST_GRASS_B_DOC=100000          # global cache size (ablate 32k / 100k / 512k)
 # FAST_GRASS_LAMBDA=1.0            # g = s_hat + lambda * sigma (baseline ablation = 0)
+# FAST_GRASS_EMA_ALPHA=1.0         # EMA teacher decay; 1.0 = frozen base teacher (sigma diagnostic)
 # FAST_GRASS_SELECTION_MODE=topk   # topk | softmax
 # FAST_GRASS_M=1                   # negatives per query
 # FAST_GRASS_NO_REGISTRY=1         # ablation: fully disable the retired registry R
@@ -45,7 +46,7 @@ CONTAINER="/scratch/${USER}/containers/pytorch_2.1.sif"
 mkdir -p logs
 
 echo "🌿 Starting Fast-GRASS Training (1-GPU, Algorithm 1 over the global cache)..."
-echo "   SUFFIX=${FAST_GRASS_MODEL_SUFFIX:-} | EPOCHS=${FAST_GRASS_NUM_EPOCHS:-cfg} | B_doc=${FAST_GRASS_B_DOC:-cfg} | LAMBDA=${FAST_GRASS_LAMBDA:-cfg} | SELECT=${FAST_GRASS_SELECTION_MODE:-cfg} | M=${FAST_GRASS_M:-cfg} | NO_R=${FAST_GRASS_NO_REGISTRY:-0} | NO_EVAL=${FAST_GRASS_NO_EVAL:-0}"
+echo "   SUFFIX=${FAST_GRASS_MODEL_SUFFIX:-} | EPOCHS=${FAST_GRASS_NUM_EPOCHS:-cfg} | B_doc=${FAST_GRASS_B_DOC:-cfg} | LAMBDA=${FAST_GRASS_LAMBDA:-cfg} | EMA_ALPHA=${FAST_GRASS_EMA_ALPHA:-cfg} | SELECT=${FAST_GRASS_SELECTION_MODE:-cfg} | M=${FAST_GRASS_M:-cfg} | NO_R=${FAST_GRASS_NO_REGISTRY:-0} | NO_EVAL=${FAST_GRASS_NO_EVAL:-0}"
 
 singularity exec --nv \
     --bind /scratch/${USER}:/scratch/${USER} \
@@ -56,6 +57,7 @@ singularity exec --nv \
         ${FAST_GRASS_NUM_EPOCHS:+--num_epochs $FAST_GRASS_NUM_EPOCHS} \
         ${FAST_GRASS_B_DOC:+--B_doc $FAST_GRASS_B_DOC} \
         ${FAST_GRASS_LAMBDA:+--lambda_val $FAST_GRASS_LAMBDA} \
+        ${FAST_GRASS_EMA_ALPHA:+--ema_alpha $FAST_GRASS_EMA_ALPHA} \
         ${FAST_GRASS_SELECTION_MODE:+--selection_mode $FAST_GRASS_SELECTION_MODE} \
         ${FAST_GRASS_M:+--m $FAST_GRASS_M} \
         ${FAST_GRASS_NO_REGISTRY:+--no_registry} \
