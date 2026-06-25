@@ -23,6 +23,17 @@ from tevatron.retriever.driver.train import main as tevatron_train_main
 if not hasattr(DenseModel, "_keys_to_ignore_on_save"):
     setattr(DenseModel, "_keys_to_ignore_on_save", None)
 
+# 🩹 Tevatron bug: EncoderModel.gradient_checkpointing_enable() calls
+# `self.encoder.model.gradient_checkpointing_enable()`, but for a full fine-tune
+# `self.encoder` IS the HF model (XLMRobertaModel — no `.model` attr), so HF Trainer's
+# gradient_checkpointing=True crashes with "'XLMRobertaModel' object has no attribute 'model'".
+# Forward straight to the encoder — mirrors exactly what run_fast_grass does (proven to fit
+# batch 64 @ q1024/p512). Accept **kwargs so Trainer's gradient_checkpointing_kwargs= is
+# absorbed; we intentionally don't forward it (matches the no-arg fast_grass call).
+def _tevatron_gc_enable(self, **kwargs):
+    self.encoder.gradient_checkpointing_enable()
+DenseModel.gradient_checkpointing_enable = _tevatron_gc_enable
+
 def main():
     # 1. Get unified context (Hyperparameters + Absolute Paths)
     config = load_config()
