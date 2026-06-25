@@ -87,10 +87,12 @@ def main():
         '--save_strategy', 'steps',
         '--save_steps', str(save_steps),
         '--save_total_limit', '6',
-        '--attn_implementation', 'eager',     # XLM-RoBERTa has no sdpa in this transformers ver;
-                                              # memory is handled by adamw_bnb_8bit (matches fast_grass)
+        '--attn_implementation', 'eager',     # XLM-RoBERTa has no sdpa in this transformers ver
+        '--gradient_checkpointing', 'True',   # THE memory fix: frees the eager-attention activations
+                                              # (~50GB at q1024). This is what fast_grass actually used
+                                              # (its else-branch, since bitsandbytes is absent here).
         '--dataloader_num_workers', str(ctx['args']['dataloader_num_workers']),
-        '--optim', 'adamw_bnb_8bit',          # 8-bit Adam states (bitsandbytes); frees ~3.4GB
+        '--optim', 'adamw_torch_fused',       # bitsandbytes not available in this container
         '--warmup_ratio', str(ctx['args']['warmup_ratio']),
         '--weight_decay', str(ctx['args']['weight_decay']),
         '--max_grad_norm', str(ctx['args']['max_grad_norm']),

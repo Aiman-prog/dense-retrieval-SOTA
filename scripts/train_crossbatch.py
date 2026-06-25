@@ -51,7 +51,7 @@ def main():
         '--bf16', 'True',
         '--dtype', 'bfloat16',           # Force model weights to BF16 on load
         '--attn_implementation', 'eager',    # XLM-RoBERTa has no sdpa in this transformers ver
-        '--optim', 'adamw_bnb_8bit',         # 8-bit Adam states (bitsandbytes); frees ~3.4GB
+        '--optim', 'adamw_torch_fused',      # bitsandbytes not available; GradCache chunking handles memory
 
         # Core Hyperparameters [cite: 244, 245]
         '--learning_rate', str(recipe['learning_rate']),
