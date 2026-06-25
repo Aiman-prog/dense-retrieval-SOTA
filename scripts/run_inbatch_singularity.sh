@@ -2,7 +2,7 @@
 
 #SBATCH --job-name=inbatch-reasonir
 #SBATCH --partition=gpu-a100
-#SBATCH --time=24:00:00
+#SBATCH --time=00:05:00   # TEMP: OOM smoke test — passes step-1 mem peak then SLURM kills it. RESTORE to 24:00:00 for real run.
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --gpus-per-task=1
