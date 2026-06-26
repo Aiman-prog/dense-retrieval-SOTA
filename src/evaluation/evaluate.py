@@ -57,7 +57,10 @@ def main():
     # --- PATH SETUP ---
     base_dir = Path(get_data_base_dir())
     processed_dir = base_dir / config['paths']['processed_dir']
-    eval_dir = base_dir / 'data' / 'evaluation' / args.domain
+    # Key the embedding cache by model AND domain so concurrent evals of different
+    # models can't clobber each other's corpus.pkl/query.pkl (domain-only paths race).
+    model_tag = Path(args.model_path).name
+    eval_dir = base_dir / 'data' / 'evaluation' / model_tag / args.domain
     eval_dir.mkdir(parents=True, exist_ok=True)
 
     corpus_file = processed_dir / f"{args.domain}_corpus.jsonl"
