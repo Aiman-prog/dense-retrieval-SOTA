@@ -504,6 +504,26 @@ def main():
     fg_cfg = _build_fast_grass_cfg(config, args, steps_per_epoch)
     fg_cfg['model_name'] = cfg['model_name']
 
+    # --- CONFIG PARAMETER PRINTS (resolved values, after CLI overrides) ---
+    print("\n" + "="*48, flush=True)
+    print("🛠️  VERIFYING FAST-GRASS CONFIGURATION", flush=True)
+    print(f"▶️  Model name (out):  {fg_cfg['model_name']}_{fg_cfg['uncertainty']}", flush=True)
+    print(f"▶️  Base model:        {ctx['base_model']}", flush=True)
+    print(f"▶️  B_doc:             {fg_cfg['B_doc']}", flush=True)
+    print(f"▶️  lambda_val:        {fg_cfg['lambda_val']}", flush=True)
+    print(f"▶️  m (negs/query):    {fg_cfg['m']}", flush=True)
+    print(f"▶️  selection_mode:    {fg_cfg['selection_mode']}", flush=True)
+    print(f"▶️  uncertainty:       {fg_cfg['uncertainty']}", flush=True)
+    print(f"▶️  ema_alpha:         {fg_cfg['ema_alpha']}", flush=True)
+    print(f"▶️  registry R:        {'DISABLED (--no_registry)' if args.no_registry else 'enabled'}", flush=True)
+    print(f"▶️  post-train eval:   {'SKIPPED (--no_eval)' if args.no_eval else 'enabled'}", flush=True)
+    print(f"▶️  num_epochs:        {fg_cfg['num_epochs']}", flush=True)
+    print(f"▶️  batch_size:        {fg_cfg.get('batch_size', batch_size)}", flush=True)
+    print(f"▶️  steps/epoch:       {steps_per_epoch}  (total {fg_cfg['total_steps']})", flush=True)
+    print(f"▶️  query/passage len: {fg_cfg['query_max_len']} / {fg_cfg['passage_max_len']}", flush=True)
+    print(f"▶️  learning_rate:     {fg_cfg['learning_rate']}", flush=True)
+    print("="*48 + "\n", flush=True)
+
     cache = NegativeCache.init_uniform(stale_embs, c_ids, fg_cfg, device)
     print(f"[FAST-GRASS] Cache H initialized | B_doc={cache.B_doc} | "
           f"Z_H={cache.memory_bytes()/1e9:.2f} GB", flush=True)
