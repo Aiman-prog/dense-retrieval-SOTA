@@ -81,6 +81,9 @@ def _sync(device):
 def _fg_cfg(config, args):
     """Build the runtime fast_grass cfg with derived step counts."""
     cfg = dict(config['training']['fast_grass'])
+    # This benchmark scores the EMA-style Q×Z_H matmul (cache.score), so it needs a
+    # teacher-backed cache regardless of the config default (now mcdp).
+    cfg['uncertainty'] = 'ema'
     if args.B_doc is not None:
         cfg['B_doc'] = args.B_doc
     cfg['lambda_val'] = float(cfg['lambda_val'])
@@ -117,6 +120,7 @@ def run_synthetic(args):
     c_ids = [f"d{i}" for i in range(n_corpus)]
 
     cfg = dict(load_config()['training']['fast_grass'])
+    cfg['uncertainty'] = 'ema'   # benchmarks the EMA-style cache.score matmul
     cfg['B_doc'] = B_doc
     cfg['lambda_val'] = float(cfg['lambda_val'])
     cache = NegativeCache.init_uniform(embs, c_ids, cfg, device, dim=dim,

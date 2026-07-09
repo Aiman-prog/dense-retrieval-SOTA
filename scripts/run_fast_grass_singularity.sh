@@ -35,18 +35,22 @@ CONTAINER="/scratch/${USER}/containers/pytorch_2.1.sif"
 # FAST_GRASS_NUM_EPOCHS=1          # override config
 # FAST_GRASS_B_DOC=100000          # global cache size (ablate 32k / 100k / 512k)
 # FAST_GRASS_LAMBDA=1.0            # g = s_hat + lambda * sigma (baseline ablation = 0)
-# FAST_GRASS_EMA_ALPHA=1.0         # EMA teacher decay; 1.0 = frozen base teacher (sigma diagnostic)
+# FAST_GRASS_UNCERTAINTY=mcdp      # mcdp (teacher-free, default) | ema (baseline)
+# FAST_GRASS_T=3                   # MCDP stochastic dropout passes
+# FAST_GRASS_MC_DROPOUT_P=0.3      # MCDP dropout probability
+# FAST_GRASS_L=128                 # MCDP top-L shortlist / softmax prefilter (cost ~ batch*L*T)
+# FAST_GRASS_EMA_ALPHA=1.0         # ema mode only: teacher decay; 1.0 = frozen base teacher
 # FAST_GRASS_SELECTION_MODE=topk   # topk | softmax
 # FAST_GRASS_M=1                   # negatives per query
 # FAST_GRASS_NO_REGISTRY=1         # ablation: fully disable the retired registry R
 # FAST_GRASS_NO_EVAL=1             # skip post-train BRIGHT eval (run it later, sequentially,
-#                                 #   via run_fast_grass_eval.py — required for parallel sweeps,
-#                                 #   the eval scratch dir is shared across runs)
+#                                 #   via run_all_evals.py / run_evaluate_singularity.sh — required
+#                                 #   for parallel sweeps, the eval scratch dir is shared across runs)
 
 mkdir -p logs
 
 echo "🌿 Starting Fast-GRASS Training (1-GPU, Algorithm 1 over the global cache)..."
-echo "   SUFFIX=${FAST_GRASS_MODEL_SUFFIX:-} | EPOCHS=${FAST_GRASS_NUM_EPOCHS:-cfg} | B_doc=${FAST_GRASS_B_DOC:-cfg} | LAMBDA=${FAST_GRASS_LAMBDA:-cfg} | EMA_ALPHA=${FAST_GRASS_EMA_ALPHA:-cfg} | SELECT=${FAST_GRASS_SELECTION_MODE:-cfg} | M=${FAST_GRASS_M:-cfg} | NO_R=${FAST_GRASS_NO_REGISTRY:-0} | NO_EVAL=${FAST_GRASS_NO_EVAL:-0}"
+echo "   SUFFIX=${FAST_GRASS_MODEL_SUFFIX:-} | EPOCHS=${FAST_GRASS_NUM_EPOCHS:-cfg} | B_doc=${FAST_GRASS_B_DOC:-cfg} | LAMBDA=${FAST_GRASS_LAMBDA:-cfg} | UNC=${FAST_GRASS_UNCERTAINTY:-cfg} | T=${FAST_GRASS_T:-cfg} | MCDP_P=${FAST_GRASS_MC_DROPOUT_P:-cfg} | L=${FAST_GRASS_L:-cfg} | EMA_ALPHA=${FAST_GRASS_EMA_ALPHA:-cfg} | SELECT=${FAST_GRASS_SELECTION_MODE:-cfg} | M=${FAST_GRASS_M:-cfg} | NO_R=${FAST_GRASS_NO_REGISTRY:-0} | NO_EVAL=${FAST_GRASS_NO_EVAL:-0}"
 
 singularity exec --nv \
     --bind /scratch/${USER}:/scratch/${USER} \
@@ -57,6 +61,10 @@ singularity exec --nv \
         ${FAST_GRASS_NUM_EPOCHS:+--num_epochs $FAST_GRASS_NUM_EPOCHS} \
         ${FAST_GRASS_B_DOC:+--B_doc $FAST_GRASS_B_DOC} \
         ${FAST_GRASS_LAMBDA:+--lambda_val $FAST_GRASS_LAMBDA} \
+        ${FAST_GRASS_UNCERTAINTY:+--uncertainty $FAST_GRASS_UNCERTAINTY} \
+        ${FAST_GRASS_T:+--T $FAST_GRASS_T} \
+        ${FAST_GRASS_MC_DROPOUT_P:+--mc_dropout_p $FAST_GRASS_MC_DROPOUT_P} \
+        ${FAST_GRASS_L:+--L $FAST_GRASS_L} \
         ${FAST_GRASS_EMA_ALPHA:+--ema_alpha $FAST_GRASS_EMA_ALPHA} \
         ${FAST_GRASS_SELECTION_MODE:+--selection_mode $FAST_GRASS_SELECTION_MODE} \
         ${FAST_GRASS_M:+--m $FAST_GRASS_M} \

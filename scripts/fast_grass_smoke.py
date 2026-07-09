@@ -56,7 +56,8 @@ def run_smoke():
         cfg_all = yaml.safe_load(f)
     fg = cfg_all["training"].get("fast_grass", {})
     required = ["B_doc", "m", "selection_mode", "lambda_val", "beta", "L",
-               "uncertainty", "ema_alpha", "rho_start", "rho_end",
+               "uncertainty", "ema_alpha", "T", "mc_dropout_p",
+               "rho_start", "rho_end",
                "cache_update_interval", "max_age_epochs", "utility_ema_decay",
                "utility_floor", "utility_remember_threshold", "K", "R_fraction",
                "uniform_candidate_fraction", "replacement_candidate_multiplier",
@@ -69,7 +70,7 @@ def run_smoke():
     # 2) public API importable + callable
     from utils.negative_cache import NegativeCache, RetiredRegistry, linear_decay
     api_ok = all(callable(x) for x in [NegativeCache, RetiredRegistry, linear_decay])
-    methods = ["init_uniform", "score", "mask_positives", "select",
+    methods = ["init_uniform", "score", "cheap_scores", "mask_positives", "select",
                "record_selection", "maintain", "memory_bytes"]
     api_ok = api_ok and all(hasattr(NegativeCache, m) for m in methods)
     checks.append(("negative_cache public API present", api_ok))
@@ -114,6 +115,20 @@ def run_smoke():
 
     # 5) memory report is positive
     checks.append(("memory_bytes() > 0", cache.memory_bytes() > 0))
+
+    # 6) teacher-free MCDP cache: no Z_teacher, cheap_scores works, score() guards
+    mcdp_cfg = dict(cfg, uncertainty='mcdp')
+    mcdp_cache = NegativeCache.init_uniform(embs, c_ids, mcdp_cfg, device, dim=dim)
+    cheap = mcdp_cache.cheap_scores(qs)
+    try:
+        mcdp_cache.score(qs, qs, 1.0)
+        score_guarded = False
+    except RuntimeError:
+        score_guarded = True
+    mcdp_ok = (mcdp_cache.Z_teacher is None and cheap.shape == (4, mcdp_cache.B_doc)
+               and torch.isfinite(cheap).all() and score_guarded)
+    checks.append(("MCDP cache teacher-free: cheap_scores ok + score() raises",
+                   mcdp_ok))
 
     print()
     ok = 0

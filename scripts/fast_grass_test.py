@@ -156,6 +156,60 @@ def test_score_is_grad_free_even_with_grad_queries():
     assert not s_student.requires_grad and not sigma.requires_grad
 
 
+# ---- cheap_scores + teacher-free MCDP cache --------------------------------
+
+def test_cheap_scores_matches_manual_and_grad_free():
+    """MCDP top-L ranking: student-only cheap scores over H, grad-free even with a
+    grad-enabled query, and counted like score()."""
+    cache, *_ = make_cache()
+    qs = _rand_unit(4, 8, 7).requires_grad_(True)
+    s = cache.cheap_scores(qs)
+    assert torch.allclose(s, qs @ cache.Z_student.t(), atol=1e-5)
+    assert not s.requires_grad and s.grad_fn is None
+    assert cache.cache_score_pairs == 4 * cache.B_doc
+
+
+def test_mcdp_cache_is_teacher_free():
+    """uncertainty='mcdp' → no Z_teacher; memory_bytes counts student only; score()
+    raises (EMA-only), cheap_scores() works."""
+    cfg = make_cfg(uncertainty='mcdp')
+    cache, *_ = make_cache(cfg=cfg)
+    assert cache.Z_teacher is None
+    # student-only footprint == exactly the student tensor bytes
+    assert cache.memory_bytes() == (cache.Z_student.element_size() *
+                                    cache.Z_student.nelement())
+    qs = _rand_unit(3, 8, 1)
+    assert cache.cheap_scores(qs).shape == (3, cache.B_doc)
+    try:
+        cache.score(qs, qs, 1.0)
+        raised = False
+    except RuntimeError:
+        raised = True
+    assert raised, "score() must raise on a teacher-free (MCDP) cache"
+
+
+def test_teacher_free_maintain_preserves_invariants():
+    """Maintenance on an MCDP (teacher=None) cache runs student-only refresh/replace,
+    keeps the slot↔docid bijection + B_doc, and never allocates Z_teacher."""
+    cfg = make_cfg(uncertainty='mcdp', B_doc=8)
+    cache, cfg, c_ids, embs, corpus = make_cache(cfg=cfg, n_corpus=20)
+    model, tok = GradMockModel(hidden=8).eval(), MockTokenizer()
+    # force everything replace-eligible
+    cache.intervals_since_selected[:] = cfg['K']
+    cache.utility_ema[:] = 0.0
+    qs = _rand_unit(4, 8, 3)
+    reservoir = {'q_student': qs, 'q_teacher': None,
+                 'qids': [f"q{i}" for i in range(4)]}
+    counters = cache.maintain(model, None, tok, corpus, c_ids, reservoir,
+                              step=50, cfg=cfg, device=DEVICE, qrels_dict={})
+    assert cache.Z_teacher is None
+    assert len(cache.docids) == cache.B_doc == 8
+    assert len(set(cache.docids)) == cache.B_doc
+    for d, s in cache.docid_to_slot.items():
+        assert cache.docids[s] == d
+    assert 'num_replace' in counters and 'cache_turnover_rate' in counters
+
+
 # ---- mask + select ---------------------------------------------------------
 
 def test_mask_excludes_positive_from_selection():
@@ -468,6 +522,9 @@ TESTS = [
     ("score: g = s_hat + lambda*|s_stu - s_tea|", test_score_matches_manual),
     ("score: lambda=0 => g == s_student", test_score_lambda_zero),
     ("score: grad-free even with grad queries (#3)", test_score_is_grad_free_even_with_grad_queries),
+    ("cheap_scores: student-only, grad-free, counted", test_cheap_scores_matches_manual_and_grad_free),
+    ("mcdp cache: teacher-free (Z_teacher None, score() raises)", test_mcdp_cache_is_teacher_free),
+    ("mcdp maintain: teacher-free invariants preserved", test_teacher_free_maintain_preserves_invariants),
     ("mask: positive excluded from selection", test_mask_excludes_positive_from_selection),
     ("select: TopK picks max-g", test_select_topk_picks_max),
     ("select: Softmax high-beta ~ TopK", test_select_softmax_highbeta_approx_topk),

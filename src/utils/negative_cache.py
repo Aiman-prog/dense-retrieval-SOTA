@@ -97,7 +97,8 @@ class NegativeCache:
     """Bounded global cache ``H`` of ``B_doc`` docs with stale states ``Z_H``.
 
     Slots ``0..B_doc-1`` each hold one docid, a student doc embedding
-    (``Z_student``) and an EMA-teacher doc embedding (``Z_teacher``), plus
+    (``Z_student``) and — in EMA mode only — an EMA-teacher doc embedding
+    (``Z_teacher``; ``None`` for the teacher-free MCDP estimator), plus
     maintenance metadata (age, utility EMA, selection history). All tensors live
     on ``device``; ``Z_*`` carry no gradient.
     """
@@ -115,9 +116,14 @@ class NegativeCache:
         self.docid_to_slot = {d: i for i, d in enumerate(self.docids)}
 
         self.Z_student = Z_student.detach()   # (B_doc, dim) — selection only
-        self.Z_teacher = Z_teacher.detach()
         self.Z_student.requires_grad_(False)
-        self.Z_teacher.requires_grad_(False)
+        # Z_teacher is EMA-only. MCDP is teacher-free: Z_teacher is None and σ comes
+        # from top-L MC-dropout in the trainer, not from a cached teacher state.
+        if Z_teacher is not None:
+            self.Z_teacher = Z_teacher.detach()
+            self.Z_teacher.requires_grad_(False)
+        else:
+            self.Z_teacher = None
 
         z_long = lambda: torch.zeros(self.B_doc, dtype=torch.long, device=device)
         z_flt = lambda: torch.zeros(self.B_doc, dtype=torch.float32, device=device)
@@ -150,7 +156,8 @@ class NegativeCache:
         ``c_ids <-> rows`` mapping from the stale-index pickle). At init the
         student and teacher states are identical (the EMA teacher == student).
         ``dtype`` defaults to bf16 on CUDA (halves the Z_H footprint) and float32
-        on CPU.
+        on CPU. A teacher state is allocated only for the EMA estimator
+        (``cfg['uncertainty'] == 'ema'``); MCDP is teacher-free (``Z_teacher=None``).
         """
         if dtype is None:
             dtype = torch.bfloat16 if device.type == 'cuda' else torch.float32
@@ -167,7 +174,9 @@ class NegativeCache:
         embs = embs.to(dtype=dtype)
         if dim is None:
             dim = embs.shape[1]
-        return cls(docids, embs.clone(), embs.clone(), cfg, device, dim, rng)
+        with_teacher = cfg.get('uncertainty', 'ema') == 'ema'
+        Z_teacher = embs.clone() if with_teacher else None
+        return cls(docids, embs.clone(), Z_teacher, cfg, device, dim, rng)
 
     # ---- mining: score / mask / select -------------------------------------
 
@@ -177,8 +186,13 @@ class NegativeCache:
         Returns ``(g, s_student, sigma)``, each ``(batch, B_doc)``. ``s_student``
         and ``sigma`` are returned for logging. Selection is grad-free: scoring
         runs under ``no_grad`` so a grad-enabled query batch never builds a graph
-        through the selection-only cache.
+        through the selection-only cache. EMA-only — raises for a teacher-free
+        (MCDP) cache.
         """
+        if self.Z_teacher is None:
+            raise RuntimeError(
+                "score() requires an EMA cache with Z_teacher; use cheap_scores() "
+                "for MCDP")
         with torch.no_grad():
             s_student = q_student @ self.Z_student.t()
             s_teacher = q_teacher @ self.Z_teacher.t()
@@ -186,6 +200,17 @@ class NegativeCache:
             g = s_student + lambda_val * sigma
         self.cache_score_pairs += int(q_student.shape[0]) * self.B_doc
         return g, s_student, sigma
+
+    def cheap_scores(self, q_student):
+        """Deterministic student-only cheap scores over all of ``H`` — MCDP's
+        top-L ranking stage. ``q_student @ Z_student.t()`` under ``no_grad``;
+        returns ``(batch, B_doc)`` and counts the scored pairs like ``score()``.
+        Needs no teacher, so it works regardless of estimator.
+        """
+        with torch.no_grad():
+            s = q_student @ self.Z_student.t()
+        self.cache_score_pairs += int(q_student.shape[0]) * self.B_doc
+        return s
 
     def mask_positives(self, g, batch_qids, qrels_dict, inplace=False):
         """Set ``g[i, slot] = -inf`` for slots holding a known positive of query i."""
@@ -258,9 +283,11 @@ class NegativeCache:
         self.selected_indicator[slots.reshape(-1)] = True
 
     def memory_bytes(self):
-        """Byte footprint of ``Z_student`` + ``Z_teacher`` (T1 budget report)."""
-        return (self.Z_student.element_size() * self.Z_student.nelement() +
-                self.Z_teacher.element_size() * self.Z_teacher.nelement())
+        """Byte footprint of ``Z_student`` (+ ``Z_teacher`` when present)."""
+        b = self.Z_student.element_size() * self.Z_student.nelement()
+        if self.Z_teacher is not None:
+            b += self.Z_teacher.element_size() * self.Z_teacher.nelement()
+        return b
 
     # ---- maintenance --------------------------------------------------------
 
@@ -408,12 +435,13 @@ class NegativeCache:
         bs = cfg.get('mc_batch_size', 256)
         zs = encode_batch_tensor(student, tokenizer, texts, device, max_len, bs,
                                  requires_grad=False).to(self.Z_student.dtype)
-        if teacher is not None:
+        if self.Z_teacher is not None and teacher is not None:
             zt = encode_batch_tensor(teacher, tokenizer, texts, device, max_len,
                                      bs, requires_grad=False).to(self.Z_teacher.dtype)
+            zt = zt.detach()
         else:
-            zt = zs.clone()
-        return zs.detach(), zt.detach()
+            zt = None   # teacher-free (MCDP): student states only
+        return zs.detach(), zt
 
     def _refresh(self, slots, student, teacher, tokenizer, corpus_lookup, step,
                  cfg, device):
@@ -421,7 +449,8 @@ class NegativeCache:
         texts = [corpus_lookup[self.docids[s]] for s in slot_list]
         zs, zt = self._encode_docs(texts, student, teacher, tokenizer, cfg, device)
         self.Z_student[slots] = zs
-        self.Z_teacher[slots] = zt
+        if self.Z_teacher is not None and zt is not None:
+            self.Z_teacher[slots] = zt
         self.last_refreshed_step[slots] = step
 
     def _replace(self, slots, student, teacher, tokenizer, corpus_lookup,
@@ -451,12 +480,17 @@ class NegativeCache:
 
         # recertify: score candidates against the recent-query reservoir.
         # Grad-free like score(): recertification must never build a graph, even
-        # if the reservoir tensors happen to require grad.
-        qs, qt = reservoir['q_student'], reservoir['q_teacher']
+        # if the reservoir tensors happen to require grad. Teacher-free (MCDP):
+        # deterministic student-only recert score (g = s_stu, no σ term).
+        qs = reservoir['q_student']
+        qt = reservoir.get('q_teacher')
         with torch.no_grad():
             s_stu = qs @ czs.t()
-            s_tea = qt @ czt.t()
-            g = s_stu + cfg['lambda_val'] * (s_stu - s_tea).abs()   # (R, C)
+            if self.Z_teacher is not None and czt is not None and qt is not None:
+                s_tea = qt @ czt.t()
+                g = s_stu + cfg['lambda_val'] * (s_stu - s_tea).abs()   # (R, C)
+            else:
+                g = s_stu   # student-only recert (MCDP)
         for r, qid in enumerate(reservoir['qids']):
             pos = qrels_dict.get(qid)
             if not pos:
@@ -481,7 +515,8 @@ class NegativeCache:
                 peak_utility_ema=float(self.peak_utility_ema[slot]),
                 lifetime_selected_count=int(self.lifetime_selected_count[slot])),
                 step)
-            self._insert(slot, cand[ci], czs[ci], czt[ci], step)
+            self._insert(slot, cand[ci], czs[ci],
+                         czt[ci] if czt is not None else None, step)
             # a recertified-and-reinserted doc is active again -> leaves R
             self.registry.entries.pop(cand[ci], None)
 
@@ -520,7 +555,8 @@ class NegativeCache:
         self.docids[slot] = docid
         self.docid_to_slot[docid] = slot
         self.Z_student[slot] = zs
-        self.Z_teacher[slot] = zt
+        if self.Z_teacher is not None and zt is not None:
+            self.Z_teacher[slot] = zt
         self.last_refreshed_step[slot] = step
         self.utility_ema[slot] = 0.0
         self.peak_utility_ema[slot] = 0.0
