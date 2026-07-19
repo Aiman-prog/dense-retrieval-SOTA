@@ -12,11 +12,17 @@
 #SBATCH --error=logs/fg_timing_%j.err
 #SBATCH --chdir=/home/aimanabdulwaha/dense-retrieval-SOTA
 
-# Async Fast-GRASS — Phase 0 timing calibration (trainer-only + miner-only).
-# Measures t_train_step and t_mine_round to CHOOSE async_mine_every_steps. No async
-# trainer/miner, no online mining during training timing, no cache maintenance during
-# training timing, no eval. Reuses the stale corpus pickle as the cache-init source
-# only (no full-corpus ANN rebuild, no per-query FAISS top-P).
+# Async Fast-GRASS — Phase 0 feasibility gate (run BEFORE building the async trainer/miner).
+# One job answers "is async worth it, and at what cadence?" in five steps:
+#   [1/5] CPU correctness gate  : handoff + cache-semantics tests (+ synthetic smokes).
+#                                 Fail-fast so a logic bug never burns GPU time.
+#   [2/5] trainer-only timing   : t_train_step (seconds_per_train_step). No mining/cache/eval.
+#   [3/5] miner-only timing     : t_mine_round over the mixture with periodic in-round
+#                                 maintenance. No full-corpus ANN, no per-query FAISS top-P.
+#   [4/5] speed estimate        : expected overlap speedup + recommended async_mine_every_steps
+#                                 + staleness warning, from the two JSONs above.
+#   [5/5] quality probe (opt)   : real hardness/diversity of frozen-checkpoint mining vs
+#                                 current-model mining (needs checkpoints; off by default).
 #
 # Run one (B_doc, L, T) mine setting per job via env vars. The three required cluster
 # settings (submit as three jobs):
@@ -24,7 +30,7 @@
 #     FG_B_DOC=32000  FG_L=128 FG_T=3
 #     FG_B_DOC=100000 FG_L=64  FG_T=3
 # The trainer timing (t_train_step) is independent of L/T, so it is run ONCE here and
-# its seconds_per_train_step is fed into the miner timing to emit async_mine_every_steps.
+# its seconds_per_train_step is fed into the miner timing and the speed estimate.
 #
 # Outputs (JSON + console): analysis/async_fast_grass_timing/
 
@@ -62,15 +68,46 @@ FG_TRAIN_TIMING_JSON="${FG_TRAIN_TIMING_JSON:-}"  # explicit train_timing_*.json
 FG_ROUND_SPAN="${FG_ROUND_SPAN:-}"            # override round_training_span_steps (--round_training_span_steps)
 FG_WRITE_JSONL="${FG_WRITE_JSONL:-}"          # set to fold JSONL round-write into t_mine_round
 
+# Speed-estimate + quality-probe knobs
+FG_RUN_TESTS="${FG_RUN_TESTS:-1}"             # [1/5] CPU correctness gate (blank = skip)
+FG_NUM_EPOCHS="${FG_NUM_EPOCHS:-3}"           # planned training epochs (speed estimate)
+FG_CKPT_WRITE="${FG_CKPT_WRITE:-}"            # checkpoint write seconds (async handoff I/O); blank = excluded
+FG_MIN_SPEEDUP="${FG_MIN_SPEEDUP:-1.3}"       # acceptance threshold for expected speedup
+FG_QUALITY_PROBE="${FG_QUALITY_PROBE:-}"      # set to run [5/5] real quality probe (needs a checkpoint)
+FG_SEQ_CKPT="${FG_SEQ_CKPT:-}"                # quality probe: current-model dir (blank = base model)
+FG_ASYNC_CKPT="${FG_ASYNC_CKPT:-}"            # quality probe: frozen/stale model dir (blank = base+noise)
+FG_STALENESS_NOISE="${FG_STALENESS_NOISE:-0.0}"  # quality probe: weight noise if no async ckpt
+
 mkdir -p logs analysis/async_fast_grass_timing
 
 echo "⏱️  Fast-GRASS Phase-0 timing calibration"
 echo "   B_doc=${FG_B_DOC} | L=${FG_L} | T=${FG_T} | UNC=${FG_UNCERTAINTY} | "\
 "train_steps=${FG_TRAIN_STEPS} | max_queries=${FG_MAX_QUERIES:-full} | margin=${FG_SAFETY_MARGIN}"
 
-# --- 1. Trainer-only timing (t_train_step); independent of L/T ---
+# --- 1. CPU correctness gate (fail-fast before any GPU work) ---
+if [ -n "${FG_RUN_TESTS}" ]; then
+    echo "--- [1/5] CPU correctness gate (handoff + cache semantics + synthetic smokes) ---"
+    singularity exec \
+        --bind /scratch/${USER}:/scratch/${USER} \
+        --bind /home/${USER}:/home/${USER} \
+        ${CONTAINER} bash -c '
+            set -e
+            python -u scripts/async_fast_grass_handoff_test.py
+            python -u scripts/async_fast_grass_cache_semantics_test.py
+            python -u scripts/async_fast_grass_quality_probe.py --synthetic
+        '
+    TEST_EXIT=$?
+    if [ $TEST_EXIT -ne 0 ]; then
+        echo "❌ correctness gate failed with code $TEST_EXIT — aborting before GPU work"
+        exit $TEST_EXIT
+    fi
+else
+    echo "--- [1/5] correctness gate SKIPPED (FG_RUN_TESTS blank) ---"
+fi
+
+# --- 2. Trainer-only timing (t_train_step); independent of L/T ---
 if [ -z "${FG_SKIP_TRAIN}" ]; then
-    echo "--- [1/2] trainer-only timing (t_train_step) ---"
+    echo "--- [2/5] trainer-only timing (t_train_step) ---"
     singularity exec --nv \
         --bind /scratch/${USER}:/scratch/${USER} \
         --bind /home/${USER}:/home/${USER} \
@@ -84,12 +121,12 @@ if [ -z "${FG_SKIP_TRAIN}" ]; then
         echo "❌ trainer timing failed with code $TRAIN_EXIT"; exit $TRAIN_EXIT
     fi
 else
-    echo "--- [1/2] trainer timing SKIPPED (FG_SKIP_TRAIN set) ---"
+    echo "--- [2/5] trainer timing SKIPPED (FG_SKIP_TRAIN set) ---"
 fi
 
-# --- 2. Miner-only timing (t_mine_round) + async_mine_every_steps ---
+# --- 3. Miner-only timing (t_mine_round) + async_mine_every_steps ---
 # Reads the newest train_timing_*.json for seconds_per_train_step automatically.
-echo "--- [2/2] miner-only timing (t_mine_round) ---"
+echo "--- [3/5] miner-only timing (t_mine_round) ---"
 singularity exec --nv \
     --bind /scratch/${USER}:/scratch/${USER} \
     --bind /home/${USER}:/home/${USER} \
@@ -106,12 +143,46 @@ singularity exec --nv \
         ${FG_WRITE_JSONL:+--write_jsonl_timing}
 MINE_EXIT=$?
 
-if [ $MINE_EXIT -eq 0 ]; then
-    echo "✅ Timing calibration completed"
-else
+if [ $MINE_EXIT -ne 0 ]; then
     echo "❌ miner timing failed with code $MINE_EXIT"
+    exit $MINE_EXIT
 fi
 
+# --- 4. Speed estimate (CPU): expected speedup + recommended async_mine_every_steps ---
+# Reads the newest train_timing_*.json + mine_timing_*.json this job just produced.
+echo "--- [4/5] speed estimate (expected speedup + cadence) ---"
+singularity exec \
+    --bind /scratch/${USER}:/scratch/${USER} \
+    --bind /home/${USER}:/home/${USER} \
+    ${CONTAINER} \
+    python -u scripts/async_fast_grass_speed_estimate.py \
+        --num_epochs ${FG_NUM_EPOCHS} \
+        --safety_margin ${FG_SAFETY_MARGIN} \
+        --min_speedup ${FG_MIN_SPEEDUP} \
+        ${FG_TRAIN_TIMING_JSON:+--train_timing_json $FG_TRAIN_TIMING_JSON} \
+        ${FG_CKPT_WRITE:+--checkpoint_write_time $FG_CKPT_WRITE}
+EST_EXIT=$?
+[ $EST_EXIT -ne 0 ] && echo "⚠️  speed estimate exited $EST_EXIT (analysis step; timing JSONs are still valid)"
+
+# --- 5. Real quality probe (optional; needs a checkpoint) ---
+if [ -n "${FG_QUALITY_PROBE}" ]; then
+    echo "--- [5/5] real quality probe (frozen vs current mining) ---"
+    singularity exec --nv \
+        --bind /scratch/${USER}:/scratch/${USER} \
+        --bind /home/${USER}:/home/${USER} \
+        ${CONTAINER} \
+        python -u scripts/async_fast_grass_quality_probe.py --real \
+            --B_doc ${FG_B_DOC} --L ${FG_L} --T ${FG_T} \
+            --staleness_noise ${FG_STALENESS_NOISE} \
+            ${FG_MAX_QUERIES:+--max_queries $FG_MAX_QUERIES} \
+            ${FG_SEQ_CKPT:+--seq_checkpoint $FG_SEQ_CKPT} \
+            ${FG_ASYNC_CKPT:+--async_checkpoint $FG_ASYNC_CKPT}
+    echo "   quality probe exited $?"
+else
+    echo "--- [5/5] quality probe SKIPPED (set FG_QUALITY_PROBE=1 to enable) ---"
+fi
+
+echo "✅ Async feasibility gate completed"
 echo "=========================================="
 echo "Job $SLURM_JOB_ID Completed"
 echo "=========================================="
