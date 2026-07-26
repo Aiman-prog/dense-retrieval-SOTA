@@ -13,24 +13,35 @@
 #SBATCH --chdir=/home/aimanabdulwaha/dense-retrieval-SOTA
 
 # Async Fast-GRASS — Phase 0 feasibility gate (run BEFORE building the async trainer/miner).
+# Times CACHED-MCDP: Z_mc[T, B_doc, D] built once, then T query passes + T matmuls over
+# all of H per batch with ZERO document encodes during mining. The old lazy top-L path
+# is oracle-only and has no launcher path here (there is no FG_L knob any more).
+#
 # One job answers "is async worth it, and at what cadence?" in five steps:
 #   [1/5] CPU correctness gate  : handoff + cache-semantics tests (+ synthetic smokes).
 #                                 Fail-fast so a logic bug never burns GPU time.
-#   [2/5] trainer-only timing   : t_train_step (seconds_per_train_step). No mining/cache/eval.
-#   [3/5] miner-only timing     : t_mine_round over the mixture with periodic in-round
-#                                 maintenance. No full-corpus ANN, no per-query FAISS top-P.
-#   [4/5] speed estimate        : expected overlap speedup + recommended async_mine_every_steps
-#                                 + staleness warning, from the two JSONs above.
-#   [5/5] quality probe (opt)   : real hardness/diversity of frozen-checkpoint mining vs
-#                                 current-model mining (needs checkpoints; off by default).
+#   [2/5] trainer-only timing   : t_train_step + checkpoint_write_time + peak memory.
+#                                 No mining/cache/eval.
+#   [3/5] miner-only timing     : t_mine_round over the mixture with PERIODIC IN-ROUND
+#                                 maintenance every cache_update_interval*batch_size
+#                                 mined queries. No full-corpus ANN, no per-query FAISS.
+#   [4/5] speed estimate        : expected speedup, recommended async_mine_every_steps,
+#                                 memory gate, and the go/no-go table.
+#   [5/5] signal probe (opt)    : cached-MCDP lambda=0 vs lambda>0 non-degeneracy
+#                                 diagnostic. REPORT-ONLY, never gates the build, and
+#                                 supports NO Recall/NDCG claim. Off by default.
 #
-# Run one (B_doc, L, T) mine setting per job via env vars. The three required cluster
-# settings (submit as three jobs):
-#     FG_B_DOC=32000  FG_L=64  FG_T=3
-#     FG_B_DOC=32000  FG_L=128 FG_T=3
-#     FG_B_DOC=100000 FG_L=64  FG_T=3
-# The trainer timing (t_train_step) is independent of L/T, so it is run ONCE here and
-# its seconds_per_train_step is fed into the miner timing and the speed estimate.
+# Run one (B_doc, T) mine setting per job via env vars. The GATE setting is 32k/T=3;
+# only run the others if it clears:
+#     FG_B_DOC=32000  FG_T=3     <- gate
+#     FG_B_DOC=100000 FG_T=3
+#     FG_B_DOC=32000  FG_T=5
+# The trainer timing (t_train_step) is independent of B_doc/T, so it is run ONCE here
+# and its seconds_per_train_step is fed into the miner timing and the speed estimate.
+#
+# NOTE: FG_MAX_QUERIES must cross at least TWO maintenance thresholds (ordinarily
+# >= 12800 = 2 * 100 * 64) or per-interval maintenance cost is a single sample and
+# t_mine_round extrapolation is flagged unreliable. Blank = full mixture (best).
 #
 # Outputs (JSON + console): analysis/async_fast_grass_timing/
 
@@ -52,36 +63,48 @@ export CC=gcc
 CONTAINER="/scratch/${USER}/containers/pytorch_2.1.sif"
 
 # --- Timing Knobs (override via env vars before sbatch) ---
-FG_B_DOC="${FG_B_DOC:-32000}"                 # cache size H (--B_doc)
-FG_L="${FG_L:-64}"                            # MCDP lazy top-L (--L)
-FG_T="${FG_T:-3}"                             # MCDP dropout passes (--T)
-FG_UNCERTAINTY="${FG_UNCERTAINTY:-mcdp}"      # mcdp (default) | ema
+FG_B_DOC="${FG_B_DOC:-32000}"                 # cache size H (--B_doc); gate = 32000
+FG_T="${FG_T:-3}"                             # cached MC passes, doc AND query (--T)
+FG_LAMBDA="${FG_LAMBDA:-}"                    # g = s_hat + lambda*sigma (async default 0.5)
+FG_SOURCE_CKPT_STEP="${FG_SOURCE_CKPT_STEP:-}"  # model time for the round: cache age, rho and
+                                              # last_refreshed_step all use it. Blank =
+                                              # steps_per_epoch. NEVER 0 (every slot would
+                                              # have age 0 and refresh work is under-measured).
+FG_CHUNK_SIZE="${FG_CHUNK_SIZE:-}"            # chunk Q x Z_mc over cache slots (blank = no chunking)
+# config.yaml holds the SEQUENTIAL maintenance defaults (rho_end 0.10, max_age_epochs 4).
+# The miner timing applies the ASYNC doc defaults (0.25 / 2) unless overridden here —
+# max_age_epochs 4->2 halves the age threshold and materially raises refresh work.
+FG_RHO_START="${FG_RHO_START:-}"              # blank = async default 0.50
+FG_RHO_END="${FG_RHO_END:-}"                  # blank = async default 0.25
+FG_MAX_AGE_EPOCHS="${FG_MAX_AGE_EPOCHS:-}"    # blank = async default 2
 FG_TRAIN_STEPS="${FG_TRAIN_STEPS:-500}"       # timed trainer steps (doc: 500-1000)
 FG_TRAIN_WARMUP="${FG_TRAIN_WARMUP:-20}"      # untimed trainer warmup steps
-FG_MAX_QUERIES="${FG_MAX_QUERIES:-}"          # subset miner mixture (blank = full)
+FG_MAX_QUERIES="${FG_MAX_QUERIES:-}"          # subset miner mixture (blank = full; if set,
+                                              # use >= 12800 to cross 2 maintenance intervals)
 FG_SAFETY_MARGIN="${FG_SAFETY_MARGIN:-1.2}"   # async cadence margin (doc: 1.1-1.25)
 FG_SKIP_TRAIN="${FG_SKIP_TRAIN:-}"            # set to skip trainer timing (mine only)
 FG_TRAIN_TIMING_JSON="${FG_TRAIN_TIMING_JSON:-}"  # explicit train_timing_*.json for the
                                               # miner's seconds_per_train_step. Set this
                                               # with FG_SKIP_TRAIN=1 so the miner reads the
                                               # RIGHT trainer run, not the newest unrelated one.
-FG_ROUND_SPAN="${FG_ROUND_SPAN:-}"            # override round_training_span_steps (--round_training_span_steps)
 FG_WRITE_JSONL="${FG_WRITE_JSONL:-}"          # set to fold JSONL round-write into t_mine_round
 
-# Speed-estimate + quality-probe knobs
+# Speed-estimate + signal-probe knobs
 FG_RUN_TESTS="${FG_RUN_TESTS:-1}"             # [1/5] CPU correctness gate (blank = skip)
 FG_NUM_EPOCHS="${FG_NUM_EPOCHS:-3}"           # planned training epochs (speed estimate)
-FG_CKPT_WRITE="${FG_CKPT_WRITE:-}"            # checkpoint write seconds (async handoff I/O); blank = excluded
+FG_CKPT_WRITE="${FG_CKPT_WRITE:-}"            # override checkpoint write seconds; blank =
+                                              # use the value [2/5] measured
 FG_MIN_SPEEDUP="${FG_MIN_SPEEDUP:-1.3}"       # acceptance threshold for expected speedup
-FG_QUALITY_PROBE="${FG_QUALITY_PROBE:-}"      # set to run [5/5] real quality probe (needs a checkpoint)
-FG_SEQ_CKPT="${FG_SEQ_CKPT:-}"                # quality probe: current-model dir (blank = base model)
-FG_ASYNC_CKPT="${FG_ASYNC_CKPT:-}"            # quality probe: frozen/stale model dir (blank = base+noise)
-FG_STALENESS_NOISE="${FG_STALENESS_NOISE:-0.0}"  # quality probe: weight noise if no async ckpt
+FG_GPU_CAPACITY="${FG_GPU_CAPACITY:-80e9}"    # miner GPU bytes for the memory gate (A100 80GB)
+FG_MAX_MEM_FRAC="${FG_MAX_MEM_FRAC:-0.85}"    # memory gate: peak reserved <= this fraction
+FG_SIGNAL_PROBE="${FG_SIGNAL_PROBE:-}"        # set to run [5/5] real signal probe (REPORT-ONLY)
+FG_PROBE_SEEDS="${FG_PROBE_SEEDS:-5}"         # signal probe: MC draws (signal vs noise)
+FG_PROBE_QUERIES="${FG_PROBE_QUERIES:-256}"   # signal probe: query sample size
 
 mkdir -p logs analysis/async_fast_grass_timing
 
-echo "⏱️  Fast-GRASS Phase-0 timing calibration"
-echo "   B_doc=${FG_B_DOC} | L=${FG_L} | T=${FG_T} | UNC=${FG_UNCERTAINTY} | "\
+echo "⏱️  Fast-GRASS Phase-0 timing calibration (cached-MCDP)"
+echo "   B_doc=${FG_B_DOC} | T=${FG_T} | lambda=${FG_LAMBDA:-config} | "\
 "train_steps=${FG_TRAIN_STEPS} | max_queries=${FG_MAX_QUERIES:-full} | margin=${FG_SAFETY_MARGIN}"
 
 # --- 1. CPU correctness gate (fail-fast before any GPU work) ---
@@ -94,6 +117,8 @@ if [ -n "${FG_RUN_TESTS}" ]; then
             set -e
             python -u scripts/async_fast_grass_handoff_test.py
             python -u scripts/async_fast_grass_cache_semantics_test.py
+            python -u scripts/fast_grass_test.py
+            python -u scripts/fast_grass_mine_timing.py --synthetic
             python -u scripts/async_fast_grass_quality_probe.py --synthetic
         '
     TEST_EXIT=$?
@@ -133,13 +158,16 @@ singularity exec --nv \
     ${CONTAINER} \
     python -u scripts/fast_grass_mine_timing.py \
         --B_doc ${FG_B_DOC} \
-        --L ${FG_L} \
         --T ${FG_T} \
-        --uncertainty ${FG_UNCERTAINTY} \
         --safety_margin ${FG_SAFETY_MARGIN} \
+        ${FG_LAMBDA:+--lambda_val $FG_LAMBDA} \
+        ${FG_SOURCE_CKPT_STEP:+--source_checkpoint_step $FG_SOURCE_CKPT_STEP} \
+        ${FG_CHUNK_SIZE:+--chunk_size $FG_CHUNK_SIZE} \
+        ${FG_RHO_START:+--rho_start $FG_RHO_START} \
+        ${FG_RHO_END:+--rho_end $FG_RHO_END} \
+        ${FG_MAX_AGE_EPOCHS:+--max_age_epochs $FG_MAX_AGE_EPOCHS} \
         ${FG_MAX_QUERIES:+--max_queries $FG_MAX_QUERIES} \
         ${FG_TRAIN_TIMING_JSON:+--train_timing_json $FG_TRAIN_TIMING_JSON} \
-        ${FG_ROUND_SPAN:+--round_training_span_steps $FG_ROUND_SPAN} \
         ${FG_WRITE_JSONL:+--write_jsonl_timing}
 MINE_EXIT=$?
 
@@ -159,27 +187,30 @@ singularity exec \
         --num_epochs ${FG_NUM_EPOCHS} \
         --safety_margin ${FG_SAFETY_MARGIN} \
         --min_speedup ${FG_MIN_SPEEDUP} \
+        --gpu_capacity_bytes ${FG_GPU_CAPACITY} \
+        --max_mem_fraction ${FG_MAX_MEM_FRAC} \
         ${FG_TRAIN_TIMING_JSON:+--train_timing_json $FG_TRAIN_TIMING_JSON} \
         ${FG_CKPT_WRITE:+--checkpoint_write_time $FG_CKPT_WRITE}
 EST_EXIT=$?
 [ $EST_EXIT -ne 0 ] && echo "⚠️  speed estimate exited $EST_EXIT (analysis step; timing JSONs are still valid)"
 
-# --- 5. Real quality probe (optional; needs a checkpoint) ---
-if [ -n "${FG_QUALITY_PROBE}" ]; then
-    echo "--- [5/5] real quality probe (frozen vs current mining) ---"
+# --- 5. Cached-MCDP signal probe (optional; REPORT-ONLY, never gates the build) ---
+if [ -n "${FG_SIGNAL_PROBE}" ]; then
+    echo "--- [5/5] cached-MCDP signal probe (lambda=0 vs lambda>0) ---"
+    echo "    REPORT-ONLY: non-degeneracy diagnostic on a frozen base model."
+    echo "    It supports NO Recall/NDCG claim and does not gate the build."
     singularity exec --nv \
         --bind /scratch/${USER}:/scratch/${USER} \
         --bind /home/${USER}:/home/${USER} \
         ${CONTAINER} \
         python -u scripts/async_fast_grass_quality_probe.py --real \
-            --B_doc ${FG_B_DOC} --L ${FG_L} --T ${FG_T} \
-            --staleness_noise ${FG_STALENESS_NOISE} \
-            ${FG_MAX_QUERIES:+--max_queries $FG_MAX_QUERIES} \
-            ${FG_SEQ_CKPT:+--seq_checkpoint $FG_SEQ_CKPT} \
-            ${FG_ASYNC_CKPT:+--async_checkpoint $FG_ASYNC_CKPT}
-    echo "   quality probe exited $?"
+            --B_doc ${FG_B_DOC} --T ${FG_T} \
+            --seeds ${FG_PROBE_SEEDS} \
+            --max_queries ${FG_PROBE_QUERIES} \
+            ${FG_LAMBDA:+--lambda_val $FG_LAMBDA}
+    echo "   signal probe exited $? (non-gating)"
 else
-    echo "--- [5/5] quality probe SKIPPED (set FG_QUALITY_PROBE=1 to enable) ---"
+    echo "--- [5/5] signal probe SKIPPED (set FG_SIGNAL_PROBE=1 to enable) ---"
 fi
 
 echo "✅ Async feasibility gate completed"

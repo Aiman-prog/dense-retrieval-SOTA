@@ -14,13 +14,19 @@ quantity is printed so the assumptions are auditable. The model:
 
   SEQUENTIAL (mine inline, per batch, every epoch):
     seq_wall = total_steps * t_train_step          # all training steps
-             + num_epochs  * mining_only           # re-mine the mixture each epoch
-             + n_maint     * maint_time            # amortized cache maintenance
+             + num_epochs  * t_mine_round          # re-mine the mixture each epoch
+
+    t_mine_round ALREADY contains every periodic in-round maintenance interval,
+    so there is NO separate maintenance term here. `cache_maintenance_time` from
+    the miner JSON is a diagnostic breakdown only — adding it again (e.g.
+    multiplied by num_maintenance_intervals) double-counts maintenance and
+    inflates the sequential baseline, which would flatter async.
 
   ASYNC (miner on GPU 1 overlaps training on GPU 0):
     training never blocks once the initial round exists; a slow miner costs
-    staleness (data_age_steps), NOT wall time. So:
-    async_wall = t_mine_round                      # initial round before step 0
+    staleness (data_age_steps), NOT wall time. But startup is NOT free: the Z_mc
+    cache must be built and the first round mined before trainer step 0.
+    async_wall = async_startup                     # t_cache_mc_init + first round
                + total_steps * t_train_step        # continuous training
                + n_ckpt      * checkpoint_write_time
 
@@ -108,7 +114,18 @@ def main():
     ap.add_argument('--mining_only', type=float, default=None,
                     help='full-mixture mine wall excl. maintenance; default from mine JSON')
     ap.add_argument('--maint_time', type=float, default=None,
-                    help='one cache maintenance cycle wall; default from mine JSON')
+                    help='maintenance wall per ROUND (diagnostic breakdown of '
+                         't_mine_round; never re-added to a wall-time total)')
+    ap.add_argument('--t_cache_mc_init', type=float, default=None,
+                    help='Z_mc build time; charged once as async startup. Default '
+                         'from the mine JSON.')
+    ap.add_argument('--peak_mem_reserved_bytes', type=float, default=None,
+                    help='miner peak reserved GPU bytes (default: from mine JSON)')
+    ap.add_argument('--gpu_capacity_bytes', type=float, default=80e9,
+                    help='miner GPU capacity for the memory gate (default 80 GB, A100)')
+    ap.add_argument('--max_mem_fraction', type=float, default=0.85,
+                    help='memory gate: peak reserved must be <= this fraction of '
+                         'GPU capacity (default 0.85)')
     ap.add_argument('--checkpoint_write_time', type=float, default=None,
                     help='seconds to write one trainer checkpoint (async handoff '
                          'overhead). Default: from train JSON if present, else 0 '
@@ -138,11 +155,18 @@ def main():
         print("[speed-estimate] ERROR: timings must be positive.", flush=True)
         return 2
 
+    # diagnostic breakdown of t_mine_round — NEVER re-added to a wall-time total
     mining_only = _pick(args.mining_only,
                         mine.get('mining_wall_full_mixture_extrapolated_s'),
                         default=t_mine_round)
-    maint_time = _pick(args.maint_time, mine.get('cache_maintenance_time_s'),
-                       default=0.0)
+    maint_time = _pick(args.maint_time,
+                       mine.get('cache_maintenance_time_full_round_s'),
+                       mine.get('cache_maintenance_time'), default=0.0)
+    n_maint_intervals = _pick(None, mine.get('num_maintenance_intervals_full_round'),
+                              mine.get('num_maintenance_intervals'), default=0)
+    # async startup: Z_mc build + the initial mined round, both before step 0
+    t_cache_init = _pick(args.t_cache_mc_init, mine.get('t_cache_mc_init'),
+                         default=0.0)
     total_queries = _pick(args.total_queries, mine.get('total_queries_mixture'))
     batch_size = _pick(args.batch_size, mine.get('batch_size'),
                        train.get('batch_size'))
@@ -172,13 +196,12 @@ def main():
 
     # number of checkpoints the trainer writes over the run (async handoff I/O)
     n_ckpt = max(total_steps // recommended_cadence, 1)
-    # sequential maintenance count (amortized, every cache_update_interval steps)
-    n_maint_seq = max(total_steps // max(cache_update_interval, 1), 1)
 
     # --- wall-time model ---
-    seq_wall_analytic = (total_steps * t_train
-                         + num_epochs * mining_only
-                         + n_maint_seq * maint_time)
+    # t_mine_round already includes every in-round maintenance interval, so the
+    # sequential baseline is training + one full re-mine per epoch. Adding a
+    # separate maintenance term here would double-count it.
+    seq_wall_analytic = total_steps * t_train + num_epochs * t_mine_round
     seq_wall = seq_wall_analytic
     seq_source = 'analytic'
     if args.sequential_log:
@@ -198,10 +221,20 @@ def main():
             print(f"[speed-estimate] WARNING: --sequential_log {p} not found; "
                   "using analytic sequential estimate.", flush=True)
 
-    async_wall = (t_mine_round                      # initial round before step 0
+    # async STARTUP is not free: the Z_mc cache is built and the first round mined
+    # before trainer step 0 can consume anything.
+    async_startup = t_cache_init + t_mine_round
+    async_wall = (async_startup                     # cache init + initial round
                   + total_steps * t_train           # continuous, non-blocking training
                   + n_ckpt * ckpt_write)            # checkpoint / handoff overhead
     speedup = seq_wall / async_wall if async_wall > 0 else 0.0
+
+    # --- memory gate (feasibility is time AND memory) ---
+    peak_reserved = _pick(args.peak_mem_reserved_bytes,
+                          mine.get('peak_mem_reserved_bytes'))
+    gpu_capacity = args.gpu_capacity_bytes
+    mem_frac = (peak_reserved / gpu_capacity) if (peak_reserved and gpu_capacity) else None
+    mem_gate_ok = (mem_frac <= args.max_mem_fraction) if mem_frac is not None else None
 
     # --- warnings ---
     warnings = []
@@ -209,7 +242,7 @@ def main():
         warnings.append(
             f"miner produces only {mining_rounds_per_epoch:.2f} full rounds/epoch "
             f"(< 1): data_age_steps will exceed one epoch and negatives go stale. "
-            f"Lower B_doc/L/T or accept staleness.")
+            f"Lower B_doc/T or accept staleness.")
     if speedup < args.min_speedup:
         warnings.append(
             f"expected speedup {speedup:.2f}x < acceptance threshold "
@@ -220,20 +253,55 @@ def main():
             f"recommended async_mine_every_steps ({recommended_cadence}) exceeds "
             f"steps_per_epoch ({steps_per_epoch}): fewer than one checkpoint per "
             f"epoch feeds the miner.")
+    # impl-details: "Initial practical range: 1000 to 2000, then retune from logs.
+    # Avoid tiny values such as 100 because checkpoints are large."
+    if recommended_cadence < 1000:
+        warnings.append(
+            f"recommended async_mine_every_steps ({recommended_cadence}) is below the "
+            f"documented practical range 1000-2000. Checkpoints are large; a tiny "
+            f"cadence (e.g. 100) burns wall time on checkpoint I/O. Consider "
+            f"pinning async_mine_every_steps=1000.")
+    elif recommended_cadence > 2000:
+        warnings.append(
+            f"recommended async_mine_every_steps ({recommended_cadence}) exceeds the "
+            f"documented practical range 1000-2000: the miner is slow relative to "
+            f"the trainer, so mined data will be stale on arrival.")
     if ckpt_write_excluded:
         warnings.append(
             "checkpoint_write_time not in trainer JSON and not passed; async_wall "
-            "EXCLUDES checkpoint I/O (optimistic). Pass --checkpoint_write_time.")
+            "EXCLUDES checkpoint I/O (optimistic). Run fast_grass_train_timing.py "
+            "without --no_checkpoint_probe, or pass --checkpoint_write_time.")
+    if mem_gate_ok is False:
+        warnings.append(
+            f"MEMORY GATE FAILED: peak reserved {peak_reserved/1e9:.2f} GB is "
+            f"{mem_frac:.0%} of the {gpu_capacity/1e9:.0f} GB miner GPU (limit "
+            f"{args.max_mem_fraction:.0%}). Lower B_doc or T.")
+    elif mem_gate_ok is None:
+        warnings.append(
+            "peak reserved memory unknown (miner JSON has none and "
+            "--peak_mem_reserved_bytes not passed): the memory gate is UNCHECKED.")
+    if mine.get('mcdp_doc_encoder_calls_mining') not in (0, None):
+        warnings.append(
+            f"ARCHITECTURE GATE FAILED: miner reported "
+            f"{mine['mcdp_doc_encoder_calls_mining']} document encoder calls during "
+            f"mining; cached-MCDP requires 0 (regression to lazy fresh-MCDP).")
+    if mine.get('maintenance_extrapolation_warning'):
+        warnings.append(f"miner JSON: {mine['maintenance_extrapolation_warning']}")
 
     record = {
         'kind': 'async_speed_estimate',
         'inputs': {
             'seconds_per_train_step': t_train,
             't_mine_round': t_mine_round,
+            't_cache_mc_init': t_cache_init,
+            # diagnostic breakdown of t_mine_round only — not summed into any wall
             'mining_only_s': mining_only,
             'maint_time_s': maint_time,
+            'num_maintenance_intervals_per_round': n_maint_intervals,
             'checkpoint_write_time_s': ckpt_write,
             'checkpoint_write_time_excluded': ckpt_write_excluded,
+            'peak_mem_reserved_bytes': peak_reserved,
+            'gpu_capacity_bytes': gpu_capacity,
             'total_queries_mixture': total_queries,
             'batch_size': batch_size,
             'num_epochs': num_epochs,
@@ -249,7 +317,16 @@ def main():
             'mining_rounds_per_epoch': mining_rounds_per_epoch,
             'recommended_async_mine_every_steps': recommended_cadence,
             'n_checkpoints_over_run': n_ckpt,
-            'n_maintenance_seq': n_maint_seq,
+            'async_startup_s': async_startup,
+            'peak_mem_fraction_of_gpu': mem_frac,
+        },
+        'gates': {
+            'architecture_zero_mining_doc_encodes': (
+                mine.get('mcdp_doc_encoder_calls_mining') == 0
+                if 'mcdp_doc_encoder_calls_mining' in mine else None),
+            'memory_within_budget': mem_gate_ok,
+            'rounds_per_epoch_at_least_one': mining_rounds_per_epoch >= 1.0,
+            'speedup_meets_threshold': speedup >= args.min_speedup,
         },
         'estimated_sequential_wall_s': seq_wall,
         'estimated_sequential_wall_source': seq_source,
@@ -282,9 +359,12 @@ def _print_report(r):
     print("\n" + "=" * 68)
     print("  ASYNC FAST-GRASS — EXPECTED SPEEDUP & CADENCE ESTIMATE")
     print("=" * 68)
+    g = r['gates']
     print(f"  seconds_per_train_step : {i['seconds_per_train_step']:.4f} s")
     print(f"  t_mine_round           : {i['t_mine_round']:.1f} s  "
-          f"(mine {i['mining_only_s']:.1f} + maint {i['maint_time_s']:.1f})")
+          f"(breakdown: mine {i['mining_only_s']:.1f} + maint {i['maint_time_s']:.1f} "
+          f"over {i['num_maintenance_intervals_per_round']} intervals)")
+    print(f"  t_cache_mc_init        : {i['t_cache_mc_init']:.1f} s (once, startup)")
     print(f"  mixture / batch / epochs: {i['total_queries_mixture']:,} / "
           f"{i['batch_size']} / {i['num_epochs']}")
     print(f"  steps_per_epoch        : {d['steps_per_epoch']:,}  "
@@ -298,13 +378,31 @@ def _print_report(r):
           f"@ {i['checkpoint_write_time_s']:.1f}s each"
           f"{'  (EXCLUDED)' if i['checkpoint_write_time_excluded'] else ''}")
     print("-" * 68)
-    print(f"  estimated SEQUENTIAL wall : {_hms(r['estimated_sequential_wall_s'])} "
+    print(f"  SEQUENTIAL wall : {_hms(r['estimated_sequential_wall_s'])} "
           f"({r['estimated_sequential_wall_s']:,.0f} s, {r['estimated_sequential_wall_source']})")
-    print(f"  estimated ASYNC wall      : {_hms(r['estimated_async_wall_s'])} "
+    print(f"    = total_steps * t_train + num_epochs * t_mine_round "
+          f"(maintenance already inside t_mine_round)")
+    print(f"  ASYNC wall      : {_hms(r['estimated_async_wall_s'])} "
           f"({r['estimated_async_wall_s']:,.0f} s)")
-    print(f"  EXPECTED SPEEDUP          : {r['expected_speedup']:.2f}x "
+    print(f"    = startup {_hms(d['async_startup_s'])} + training + checkpoint I/O")
+    print(f"  EXPECTED SPEEDUP: {r['expected_speedup']:.2f}x "
           f"(threshold {r['min_speedup_threshold']}x → "
           f"{'MEETS' if r['meets_speedup_threshold'] else 'BELOW'})")
+    print("-" * 68)
+    print("  GO / NO-GO")
+    _mark = lambda v: 'PASS' if v is True else ('FAIL' if v is False else 'UNKNOWN')
+    print(f"    [hard] mining doc encodes == 0 : "
+          f"{_mark(g['architecture_zero_mining_doc_encodes'])}")
+    mf = d['peak_mem_fraction_of_gpu']
+    print(f"    [hard] memory within budget    : {_mark(g['memory_within_budget'])}"
+          f"{f'  ({mf:.0%} of GPU)' if mf is not None else ''}")
+    print(f"    [soft] >= 1 round per epoch    : "
+          f"{_mark(g['rounds_per_epoch_at_least_one'])} "
+          f"({d['mining_rounds_per_epoch']:.2f})")
+    print(f"    [soft] speedup >= threshold    : "
+          f"{_mark(g['speedup_meets_threshold'])} ({r['expected_speedup']:.2f}x)")
+    print("    (correctness gates — population std, lambda=0 ranking, qrel leakage —")
+    print("     are enforced by scripts/async_fast_grass_cache_semantics_test.py)")
     print("-" * 68)
     if r['warnings']:
         print("  WARNINGS:")

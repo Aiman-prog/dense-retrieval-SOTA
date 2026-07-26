@@ -153,6 +153,46 @@ def _sync(device):
         torch.cuda.synchronize()
 
 
+def _peak_mem(device):
+    """(allocated, reserved) peak bytes, or (None, None) off CUDA."""
+    if device.type != 'cuda':
+        return None, None
+    return (int(torch.cuda.max_memory_allocated()),
+            int(torch.cuda.max_memory_reserved()))
+
+
+def _time_checkpoint_write(student, tokenizer, optimizer, scheduler, out_dir):
+    """Time one trainer checkpoint write, ANCE-style with optimizer.pt LAST.
+
+    The async trainer pays this every ``async_mine_every_steps``, and the speed
+    estimate charges ``n_checkpoints * checkpoint_write_time`` against async wall
+    time. Without a measured value the estimate has to exclude checkpoint I/O and
+    flag itself optimistic.
+
+    ``optimizer.pt`` is written last because it is the miner's validity flag
+    (``is_valid_checkpoint``): a checkpoint is only readable once it exists.
+    """
+    import shutil
+    ckpt = Path(out_dir) / "checkpoint-timing-probe"
+    if ckpt.exists():
+        shutil.rmtree(ckpt)
+    ckpt.mkdir(parents=True, exist_ok=True)
+    t0 = time.perf_counter()
+    try:
+        model = getattr(student, '_orig_mod', student)   # unwrap torch.compile
+        model.save_pretrained(str(ckpt))
+        tokenizer.save_pretrained(str(ckpt))
+        torch.save(scheduler.state_dict(), ckpt / "scheduler.pt")
+        torch.save(optimizer.state_dict(), ckpt / "optimizer.pt")   # LAST
+        dt = time.perf_counter() - t0
+    except Exception as e:
+        print(f"[train-timing] checkpoint-write probe failed ({e})", flush=True)
+        return None, None
+    size = sum(f.stat().st_size for f in ckpt.rglob('*') if f.is_file())
+    shutil.rmtree(ckpt, ignore_errors=True)
+    return dt, int(size)
+
+
 def _percentiles(times):
     a = np.asarray(times, dtype=np.float64)
     return {
@@ -306,6 +346,18 @@ def run_real(args):
     stats = _percentiles(times)
     spts = stats['seconds_per_train_step_median']
     steps_per_hour = 3600.0 / spts if spts > 0 else 0.0
+    peak_alloc, peak_reserved = _peak_mem(device)
+
+    # async handoff I/O: the trainer writes a checkpoint every
+    # async_mine_every_steps, and the miner cannot start a round without one.
+    ckpt_write_time, ckpt_bytes = (None, None)
+    if not args.no_checkpoint_probe:
+        ckpt_write_time, ckpt_bytes = _time_checkpoint_write(
+            student, tokenizer, optimizer, scheduler, args.checkpoint_probe_dir
+            or (OUT_DIR / 'ckpt_probe'))
+        if ckpt_write_time is not None:
+            print(f"[train-timing] checkpoint write: {ckpt_write_time:.2f} s "
+                  f"({ckpt_bytes/1e9:.2f} GB, optimizer.pt last)", flush=True)
 
     record = {
         'kind': 'train_timing',
@@ -313,6 +365,12 @@ def run_real(args):
         'device': str(device),
         'base_model': base_model,
         'batch_size': batch_size,
+        # async handoff cadence knobs consumed by the speed estimate
+        'checkpoint_write_time': ckpt_write_time,
+        'checkpoint_bytes': ckpt_bytes,
+        'ready_poll_steps': fg_cfg.get('logging_steps', 100),
+        'peak_mem_allocated_bytes': peak_alloc,
+        'peak_mem_reserved_bytes': peak_reserved,
         'm': m,
         'train_group_size': 1 + m,
         'query_max_len': q_max,
@@ -343,6 +401,15 @@ def run_real(args):
           f"p90 {stats['seconds_per_train_step_p90']:.4f} | "
           f"std {stats['seconds_per_train_step_std']:.4f}")
     print(f"  steps_per_hour       : {steps_per_hour:,.0f}")
+    if ckpt_write_time is not None:
+        print(f"  checkpoint write     : {ckpt_write_time:.2f} s "
+              f"({ckpt_bytes/1e9:.2f} GB) — async handoff I/O")
+    else:
+        print("  checkpoint write     : NOT MEASURED (async wall will exclude "
+              "checkpoint I/O and be flagged optimistic)")
+    if peak_reserved:
+        print(f"  peak GPU memory      : {peak_alloc/1e9:.2f} GB allocated | "
+              f"{peak_reserved/1e9:.2f} GB reserved")
     print("=" * 66)
 
     tag = f"bs{batch_size}_m{m}"
@@ -435,6 +502,12 @@ def main():
                     help='subset the mixture (tiny real sanity run, e.g. 128)')
     ap.add_argument('--no_compile', action='store_true',
                     help='disable torch.compile (debug / non-Triton env)')
+    ap.add_argument('--no_checkpoint_probe', action='store_true',
+                    help='skip the one-off checkpoint-write timing probe (the '
+                         'speed estimate then excludes async checkpoint I/O)')
+    ap.add_argument('--checkpoint_probe_dir', type=str, default=None,
+                    help='where to write the throwaway probe checkpoint '
+                         '(default: analysis/async_fast_grass_timing/ckpt_probe)')
     ap.add_argument('--premined_data_dir', type=str, default=None,
                     help='dir of real mined *.jsonl (neg_docids / negative_passages) '
                          'to time on instead of uniform-random stand-in negatives; '

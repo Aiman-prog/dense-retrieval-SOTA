@@ -37,6 +37,25 @@ class GradMockModel(nn.Module):
         return _MockOutput(last_hidden_state=self.emb(input_ids))
 
 
+class DropoutMockModel(nn.Module):
+    """GradMockModel + a real ``nn.Dropout``, so MC passes genuinely differ.
+
+    Used by the async cached-MCDP tests: ``dropout_only()`` must be able to flip
+    this module's dropout on while everything else stays in eval, and ``T``
+    encodes of the same text must produce ``T`` DIFFERENT states (proving the
+    initial cache holds real stochastic samples, not a repeated deterministic
+    embedding).
+    """
+    def __init__(self, vocab=1000, hidden=8, p=0.5):
+        super().__init__()
+        self.emb = nn.Embedding(vocab, hidden)
+        self.drop = nn.Dropout(p)
+        self.config = type('C', (), {'hidden_size': hidden})()
+
+    def forward(self, input_ids=None, attention_mask=None, **kwargs):
+        return _MockOutput(last_hidden_state=self.drop(self.emb(input_ids)))
+
+
 class _BatchEncoding(dict):
     def to(self, device):
         return _BatchEncoding({k: v.to(device) for k, v in self.items()})
@@ -55,7 +74,7 @@ class MockTokenizer:
 
 # ---- fixtures --------------------------------------------------------------
 
-def make_cfg(**over):
+def make_cfg(async_defaults=False, **over):
     cfg = dict(
         B_doc=10, m=1, selection_mode='topk', lambda_val=1.0, beta=5.0, L=1024,
         uncertainty='ema', ema_alpha=0.999,
@@ -66,6 +85,15 @@ def make_cfg(**over):
         recent_query_reservoir_size=8, reentry_top_k=5, R_size_factor=0.5,
         cache_init_seed=42, steps_per_epoch=100, total_steps=1000,
         passage_max_len=128, mc_batch_size=64)
+    if async_defaults:
+        # async_fast_grass_implementation_details.md, "Current Async Defaults".
+        # These deliberately differ from the sequential config.yaml values
+        # (lambda 1.0, rho_end 0.10, max_age_epochs 4, B_doc 100k).
+        cfg.update(uncertainty='cached_mcdp', lambda_val=0.5, T=3,
+                   mc_dropout_p=0.3, B_doc=32_000, rho_start=0.50, rho_end=0.25,
+                   max_age_epochs=2, selection_mode='topk', m=1,
+                   cache_update_interval=100, batch_size=64)
+        cfg.pop('L', None)   # cached-MCDP scores all of H; L is not a knob
     cfg.update(over)
     return cfg
 
@@ -83,6 +111,14 @@ def _rand_unit(n, dim, seed):
     t = torch.from_numpy(np.random.default_rng(seed).standard_normal((n, dim))
                          .astype('float32'))
     return torch.nn.functional.normalize(t, dim=-1)
+
+
+def make_z_mc(T, n, dim, seed=0):
+    """Synthetic cached MC bank ``[T, n, dim]`` of L2-normalized states.
+
+    Each pass is drawn independently, mimicking ``T`` genuine dropout samples.
+    """
+    return torch.stack([_rand_unit(n, dim, seed + t) for t in range(T)], dim=0)
 
 
 def _run(name, fn):

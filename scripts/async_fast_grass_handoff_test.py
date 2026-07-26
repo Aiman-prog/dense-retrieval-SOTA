@@ -18,6 +18,23 @@ Covered:
   - miner selects the newest VALID checkpoint not already mined (skips invalid/older).
   - async_gap_steps / data_age_steps arithmetic.
 
+DEFERRED TO PHASE 1 (audited, deliberately not covered here — none of these change
+a Phase-0 timing number, and several can only be tested against a real miner):
+  - publish ORDER/atomicity: write work_N/* -> os.replace(work_N/training_data,
+    training_data_N) -> os.replace cache_state -> os.replace mining_meta ->
+    write ready_N.tmp -> os.replace(ready_N.tmp, ready_N). ``_publish_round``
+    below writes straight to the final paths, so it exercises the ready-marker
+    contract but NOT the crash-safety of publication.
+  - restart resolution: load the cache state of the newest COMMITTED ready round,
+    never merely the highest-numbered cache_state_N.pt (a crash can leave
+    unpublished final-path artifacts with no ready marker).
+  - miner must not interrupt a round when a newer checkpoint appears mid-round;
+    source_checkpoint_step stays pinned until the round is published.
+  - ready_poll_steps (= logging_steps) is the ready-check cadence and is decoupled
+    from the async_mine_every_steps checkpoint-save cadence.
+  - rounds_consumed / rounds_skipped running counters.
+  - dataloader swap without optimizer/scheduler reset; global_step continuous.
+
 Run: python scripts/async_fast_grass_handoff_test.py
 """
 import sys
