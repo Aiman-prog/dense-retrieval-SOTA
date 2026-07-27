@@ -355,10 +355,25 @@ def main():
     ap.add_argument('--allow_single_gpu', action='store_true',
                     help='run trainer and miner on ONE GPU. They then serialise and '
                          'contend for memory — for debugging only.')
+    ap.add_argument('--lambda_val', type=float, default=None,
+                    help='override training.async_fast_grass.lambda_val for the '
+                         'lambda sweep. Pinned at submit time so a queued job cannot '
+                         'pick up whatever value config.yaml holds when it starts.')
+    ap.add_argument('--run_suffix', default=None,
+                    help='isolate this run: appends to the model dir name AND the '
+                         'async handoff root, so concurrent sweep arms cannot '
+                         'overwrite each other\'s checkpoints or mined rounds.')
     args = ap.parse_args()
 
     config = load_config()
     ctx = get_training_context(args.recipe)
+    # Both overrides land in ctx['args'] because build_async_cfg starts from
+    # dict(ctx['args']) — injecting here keeps the initial round, the miner cfg and
+    # the model dir consistent instead of patching three call sites.
+    if args.lambda_val is not None:
+        ctx['args']['lambda_val'] = float(args.lambda_val)
+    if args.run_suffix:
+        ctx['args']['model_name'] = f"{ctx['args']['model_name']}_{args.run_suffix}"
     set_seed(config.get('seed', 42))
 
     from data.preprocessor import run_setup
@@ -386,7 +401,8 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     _log(f"{n_gpus} GPU(s) | trainer -> GPU {trainer_gpu} | miner -> GPU {miner_gpu}")
 
-    root = get_path("temp_fast_grass") / "async_mining"
+    root_name = "async_mining" + (f"_{args.run_suffix}" if args.run_suffix else "")
+    root = get_path("temp_fast_grass") / root_name
     root.mkdir(parents=True, exist_ok=True)
 
     # Phase 1 has no trainer resume: the trainer always starts at global_step 0.
@@ -452,6 +468,10 @@ def main():
         '--qrels_file', str(qrels_file),
         '--recipe', args.recipe,
     ]
+    if args.lambda_val is not None:
+        # The miner rebuilds cfg from the recipe, so the override must travel with
+        # it — lambda is a MINING parameter and the trainer never reads it.
+        miner_cmd += ['--lambda_val', repr(float(args.lambda_val))]
     if args.max_rounds:
         miner_cmd += ['--max_rounds', str(args.max_rounds)]
     if args.debug:

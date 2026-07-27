@@ -278,10 +278,17 @@ def main():
     ap.add_argument('--max_rounds', type=int, default=None,
                     help='stop after N rounds (smoke/debug); default = run forever')
     ap.add_argument('--debug', action='store_true', help='512-item mixture')
+    ap.add_argument('--lambda_val', type=float, default=None,
+                    help='override training.async_fast_grass.lambda_val; passed '
+                         'down by the orchestrator for the lambda sweep')
     args = ap.parse_args()
 
     config = load_config()
     ctx = get_training_context(args.recipe)
+    # build_async_cfg copies dict(ctx['args']), so injecting here reaches every
+    # score_cached_mcdp call for the life of the miner
+    if args.lambda_val is not None:
+        ctx['args']['lambda_val'] = float(args.lambda_val)
     set_seed(config.get('seed', 42))
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     root = Path(args.async_dir)

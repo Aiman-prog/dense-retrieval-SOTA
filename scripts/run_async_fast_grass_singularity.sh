@@ -56,11 +56,23 @@ ASYNC_FG_DEBUG="${ASYNC_FG_DEBUG:-}"            # set for a 512-item smoke run
 ASYNC_FG_MAX_ROUNDS="${ASYNC_FG_MAX_ROUNDS:-}"  # stop the miner after N rounds
 ASYNC_FG_NO_EVAL="${ASYNC_FG_NO_EVAL:-}"        # skip the BRIGHT eval at the end
 ASYNC_FG_NO_COMPILE="${ASYNC_FG_NO_COMPILE:-}"  # disable torch.compile
+ASYNC_FG_LAMBDA="${ASYNC_FG_LAMBDA:-}"          # override lambda_val (sweep arm)
+ASYNC_FG_SUFFIX="${ASYNC_FG_SUFFIX:-}"          # isolate model dir + handoff root
+ASYNC_FG_FRESH="${ASYNC_FG_FRESH:-}"            # wipe the handoff root before starting
+
+# LAMBDA SWEEP: every arm MUST set both ASYNC_FG_LAMBDA and a distinct
+# ASYNC_FG_SUFFIX. Without the suffix all arms share one model dir and one handoff
+# root, so they overwrite each other's checkpoints and mined rounds. The lambda is
+# read here at SUBMIT-EXPANSION time and pinned onto the command line, so editing
+# config.yaml while jobs sit in the queue cannot change what a queued arm runs.
+#   ASYNC_FG_LAMBDA=0   ASYNC_FG_SUFFIX=lam0   sbatch scripts/run_async_fast_grass_singularity.sh
+#   ASYNC_FG_LAMBDA=0.5 ASYNC_FG_SUFFIX=lam05  sbatch scripts/run_async_fast_grass_singularity.sh
 
 mkdir -p logs
 
 echo "🚀 Async Fast-GRASS (cached-MCDP) — trainer GPU 0 / miner GPU 1"
 echo "   debug=${ASYNC_FG_DEBUG:-off} | max_rounds=${ASYNC_FG_MAX_ROUNDS:-unbounded}"
+echo "   lambda=${ASYNC_FG_LAMBDA:-<config>} | suffix=${ASYNC_FG_SUFFIX:-<none>}"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader || true
 
 # --- 1. CPU correctness gate (fail fast before burning 2 GPUs) ---
@@ -112,7 +124,10 @@ singularity exec --nv \
         ${ASYNC_FG_DEBUG:+--debug} \
         ${ASYNC_FG_MAX_ROUNDS:+--max_rounds $ASYNC_FG_MAX_ROUNDS} \
         ${ASYNC_FG_NO_EVAL:+--no_eval} \
-        ${ASYNC_FG_NO_COMPILE:+--no_compile}
+        ${ASYNC_FG_NO_COMPILE:+--no_compile} \
+        ${ASYNC_FG_LAMBDA:+--lambda_val $ASYNC_FG_LAMBDA} \
+        ${ASYNC_FG_SUFFIX:+--run_suffix $ASYNC_FG_SUFFIX} \
+        ${ASYNC_FG_FRESH:+--fresh}
 RUN_EXIT=$?
 
 echo "=========================================="
