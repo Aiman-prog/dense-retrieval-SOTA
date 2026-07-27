@@ -292,7 +292,7 @@ def run_real(args):
     # --- warmup: one batch (warms cudnn/allocator) ---
     warm_qids = qids[:batch_size]
     if warm_qids:
-        mine_batch_cached_mcdp(cache, Z_mc, student, tokenizer, warm_qids,
+        mine_batch_cached_mcdp(cache, student, tokenizer, warm_qids,
                                qid_to_text, qrels_dict, T, fg_cfg, device,
                                chunk_size=args.chunk_size)
     _sync(device)
@@ -330,7 +330,7 @@ def run_real(args):
         _sync(device)
         mt0 = time.perf_counter()
         rec = maintain_interval_cached_mcdp(
-            cache, Z_mc, student, tokenizer, corpus_lookup, c_ids,
+            cache, student, tokenizer, corpus_lookup, c_ids,
             (q_res, res_qids), source_checkpoint_step, T, fg_cfg, device,
             qrels_dict=qrels_dict)
         _sync(device)
@@ -346,7 +346,7 @@ def run_real(args):
         _sync(device)
         t0 = time.perf_counter()
         mined, slots, q_mc, mstats = mine_batch_cached_mcdp(
-            cache, Z_mc, student, tokenizer, batch_qids, qid_to_text,
+            cache, student, tokenizer, batch_qids, qid_to_text,
             qrels_dict, T, fg_cfg, device, chunk_size=args.chunk_size)
         _sync(device)
         per_batch_time.append(time.perf_counter() - t0)
@@ -688,7 +688,7 @@ def run_synthetic(args):
         H_now = set(cache.docids)
         t0 = time.perf_counter()
         mined, slots, q_mc, mstats = mine_batch_cached_mcdp(
-            cache, Z_mc, student, tok, bq, qid_to_text, qrels_dict, T, cfg,
+            cache, student, tok, bq, qid_to_text, qrels_dict, T, cfg,
             device, chunk_size=args.chunk_size)
         times.append(time.perf_counter() - t0)
         q_proc += len(bq)
@@ -703,7 +703,7 @@ def run_synthetic(args):
             q_res, res_qids = reservoir.get()
             mt0 = time.perf_counter()
             maint_records.append(maintain_interval_cached_mcdp(
-                cache, Z_mc, student, tok, corpus_lookup, c_ids,
+                cache, student, tok, corpus_lookup, c_ids,
                 (q_res, res_qids), source_checkpoint_step, T, cfg, device,
                 qrels_dict=qrels_dict))
             maint_times.append(time.perf_counter() - mt0)
@@ -711,7 +711,7 @@ def run_synthetic(args):
         q_res, res_qids = reservoir.get()
         mt0 = time.perf_counter()
         maint_records.append(maintain_interval_cached_mcdp(
-            cache, Z_mc, student, tok, corpus_lookup, c_ids, (q_res, res_qids),
+            cache, student, tok, corpus_lookup, c_ids, (q_res, res_qids),
             source_checkpoint_step, T, cfg, device, qrels_dict=qrels_dict))
         maint_times.append(time.perf_counter() - mt0)
     round_wall = time.perf_counter() - t0round

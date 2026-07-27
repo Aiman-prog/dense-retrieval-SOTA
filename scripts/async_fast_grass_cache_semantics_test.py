@@ -264,7 +264,7 @@ def test_budget_identical_across_every_interval_of_a_round():
         _force_maintenance_work(cache)
         cache.record_selection(torch.tensor([[5]], device=DEVICE))
         c = maintain_interval_cached_mcdp(
-            cache, Z_mc, student, tok, lookup, c_ids, reservoir, CACHED_STEP,
+            cache, student, tok, lookup, c_ids, reservoir, CACHED_STEP,
             CACHED_T, cfg, DEVICE, qrels_dict={})
         budgets.append(c['maintenance_budget_interval'])
         assert c['maintenance_model_step'] == CACHED_STEP
@@ -301,7 +301,7 @@ def test_utility_folded_before_planning():
     docid_before = cache.docids[slot]
     util_before = float(cache.utility_ema[slot])
 
-    maintain_interval_cached_mcdp(cache, Z_mc, student, tok, lookup, c_ids,
+    maintain_interval_cached_mcdp(cache, student, tok, lookup, c_ids,
                                   reservoir, CACHED_STEP, CACHED_T, cfg, DEVICE,
                                   qrels_dict={})
 
@@ -322,7 +322,7 @@ def test_replacement_candidates_encoded_once_and_reused():
     cache, Z_mc, cfg, c_ids, lookup, student, tok, _ = _mk_cached()
     reservoir = _cached_reservoir(student, tok, cfg)
     _force_maintenance_work(cache)
-    c = maintain_interval_cached_mcdp(cache, Z_mc, student, tok, lookup, c_ids,
+    c = maintain_interval_cached_mcdp(cache, student, tok, lookup, c_ids,
                                       reservoir, CACHED_STEP, CACHED_T, cfg,
                                       DEVICE, qrels_dict={})
     assert c['num_replace'] > 0, "no replacement happened; test is vacuous"
@@ -377,7 +377,7 @@ def test_metadata_totals_aggregate_and_mining_encodes_no_docs():
     per_interval = []
     for _ in range(3):
         mined, _slots, _q, mstats = mine_batch_cached_mcdp(
-            cache, Z_mc, student, tok, qids, qid_to_text, qrels, CACHED_T, cfg,
+            cache, student, tok, qids, qid_to_text, qrels, CACHED_T, cfg,
             DEVICE)
         doc_calls_mining += mstats['mcdp_doc_encoder_calls_mining']
         # negatives come from H and never leak a known positive
@@ -387,7 +387,7 @@ def test_metadata_totals_aggregate_and_mining_encodes_no_docs():
             assert all(d not in qrels[q] for d in negs), "positive leaked"
 
         _force_maintenance_work(cache)
-        c = maintain_interval_cached_mcdp(cache, Z_mc, student, tok, lookup,
+        c = maintain_interval_cached_mcdp(cache, student, tok, lookup,
                                           c_ids, reservoir, CACHED_STEP,
                                           CACHED_T, cfg, DEVICE, qrels_dict=qrels)
         per_interval.append(c)
@@ -406,6 +406,118 @@ def test_metadata_totals_aggregate_and_mining_encodes_no_docs():
         c['maintenance_docs_encoded'] for c in per_interval)
     assert totals['mcdp_docs_encoded_maintenance'] > 0, \
         "maintenance encoded nothing; aggregation test is vacuous"
+
+
+# ---- atomic slot commit / untouched slots (B4, B5) -------------------------
+
+def test_unselected_slots_are_bitwise_unchanged():
+    """Maintenance touches ONLY the slots it planned. Everything else — Z_mc,
+    Z_mean, docid, timestamp — must be bit-for-bit identical afterwards."""
+    cache, Z_mc, cfg, c_ids, lookup, student, tok, _ = _mk_cached()
+    reservoir = _cached_reservoir(student, tok, cfg)
+    _force_maintenance_work(cache)
+
+    before_mc = cache.Z_mc.clone()
+    before_mean = cache.Z_student.clone()
+    before_docids = list(cache.docids)
+    before_steps = cache.last_refreshed_step.clone()
+
+    c = maintain_interval_cached_mcdp(cache, student, tok, lookup, c_ids,
+                                      reservoir, CACHED_STEP, CACHED_T, cfg,
+                                      DEVICE, qrels_dict={})
+    assert c['num_refresh'] + c['num_replace'] > 0, "no maintenance acted; vacuous"
+
+    touched = set(
+        (cache.last_refreshed_step != before_steps).nonzero().flatten().tolist())
+    # replacement also changes docids; fold those in
+    touched |= {i for i in range(cache.B_doc) if cache.docids[i] != before_docids[i]}
+    assert touched, "nothing was touched"
+
+    untouched = [i for i in range(cache.B_doc) if i not in touched]
+    assert untouched, "everything was touched; test is vacuous"
+    for s in untouched:
+        assert torch.equal(cache.Z_mc[:, s, :], before_mc[:, s, :]), \
+            f"slot {s} Z_mc changed but was not scheduled for maintenance"
+        assert torch.equal(cache.Z_student[s], before_mean[s]), \
+            f"slot {s} Z_mean changed but was not scheduled"
+        assert cache.docids[s] == before_docids[s], f"slot {s} docid changed"
+        assert cache.last_refreshed_step[s] == before_steps[s], \
+            f"slot {s} timestamp changed"
+
+
+def test_touched_slot_is_one_atomic_commit():
+    """A touched slot updates docid + ALL T states + Z_mean + timestamp together.
+
+    A reader must never see a new docid paired with old MC embeddings, a partially
+    replaced T bank, or a Z_mean that no longer summarises Z_mc.
+    """
+    cache, Z_mc, cfg, c_ids, lookup, student, tok, _ = _mk_cached()
+    reservoir = _cached_reservoir(student, tok, cfg)
+    _force_maintenance_work(cache)
+    before_mc = cache.Z_mc.clone()
+    before_docids = list(cache.docids)
+
+    c = maintain_interval_cached_mcdp(cache, student, tok, lookup, c_ids,
+                                      reservoir, CACHED_STEP, CACHED_T, cfg,
+                                      DEVICE, qrels_dict={})
+    assert c['num_refresh'] + c['num_replace'] > 0
+
+    touched = (cache.last_refreshed_step == CACHED_STEP).nonzero().flatten().tolist()
+    assert touched, "no slot carries the maintenance timestamp"
+    for s in touched:
+        # every one of the T states moved together (none left stale)
+        for t in range(CACHED_T):
+            assert not torch.equal(cache.Z_mc[t, s, :], before_mc[t, s, :]), \
+                f"slot {s} pass {t} was not re-encoded — partial T bank"
+        # Z_mean is exactly mean_t of the NEW states
+        assert torch.allclose(cache.Z_student[s].float(),
+                              cache.Z_mc[:, s, :].float().mean(dim=0), atol=1e-2), \
+            f"slot {s}: Z_mean does not summarise the new Z_mc"
+        assert int(cache.last_refreshed_step[s]) == CACHED_STEP
+
+    replaced = [i for i in range(cache.B_doc) if cache.docids[i] != before_docids[i]]
+    for s in replaced:
+        assert s in touched, f"slot {s} got a new docid without a new timestamp"
+        assert cache.docid_to_slot[cache.docids[s]] == s, "slot map out of sync"
+    assert len(set(cache.docids)) == cache.B_doc, "docids must stay unique"
+
+
+def test_mining_does_zero_doc_encodes_by_encoder_spy():
+    """Trust the ENCODER, not the reported counter.
+
+    ``mcdp_doc_encoder_calls_mining`` is a hard-coded 0 in the mining stats, so a
+    regression to lazy top-L would keep reporting 0 while quietly encoding
+    documents. This wraps the model's forward and counts real invocations: mining
+    may only encode the query batch, T times.
+    """
+    cache, Z_mc, cfg, c_ids, lookup, student, tok, _ = _mk_cached(B_doc=20)
+    qids = [f"q{i}" for i in range(8)]
+    qid_to_text = {q: f"query number {q}" for q in qids}
+    qrels = {q: {cache.docids[i % cache.B_doc]} for i, q in enumerate(qids)}
+
+    seen = []
+    real_forward = student.forward
+
+    def spy(input_ids=None, attention_mask=None, **kw):
+        seen.append(int(input_ids.shape[0]))
+        return real_forward(input_ids=input_ids, attention_mask=attention_mask, **kw)
+
+    student.forward = spy
+    try:
+        mined, _s, _q, mstats = mine_batch_cached_mcdp(
+            cache, student, tok, qids, qid_to_text, qrels, CACHED_T, cfg, DEVICE)
+    finally:
+        student.forward = real_forward
+
+    # only the query batch, once per MC pass — nothing document-shaped
+    total_encoded = sum(seen)
+    expected = len(qids) * CACHED_T
+    assert total_encoded == expected, (
+        f"encoder saw {total_encoded} examples during mining, expected exactly "
+        f"{expected} (= {len(qids)} queries x T={CACHED_T}). Anything more means "
+        f"documents were encoded in the mining loop.")
+    assert mstats['mcdp_doc_encoder_calls_mining'] == 0
+    assert mstats['query_examples_encoded'] == expected
 
 
 # ---- cached scoring contract (D3) ------------------------------------------
@@ -512,7 +624,7 @@ def test_z_student_is_aliased_to_z_mean_and_tracks_refresh():
     assert cache.Z_teacher is None, "cached-MCDP is teacher-free"
     before = cache.Z_student.clone()
     _force_maintenance_work(cache)
-    c = maintain_interval_cached_mcdp(cache, Z_mc, student, tok, lookup, c_ids,
+    c = maintain_interval_cached_mcdp(cache, student, tok, lookup, c_ids,
                                       reservoir, CACHED_STEP, CACHED_T, cfg,
                                       DEVICE, qrels_dict={})
     assert c['num_refresh'] + c['num_replace'] > 0
@@ -558,6 +670,9 @@ TESTS = [
     ("replacement candidates encoded once, reused", test_replacement_candidates_encoded_once_and_reused),
     ("round end: final interval only if pending", test_round_end_final_interval_only_when_pending_state_exists),
     ("metadata aggregates; mining encodes 0 docs", test_metadata_totals_aggregate_and_mining_encodes_no_docs),
+    ("unselected slots bitwise unchanged (B4)", test_unselected_slots_are_bitwise_unchanged),
+    ("touched slot is one atomic commit (B5)", test_touched_slot_is_one_atomic_commit),
+    ("encoder SPY: mining encodes 0 docs", test_mining_does_zero_doc_encodes_by_encoder_spy),
     # --- cached scoring contract ---
     ("score: mean + population std", test_cached_score_matches_explicit_mean_and_population_std),
     ("score: lambda=0 == mean ranking", test_cached_score_lambda_zero_is_mean_ranking),

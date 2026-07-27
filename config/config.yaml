@@ -160,6 +160,74 @@ training:
     logging_steps: 100
     eval_top_k: 10
     per_device_eval_batch_size: 256
+
+  async_fast_grass:
+    # Async Fast-GRASS (cached-MCDP). ANCE-style 2-process split: trainer on GPU 0
+    # consumes mined rounds, miner on GPU 1 prepares the next one from a recent
+    # checkpoint. See async_fast_grass_architecture.md.
+    # Sibling to `fast_grass` above, which stays SEQUENTIAL (lazy top-L MCDP) —
+    # these defaults deliberately differ from it.
+    model_name: "async_fast_grass_mixed_bge_m3"
+    base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_mixed_bge_m3"
+
+    # --- cached-MCDP: no L key; every query is scored against ALL of H ---
+    uncertainty: "cached_mcdp"   # async production mode; async EMA is deferred
+    B_doc: 32000             # first-run cache size; test 100k only after 32k passes
+    T: 3                     # cached doc MC states AND fresh query passes
+    lambda_val: 0.5          # g = s_hat + lambda*sigma; ALWAYS also run 0
+    mc_dropout_p: 0.3
+    m: 1                     # negatives per query
+    selection_mode: "topk"   # topk | softmax (softmax uses L=None => full cache)
+    beta: 5.0                # softmax-mode temperature only
+    score_chunk_size: 8192   # chunk Q x Z_mc over cache slots to bound the buffer
+
+    # --- cache maintenance (periodic, IN-ROUND) ---
+    rho_start: 0.50
+    rho_end: 0.25            # quality-oriented; sequential fast_grass uses 0.10
+    max_age_epochs: 2        # forces fresher states than the sequential 4
+    cache_update_interval: 100    # trainer-step-equivalent; sizes the BUDGET.
+                             # The miner's execution TRIGGER is
+                             # cache_update_interval * batch_size mined queries.
+    utility_ema_decay: 0.95
+    utility_floor: 0.01
+    K: 3                     # replace after K intervals with zero selections
+    replacement_candidate_multiplier: 2   # recertify 2x the final replacement slots
+    recent_query_reservoir_size: 128      # query-MC probe for recertification
+    cache_init_seed: 42
+    cache_state_keep: 2      # cache_state_N.pt retained; markers/data never pruned
+    miner_mc_batch_size: 128 # miner doc-MC encode batch, separate from mc_batch_size
+    # R_doc (retired-document registry) is DEFERRED: replacement candidates are
+    # sampled uniformly from the corpus excluding H, then recertified against the
+    # query-MC reservoir. R_fraction / R_size_factor / utility_remember_threshold /
+    # reentry_top_k are intentionally ABSENT so their deferral is visible rather
+    # than looking active with dead values.
+    reentry_top_k: 5         # still used: top-k reservoir scores for candidate rank
+
+    # --- async handoff ---
+    async_mine_every_steps: 1000  # trainer checkpoint cadence (doc range 1000-2000;
+                             # avoid tiny values, checkpoints are large). Retune
+                             # after run 1 from async_gap_steps / data_age_steps /
+                             # rounds_skipped / miner_idle_time.
+    ready_poll_steps: 100    # trainer ready-marker check; decoupled from the above
+    async_poll_interval: 60  # miner sleep while waiting for a valid checkpoint
+    trainer_gpu: 0
+    miner_gpu: 1
+
+    # --- training knobs ---
+    learning_rate: 1e-5
+    num_epochs: 2
+    batch_size: 64
+    train_group_size: 2
+    mc_batch_size: 1024      # trainer encode batch
+    bf16: true
+    dataloader_num_workers: 2
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+    max_grad_norm: 1.0
+    logging_steps: 100
+    eval_top_k: 10
+    per_device_eval_batch_size: 256
+
   ance:
     base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_mixed_bge_m3"
     model_name: "ance_mixed_bge_m3"

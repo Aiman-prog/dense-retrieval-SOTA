@@ -4,6 +4,7 @@ import sys
 import subprocess
 import pickle
 import json
+import math
 import yaml
 import os
 import contextlib
@@ -55,6 +56,8 @@ def get_path(key: str, model_name: str = None) -> Path:
         "results": base / p_cfg['results_dir'],
         "temp_ance": base / "temp_ance_workdir",
         "temp_grass": base / "temp_grass_workdir",
+        # async Fast-GRASS handoff root: temp_fast_grass_workdir/async_mining/
+        "temp_fast_grass": base / "temp_fast_grass_workdir",
     }
     
     if model_name:
@@ -200,6 +203,62 @@ def encode_batch_tensor(model, tokenizer, texts, device, max_len, batch_size,
         embs = torch.nn.functional.normalize(embs, dim=-1)
         all_embs.append(embs)
     return torch.cat(all_embs, dim=0)
+
+
+@contextlib.contextmanager
+def dropout_only(model):
+    """Put ``model`` in eval mode but re-enable ONLY ``nn.Dropout`` modules.
+
+    Used by cached-MCDP: "frozen for the round" means no parameter updates and no
+    gradients, NOT dropout-off (async_fast_grass_implementation_details.md, "Miner
+    Loop"). A plain ``model.train()`` would also switch on any other stateful
+    training-mode module (BatchNorm running stats, etc.), which the miner must not do.
+
+    Every module's entry mode is captured and restored on exit, including on
+    exception.
+    """
+    entry_modes = {mod: mod.training for mod in model.modules()}
+    try:
+        model.eval()
+        for mod in model.modules():
+            if isinstance(mod, torch.nn.Dropout):
+                mod.train(True)
+        yield model
+    finally:
+        for mod, was_training in entry_modes.items():
+            mod.train(was_training)
+
+
+def encode_mc(model, tokenizer, texts, T, device, max_len, batch_size, dtype=None):
+    """Encode ``texts`` through ``T`` genuine dropout passes -> ``[T, n, D]``.
+
+    Each pass is a separate stochastic forward over the full text list, so the ``T``
+    states of a document are independent dropout samples rather than one
+    deterministic embedding repeated ``T`` times. No gradients.
+
+    Returns ``(Z, stats)``. ``stats`` uses the cached-MCDP accounting vocabulary:
+    ``mc_passes`` is the logical pass count ``T``; ``examples_encoded`` is ``n*T``;
+    ``forward_batches`` is the number of real encoder forward calls. ``n*T`` is
+    examples, NOT encoder calls — keep the three distinct when reporting cost.
+    """
+    if T < 1:
+        raise ValueError(f"T must be >= 1, got {T}")
+    passes = []
+    with dropout_only(model):
+        for _ in range(int(T)):
+            z = encode_batch_tensor(model, tokenizer, texts, device, max_len,
+                                    batch_size, requires_grad=False)
+            passes.append(z.detach())
+    Z = torch.stack(passes, dim=0)
+    if dtype is not None:
+        Z = Z.to(dtype=dtype)
+    n = len(texts)
+    stats = {
+        'mc_passes': int(T),
+        'examples_encoded': int(n * T),
+        'forward_batches': int(math.ceil(n / max(batch_size, 1)) * T) if n else 0,
+    }
+    return Z, stats
 
 
 def encode_batch(model, tokenizer, texts, device, max_len, batch_size):

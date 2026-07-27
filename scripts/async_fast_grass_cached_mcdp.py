@@ -1,14 +1,17 @@
 """
-Async Fast-GRASS — cached-MCDP reference implementation (Phase 0).
+Async Fast-GRASS — cached-MCDP miner utilities.
 
-This is the **feasibility-gate** implementation of the cached-MCDP miner described
-in ``async_fast_grass_architecture.md`` / ``async_fast_grass_implementation_details.md``.
-It exists so the Phase-0 timing harness and CPU tests can measure and check the
-algorithm the docs actually specify, WITHOUT yet committing it to
-``src/utils/negative_cache.py``. Phase 1 ports these bodies onto ``NegativeCache``
-as ``score_cached_mcdp`` / ``maintain_cached_mcdp``.
+Phase 0 prototyped the cached-MCDP algorithm here; **Phase 1 ported it into
+``src/utils/negative_cache.py``** (`init_cached_mcdp`, `score_cached_mcdp`,
+`maintain_cached_mcdp`, `save_state`/`load_state`) and the encoding primitives into
+``src/utils/helpers.py`` (`dropout_only`, `encode_mc`). ``src/`` must never import
+``scripts/``, so the low-level pieces had to live under ``src/``.
 
-Nothing here edits ``negative_cache.py``, ``run_fast_grass.py``, or ``helpers.py``.
+What remains here is genuinely miner-side and has no place on the cache object:
+the recent-query MC reservoir, the mined-query maintenance cadence, and the
+per-batch mining step. `dropout_only` / `encode_mc` / `score_cached_mcdp` are
+**re-exported** so the Phase-0 timing harness and its tests keep importing from one
+place, unchanged.
 
 Cached-MCDP vs. the sequential lazy top-``L`` MCDP (``run_fast_grass._mine_batch_mcdp``):
 
@@ -25,190 +28,166 @@ Encoder accounting vocabulary (used consistently by the timing script and tests)
 ``n_texts * T``; ``*_forward_batches`` is the number of real encoder forward calls,
 ``ceil(n_texts / mc_batch_size) * T``. ``B*T`` is examples, NOT encoder calls.
 """
-import contextlib
 import math
 import sys
 from pathlib import Path
 
-import numpy as np
 import torch
-import torch.nn as nn
 
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root / 'src'))
 
-from utils.helpers import encode_batch_tensor  # noqa: E402
+from utils.helpers import dropout_only, encode_mc  # noqa: E402,F401
+from utils.negative_cache import score_cached_mcdp  # noqa: E402,F401
 
 
-# ---- stochastic encoding ---------------------------------------------------
+# ---- re-exports (implementation lives under src/) ---------------------------
+# src/ must never import scripts/, so the encoding primitives live in helpers and
+# the scoring math lives in negative_cache. Re-exported here so the Phase-0 timing
+# harness and its tests keep importing cached-MCDP pieces from one place.
 
-@contextlib.contextmanager
-def dropout_only(model):
-    """Put ``model`` in eval mode but re-enable ONLY ``nn.Dropout`` modules.
+__all__ = [
+    'dropout_only', 'encode_mc', 'score_cached_mcdp',
+    'encode_queries_mc', 'encode_docs_mc', 'init_Z_mc',
+    'QueryMCReservoir', 'MaintenanceDriver', 'maintenance_interval_mined_queries',
+    'maintain_interval_cached_mcdp', 'mine_batch_cached_mcdp',
+]
 
-    "Frozen for the round" means no parameter updates and no gradients, not
-    dropout-off (async_fast_grass_implementation_details.md, "Miner Loop"). Using
-    ``model.train()`` would also switch on any other stateful training-mode module
-    (BatchNorm running stats, etc.), which the miner must not do.
 
-    Every module's entry mode is captured and restored on exit, including on
-    exception.
+# ---- runtime config ---------------------------------------------------------
+
+def steps_per_epoch(n_items, batch_size):
+    """Canonical steps-per-epoch, shared by orchestrator, trainer and miner.
+
+    Must be identical in all three: the miner divides by it in the maintenance
+    budget (``rho * B_doc * cache_update_interval / steps_per_epoch``), so a
+    floor-vs-ceil disagreement silently changes how much of the cache is
+    maintained per interval.
     """
-    entry_modes = {mod: mod.training for mod in model.modules()}
-    try:
-        model.eval()
-        for mod in model.modules():
-            if isinstance(mod, nn.Dropout):
-                mod.train(True)
-        yield model
-    finally:
-        for mod, was_training in entry_modes.items():
-            mod.train(was_training)
+    return max(math.ceil(int(n_items) / max(int(batch_size), 1)), 1)
 
 
-def encode_mc(model, tokenizer, texts, T, device, max_len, batch_size,
-              dtype=None):
-    """Encode ``texts`` through ``T`` genuine dropout passes -> ``[T, n, D]``.
+class UnresolvablePositivesError(RuntimeError):
+    """Some training positives cannot be resolved against the corpus."""
 
-    Each pass is a separate stochastic forward over the full text list, so the
-    ``T`` states of a document are independent dropout samples rather than a
-    repeated deterministic embedding. No gradients.
 
-    Returns ``(Z, stats)`` where ``stats`` carries the three-way encoder
-    accounting for this call.
+def canonicalize_positives(train_items, qrels_dict, corpus_lookup, log=print):
+    """Map each item's ``pos_docid`` onto the docid that actually exists in the corpus.
+
+    ``preprocessor.run_setup`` MD5-dedupes passages by text: duplicate-text docids
+    collapse to one canonical entry, and only the CORPUS and the QRELS are remapped.
+    The training mixture still carries the original ``positive_passages[0]['docid']``,
+    so a positive whose text was a duplicate has a docid that is absent from
+    ``reasonir_corpus.jsonl``.
+
+    Qrels are already canonical and keyed by query id, so they are the remap: for an
+    unresolvable positive, take a qrels entry for that query that IS in the corpus.
+
+    **Any item that still cannot be resolved is a hard error, not a drop.** Silently
+    discarding training examples shrinks the experiment by an unrecorded amount and
+    makes the run incomparable to a baseline trained on the full mixture — a much
+    worse failure than stopping, because nothing downstream would reveal it. The fix
+    is to regenerate the corpus/qrels, not to train on less data.
+
+    Returns ``(items, stats)``.
     """
-    if T < 1:
-        raise ValueError(f"T must be >= 1, got {T}")
-    passes = []
-    with dropout_only(model):
-        for _ in range(int(T)):
-            z = encode_batch_tensor(model, tokenizer, texts, device, max_len,
-                                    batch_size, requires_grad=False)
-            passes.append(z.detach())
-    Z = torch.stack(passes, dim=0)
-    if dtype is not None:
-        Z = Z.to(dtype=dtype)
-    n = len(texts)
-    stats = {
-        'mc_passes': int(T),
-        'examples_encoded': int(n * T),
-        'forward_batches': int(math.ceil(n / max(batch_size, 1)) * T) if n else 0,
-    }
-    return Z, stats
+    out, remapped, unresolved = [], 0, []
+    for it in train_items:
+        pos = it['pos_docid']
+        if pos in corpus_lookup:
+            out.append(it)
+            continue
+        canonical = next((d for d in qrels_dict.get(it['query_id'], ())
+                          if d in corpus_lookup), None)
+        if canonical is None:
+            unresolved.append(it)
+            continue
+        out.append({**it, 'pos_docid': canonical})
+        remapped += 1
 
+    stats = {'total': len(train_items), 'kept': len(out),
+             'remapped': remapped, 'dropped': len(unresolved)}
+    if remapped:
+        log(f"canonicalized positives: {remapped:,}/{len(train_items):,} remapped "
+            f"to their canonical docid")
+    if unresolved:
+        sample = [(it['query_id'], it['pos_docid']) for it in unresolved[:5]]
+        raise UnresolvablePositivesError(
+            f"{len(unresolved):,}/{len(train_items):,} training items have a "
+            f"positive that is absent from the corpus and has no corpus-resident "
+            f"qrels entry (e.g. {sample}). Training on the remainder would silently "
+            f"shrink the mixture and break comparability with the baselines — "
+            f"regenerate reasonir_corpus.jsonl / train_qrels.txt (re-run "
+            f"preprocessing) instead.")
+    return out, stats
+
+
+def build_async_cfg(config, ctx, steps_per_epoch):
+    """Runtime cfg for the async miner/orchestrator from ``training.async_fast_grass``.
+
+    Separate from ``run_fast_grass._build_fast_grass_cfg`` because that one reads
+    the *sequential* block and applies CLI overrides the async processes do not
+    have. Derived fields match it so the shared ``NegativeCache`` maintenance code
+    behaves identically.
+
+    ``L`` is absent by construction: cached-MCDP scores all of ``H``.
+    """
+    cfg = dict(ctx['args'])
+    cfg.pop('L', None)
+    cfg['lambda_val'] = float(cfg['lambda_val'])
+    cfg['query_max_len'] = config['model']['query_max_len']
+    cfg['passage_max_len'] = config['model']['passage_max_len']
+    cfg['steps_per_epoch'] = int(steps_per_epoch)
+    cfg['total_steps'] = cfg['steps_per_epoch'] * cfg['num_epochs']
+    cfg['max_age_steps'] = cfg['max_age_epochs'] * cfg['steps_per_epoch']
+    return cfg
+
+
+# ---- cfg-shaped encode wrappers --------------------------------------------
 
 def encode_queries_mc(model, tokenizer, texts, T, device, cfg, dtype=None):
-    """``T`` stochastic query passes -> ``[T, B_query, D]``. Thin cfg wrapper."""
+    """``T`` stochastic query passes -> ``[T, B_query, D]``."""
     return encode_mc(model, tokenizer, texts, T, device,
                      cfg.get('query_max_len', 128),
-                     cfg.get('mc_batch_size', 256), dtype=dtype)
+                     _miner_mc_batch(cfg), dtype=dtype)
 
 
 def encode_docs_mc(model, tokenizer, texts, T, device, cfg, dtype=None):
-    """``T`` stochastic document passes -> ``[T, n_docs, D]``. Thin cfg wrapper."""
+    """``T`` stochastic document passes -> ``[T, n_docs, D]``."""
     return encode_mc(model, tokenizer, texts, T, device,
                      cfg.get('passage_max_len', 512),
-                     cfg.get('mc_batch_size', 256), dtype=dtype)
+                     _miner_mc_batch(cfg), dtype=dtype)
 
 
-# ---- cached-MCDP scoring ---------------------------------------------------
+def _miner_mc_batch(cfg):
+    """Miner-side MC encode batch, falling back to the shared encode batch."""
+    return int(cfg.get('miner_mc_batch_size') or cfg.get('mc_batch_size', 256))
 
-def score_cached_mcdp(q_mc, Z_mc, lambda_val, chunk_size=None):
-    """Score a query batch against ALL cache slots from cached MC states.
-
-    ``q_mc``  ``[T, B_query, D]`` — fresh stochastic query states (current ckpt).
-    ``Z_mc``  ``[T, B_doc,   D]`` — cached stochastic document states.
-
-    For pass ``t``::
-
-        s_t   = q_mc[t] @ Z_mc[t].T
-        s_hat = mean_t(s_t)
-        sigma = sqrt(mean_t((s_t - s_hat)^2))     # population std, correction=0
-        g     = s_hat + lambda_val * sigma
-
-    Returns ``(g, s_hat, sigma)``, each ``[B_query, B_doc]`` in FP32. All three are
-    returned because the signal probe needs ``s_hat`` and ``sigma`` separately, not
-    just ``g``.
-
-    The pass index simply pairs independent query and cached document dropout
-    samples; no extra document passes and no fresh shortlist are created.
-
-    ``chunk_size`` chunks over cache slots so the ``T`` full score matrices need not
-    be resident at once. Moments are computed in FP32 within each chunk, so chunked
-    and unchunked results agree to floating-point tolerance.
-
-    Scoring is grad-free. Callers own ``cache_score_pairs`` accounting.
-    """
-    if q_mc.dim() != 3 or Z_mc.dim() != 3:
-        raise ValueError(f"expected [T,B,D] tensors, got q_mc{tuple(q_mc.shape)} "
-                         f"Z_mc{tuple(Z_mc.shape)}")
-    if q_mc.shape[0] != Z_mc.shape[0]:
-        raise ValueError(f"T mismatch: q_mc has {q_mc.shape[0]} passes, Z_mc has "
-                         f"{Z_mc.shape[0]}")
-    if q_mc.shape[2] != Z_mc.shape[2]:
-        raise ValueError(f"dim mismatch: q_mc D={q_mc.shape[2]}, Z_mc D={Z_mc.shape[2]}")
-
-    T, B_query, _ = q_mc.shape
-    B_doc = Z_mc.shape[1]
-    step = int(chunk_size) if chunk_size else B_doc
-    if step < 1:
-        raise ValueError(f"chunk_size must be >= 1, got {chunk_size}")
-
-    s_hat = torch.empty((B_query, B_doc), dtype=torch.float32, device=q_mc.device)
-    sigma = torch.empty((B_query, B_doc), dtype=torch.float32, device=q_mc.device)
-
-    with torch.no_grad():
-        for start in range(0, B_doc, step):
-            end = min(start + step, B_doc)
-            Zc = Z_mc[:, start:end, :]
-            # [T, B_query, C] — exact two-pass mean/std per chunk (T is small), which
-            # is numerically safer than accumulating sum/sum-of-squares.
-            S = torch.stack(
-                [(q_mc[t].to(Zc.dtype) @ Zc[t].t()).float() for t in range(T)],
-                dim=0)
-            s_hat[:, start:end] = S.mean(dim=0)
-            sigma[:, start:end] = S.std(dim=0, unbiased=False)
-
-    g = s_hat + float(lambda_val) * sigma
-    return g, s_hat, sigma
-
-
-# ---- cache initialization --------------------------------------------------
 
 def init_Z_mc(cache, corpus_lookup, model, tokenizer, T, cfg, device):
-    """Build ``Z_mc[T, B_doc, D]`` for an existing ``NegativeCache`` slot layout.
+    """Attach ``Z_mc[T, B_doc, D]`` to an already-sampled cache.
 
-    The initial cache cannot repeat a deterministic embedding ``T`` times
-    (impl-details, "Cache State And Initialization"): every cached document is
-    encoded through ``T`` genuine dropout passes with the current (base) model.
+    Thin wrapper over ``encode_mc`` + ``NegativeCache.attach_mc_states`` for callers
+    that built ``H`` with ``init_uniform`` (the Phase-0 harness). The orchestrator
+    uses ``NegativeCache.init_cached_mcdp`` instead, which does both in one step.
 
-    ``Z_mean = mean_t(Z_mc)`` is **aliased onto ``cache.Z_student``** rather than
-    allocated as a third bank, per the "Cached-MCDP Scoring Contract". Maintenance
-    mutates it in place so the alias stays valid and ``cheap_scores`` /
-    ``_plan_actions`` never see document states that contradict ``Z_mc``.
-
-    Returns ``(Z_mc, stats)``.
+    Returns ``(cache.Z_mc, stats)``.
     """
     texts = [corpus_lookup[d] for d in cache.docids]
     Z_mc, enc = encode_docs_mc(model, tokenizer, texts, T, device, cfg,
                                dtype=cache.Z_student.dtype)
-    Z_mean = Z_mc.float().mean(dim=0).to(cache.Z_student.dtype)
-
-    # alias, not a copy: Z_student IS Z_mean from here on.
-    cache.Z_student = Z_mean
-    cache.Z_student.requires_grad_(False)
+    cache.attach_mc_states(Z_mc)
     cache.last_refreshed_step[:] = 0
-
     stats = {
         'init_docs': len(texts),
         'init_mc_passes': enc['mc_passes'],
         'init_examples_encoded': enc['examples_encoded'],
         'init_forward_batches': enc['forward_batches'],
-        'cache_mc_bytes': int(Z_mc.element_size() * Z_mc.nelement()),
-        'cache_mean_bytes': int(Z_mean.element_size() * Z_mean.nelement()),
+        'cache_mc_bytes': cache.mc_memory_bytes(),
+        'cache_mean_bytes': int(cache.Z_student.element_size()
+                                * cache.Z_student.nelement()),
     }
-    return Z_mc, stats
-
+    return cache.Z_mc, stats
 
 # ---- recent query-MC reservoir ---------------------------------------------
 
@@ -302,195 +281,47 @@ class MaintenanceDriver:
         return bool(self.counter > 0 and bool(cache.selected_indicator.any()))
 
 
-# ---- cached-MCDP maintenance ----------------------------------------------
+# ---- cached-MCDP maintenance ------------------------------------------------
 
-def _zero_maintenance_counters():
-    return dict(
-        num_refresh=0, num_replace=0, num_over_age=0, over_age_backlog=0,
-        num_R_candidates=0, num_uniform_candidates=0,
-        num_recertified_candidates=0,
-        maintenance_docs_encoded=0, maintenance_mc_passes=0,
-        maintenance_examples_encoded=0, maintenance_forward_batches=0,
-        cache_turnover_rate=0.0)
-
-
-def maintain_interval_cached_mcdp(cache, Z_mc, student, tokenizer, corpus_lookup,
+def maintain_interval_cached_mcdp(cache, student, tokenizer, corpus_lookup,
                                   all_docids, reservoir, source_checkpoint_step,
                                   T, cfg, device, qrels_dict=None):
-    """One bounded cached-MCDP maintenance interval.
+    """One bounded in-round maintenance interval — delegates to the cache.
 
-    ``source_checkpoint_step`` is **model time** and is identical for every interval
-    in a mining round: the miner holds checkpoint-frozen weights, so cache age, the
-    rho/progress budget, and ``last_refreshed_step`` must not move within a round.
-    Passing a miner-local counter (batch index, mined-query count, interval index)
-    would corrupt all three.
+    Kept as a named entry point because the miner and the timing harness talk in
+    terms of *intervals*, while the cache exposes a single maintenance call. ``T``
+    is accepted for call-site clarity and validated against the cache's own ``T``.
 
-    Differences from ``NegativeCache.maintain`` (which stays untouched):
-      * refresh encodes each document ``T`` times, not once;
-      * **every** replacement candidate is encoded ``T`` times exactly once, and
-        recertification scores those states against the query-MC reservoir with the
-        same mean+uncertainty ``g`` as normal mining (not a deterministic dot);
-      * chosen candidates are inserted by reusing the already-computed states, so
-        insertion adds no encoder calls.
-
-    Planning is delegated to the audited ``NegativeCache`` internals
-    (``_update_utility`` -> ``_interval_budget`` -> ``_plan_actions``) rather than
-    forked, so budget/eligibility semantics cannot drift from the sequential path.
-
-    ``reservoir`` is ``(q_mc[T,R,D], qids)``. When it is empty, maintenance refreshes
-    existing slots but skips replacement recertification.
-
-    Returns a counter dict. Mutates ``Z_mc`` and ``cache`` in place.
+    `R_doc` is deferred: candidates are uniform-only and registry counters are zero.
     """
-    qrels_dict = qrels_dict or {}
-    entry_mode = student.training
-    counters = _zero_maintenance_counters()
-    try:
-        # 1. Fold utility BEFORE planning — same order as NegativeCache.maintain
-        #    (negative_cache.py:308-310). Without this, selected_indicator,
-        #    utility_ema and intervals_since_selected never advance and the
-        #    eligibility rules see frozen state.
-        cache._update_utility(cfg)
+    if T is not None and cache.T is not None and int(T) != int(cache.T):
+        raise ValueError(f"T mismatch: caller says {T}, cache holds {cache.T}")
+    return cache.maintain_cached_mcdp(
+        student, tokenizer, corpus_lookup, all_docids, reservoir,
+        source_checkpoint_step, cfg, device, qrels_dict=qrels_dict)
 
-        budget = cache._interval_budget(source_checkpoint_step, cfg)
-        refresh_slots, replace_slots, diag = cache._plan_actions(
-            source_checkpoint_step, cfg, budget)
-        counters.update(diag)
-        counters['maintenance_budget_interval'] = int(budget)
-
-        # 2. Refresh: T stochastic passes per document; Z_mc, Z_mean and the
-        #    timestamp move together.
-        if len(refresh_slots):
-            slot_list = refresh_slots.tolist()
-            texts = [corpus_lookup[cache.docids[s]] for s in slot_list]
-            Zr, enc = encode_docs_mc(student, tokenizer, texts, T, device, cfg,
-                                     dtype=Z_mc.dtype)
-            Z_mc[:, refresh_slots, :] = Zr
-            # in-place so the Z_student alias stays valid
-            cache.Z_student[refresh_slots] = Zr.float().mean(dim=0).to(
-                cache.Z_student.dtype)
-            cache.last_refreshed_step[refresh_slots] = source_checkpoint_step
-            counters['num_refresh'] = len(slot_list)
-            counters['maintenance_docs_encoded'] += len(texts)
-            counters['maintenance_mc_passes'] = enc['mc_passes']
-            counters['maintenance_examples_encoded'] += enc['examples_encoded']
-            counters['maintenance_forward_batches'] += enc['forward_batches']
-
-        # 3. Replace (needs the query-MC reservoir for recertification).
-        q_res, res_qids = reservoir if reservoir is not None else (None, [])
-        if len(replace_slots) and q_res is not None and len(res_qids):
-            rc = _replace_cached_mcdp(cache, Z_mc, replace_slots, student,
-                                      tokenizer, corpus_lookup, all_docids,
-                                      q_res, res_qids, source_checkpoint_step,
-                                      T, cfg, device, qrels_dict)
-            for k, v in rc.items():
-                if k in ('maintenance_docs_encoded', 'maintenance_examples_encoded',
-                         'maintenance_forward_batches'):
-                    counters[k] += v
-                elif k == 'maintenance_mc_passes':
-                    counters[k] = v
-                else:
-                    counters[k] = v
-
-        counters['cache_turnover_rate'] = (
-            counters['num_replace'] / cache.B_doc if cache.B_doc else 0.0)
-        counters['maintenance_model_step'] = int(source_checkpoint_step)
-        return counters
-    finally:
-        student.train(entry_mode)
-
-
-def _replace_cached_mcdp(cache, Z_mc, slots, student, tokenizer, corpus_lookup,
-                         all_docids, q_res, res_qids, step, T, cfg, device,
-                         qrels_dict):
-    """Replacement with cached-MCDP recertification.
-
-    Candidate nomination reuses the registry ``R`` + uniform-corpus policy from
-    ``NegativeCache`` (uniform stays the binding constraint). Every candidate is
-    encoded for ``T`` passes ONCE; those same states are reused on insertion, so
-    ``maintenance_docs_encoded`` counts each candidate exactly once.
-    """
-    num_replace = len(slots)
-    num_cand = cfg['replacement_candidate_multiplier'] * num_replace
-    num_uniform_target = int(np.ceil(cfg['uniform_candidate_fraction'] * num_cand))
-    num_R_target = max(num_cand - num_uniform_target, 0)
-
-    in_H = set(cache.docids)
-    R_cands = [d for d in cache.registry.nominate(num_R_target, cache.rng)
-               if d in corpus_lookup and d not in in_H]
-    uni = cache._sample_uniform(all_docids, num_cand - len(R_cands),
-                                exclude=in_H | set(R_cands), corpus=corpus_lookup)
-    cand = list(dict.fromkeys(R_cands + uni))
-    out = dict(num_replace=0, num_R_candidates=len(R_cands),
-               num_uniform_candidates=len(uni), num_recertified_candidates=0,
-               maintenance_docs_encoded=0, maintenance_mc_passes=int(T),
-               maintenance_examples_encoded=0, maintenance_forward_batches=0)
-    if not cand:
-        return out
-
-    cand_texts = [corpus_lookup[d] for d in cand]
-    Zc, enc = encode_docs_mc(student, tokenizer, cand_texts, T, device, cfg,
-                             dtype=Z_mc.dtype)
-    out['num_recertified_candidates'] = len(cand)
-    out['maintenance_docs_encoded'] = len(cand)
-    out['maintenance_examples_encoded'] = enc['examples_encoded']
-    out['maintenance_forward_batches'] = enc['forward_batches']
-
-    # recertify with the SAME mean+uncertainty score as ordinary mining
-    g, _s_hat, _sigma = score_cached_mcdp(q_res, Zc, cfg['lambda_val'])
-    for r, qid in enumerate(res_qids):
-        pos = qrels_dict.get(qid)
-        if not pos:
-            continue
-        cols = [j for j, d in enumerate(cand) if d in pos]
-        if cols:
-            g[r, cols] = float('-inf')
-
-    k = min(int(cfg['reentry_top_k']), g.shape[0])
-    reentry = torch.topk(g, k=k, dim=0).values.mean(dim=0)
-    finite = torch.isfinite(reentry)
-    order = [i for i in torch.argsort(reentry, descending=True).tolist()
-             if finite[i]]
-    chosen = order[:num_replace]
-
-    for slot, ci in zip(slots.tolist(), chosen):
-        evicted = cache.docids[slot]
-        cache.registry.admit(evicted, dict(
-            peak_utility_ema=float(cache.peak_utility_ema[slot]),
-            lifetime_selected_count=int(cache.lifetime_selected_count[slot])), step)
-        # reuse the already-computed MC states — no second encode
-        Z_mc[:, slot, :] = Zc[:, ci, :]
-        # _insert writes Z_student[slot] (== Z_mean[slot]) in place and resets the
-        # new slot's utility/history with timestamp = step.
-        cache._insert(slot, cand[ci],
-                      Zc[:, ci, :].float().mean(dim=0).to(cache.Z_student.dtype),
-                      None, step)
-        cache.registry.entries.pop(cand[ci], None)
-
-    out['num_replace'] = len(chosen)
-    return out
 
 
 # ---- mining ----------------------------------------------------------------
 
-def mine_batch_cached_mcdp(cache, Z_mc, student, tokenizer, batch_qids,
+def mine_batch_cached_mcdp(cache, student, tokenizer, batch_qids,
                            qid_to_text, qrels_dict, T, cfg, device,
                            chunk_size=None):
     """One virtual mining batch: T query passes + T matmuls over all of H.
 
     Performs **zero document encoder calls** — that invariant is what separates
     cached-MCDP from the lazy top-``L`` path and is asserted by the timing harness
-    and the CPU tests.
+    and the CPU tests. There is no top-``L``: every query is scored against all of
+    ``H`` from the cached MC states.
 
     Returns ``(mined, slots, q_mc, stats)``.
     """
     texts = [qid_to_text[q] for q in batch_qids]
     q_mc, enc = encode_queries_mc(student, tokenizer, texts, T, device, cfg)
 
-    g, s_hat, sigma = score_cached_mcdp(q_mc, Z_mc, cfg['lambda_val'],
-                                        chunk_size=chunk_size)
-    cache.cache_score_pairs += len(batch_qids) * cache.B_doc
-
+    # cache.score_cached_mcdp owns the cache_score_pairs accounting
+    g, s_hat, sigma = cache.score_cached_mcdp(q_mc, cfg['lambda_val'],
+                                              chunk_size=chunk_size)
     g = cache.mask_positives(g, batch_qids, qrels_dict, inplace=True)
     slots, neg_docids = cache.select(g, m=cfg['m'], mode=cfg['selection_mode'],
                                      beta=cfg.get('beta', 5.0), L=None)
