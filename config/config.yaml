@@ -161,7 +161,7 @@ training:
     eval_top_k: 10
     per_device_eval_batch_size: 256
 
-  async_fast_grass:
+  async_fast_grass: &async_fg_base
     # Async Fast-GRASS (cached-MCDP). ANCE-style 2-process split: trainer on GPU 0
     # consumes mined rounds, miner on GPU 1 prepares the next one from a recent
     # checkpoint. See async_fast_grass_architecture.md.
@@ -184,7 +184,16 @@ training:
     # --- cache maintenance (periodic, IN-ROUND) ---
     rho_start: 0.50
     rho_end: 0.25            # quality-oriented; sequential fast_grass uses 0.10
-    max_age_epochs: 2        # forces fresher states than the sequential 4
+    max_age_epochs: 2        # LEGACY fallback, used only when max_age_steps is null.
+                             # Kept for reference: the explicit key below WINS.
+    max_age_steps: 1000      # CORRECTED. _plan_actions tests `age >= max_age_steps`,
+                             # and age is measured in trainer steps. The old derived
+                             # value (max_age_epochs * steps_per_epoch = 2 * 5157 =
+                             # 10314) equalled total_steps, so over-age refresh only
+                             # became eligible on the final round and no refreshed
+                             # round ever reached the trainer. Matched to the
+                             # checkpoint cadence (async_mine_every_steps) so the
+                             # first numeric round is eligible to refresh.
     cache_update_interval: 100    # trainer-step-equivalent; sizes the BUDGET.
                              # The miner's execution TRIGGER is
                              # cache_update_interval * batch_size mined queries.
@@ -208,6 +217,17 @@ training:
                              # avoid tiny values, checkpoints are large). Retune
                              # after run 1 from async_gap_steps / data_age_steps /
                              # rounds_skipped / miner_idle_time.
+    bootstrap_checkpoint_step: 0   # 0 = disabled. When >0 and < async_mine_every_steps
+                             # the trainer saves ONE extra checkpoint at this step, so
+                             # the miner stops idling at startup (it has no base-model
+                             # fallback and otherwise waits for step 1000). Leaves the
+                             # steady-state cadence and async_gap_steps unchanged, but
+                             # it is NOT a free speedup: the extra round runs ~51
+                             # maintenance intervals that mutate the PERSISTED cache
+                             # (H / Z_mc / utility / RNG) and shift the weights, so the
+                             # whole trajectory forks and never re-converges. Treat as
+                             # an ABLATION: hold it constant across every arm of a
+                             # sweep, never flip it partway through one.
     ready_poll_steps: 100    # trainer ready-marker check; decoupled from the above
     async_poll_interval: 60  # miner sleep while waiting for a valid checkpoint
     trainer_gpu: 0
@@ -227,6 +247,70 @@ training:
     logging_steps: 100
     eval_top_k: 10
     per_device_eval_batch_size: 256
+
+  async_fast_grass_pilot:
+    # 10% representative pilot for LAMBDA SELECTION. Inherits every key from
+    # `async_fast_grass` above and overrides only what the pilot changes, so the
+    # pilot and the full confirmation cannot silently drift apart.
+    #
+    # Driven by a deterministic stratified manifest (33,000 = 8,303 MS MARCO +
+    # 14,997 VL + 9,700 HQ, seed 42) built by scripts/async_fast_grass_pilot.py.
+    # `--debug` is NOT a substitute: it takes train_items[:512] after an
+    # alphabetical file glob, which is effectively HQ-only.
+    #
+    #   steps_per_epoch = ceil(33000 / 64) = 516   ->  max_steps = 1032
+    #
+    # cache_update_interval 10 (not 100) only changes maintenance GRANULARITY; the
+    # per-interval budget scales with it, so the total maintenance work matches the
+    # full run:  0.5 * 32000 * 10 / 516 ~= 310  ==  0.5 * 32000 * 100 / 5157.
+    <<: *async_fg_base
+    model_name: "async_fast_grass_pilot_bge_m3"
+    num_epochs: 2
+    batch_size: 64
+    B_doc: 32000
+    T: 3
+    m: 1
+    train_group_size: 2
+    selection_mode: "topk"
+    learning_rate: 1e-5
+    cache_update_interval: 10
+    async_mine_every_steps: 100
+    ready_poll_steps: 10
+    async_poll_interval: 10
+    max_age_steps: 100       # == async_mine_every_steps, so the FIRST numeric round
+                             # is already eligible to refresh over-age slots
+    logging_steps: 10
+    bootstrap_checkpoint_step: 0
+    pilot_gate_min_steps: 128   # a numeric mined round with num_refresh_total > 0
+                             # must be consumed for at least this many optimizer
+                             # steps or the run is INVALID and exits nonzero.
+                             # Absent from `async_fast_grass` on purpose: the full
+                             # run has no pilot gate.
+
+  async_fast_grass_smoke:
+    # DelftBlue GPU wiring smoke: 1,024 stratified records, tiny cache, fast
+    # cadences. Proves the async loop cycles end to end; proves nothing about
+    # quality. No BRIGHT evaluation.
+    #
+    #   steps_per_epoch = ceil(1024 / 64) = 16  ->  max_steps = 64
+    #
+    # num_epochs 4 rather than 2 removes a timing race: at 32 steps the miner has
+    # only ~22 training steps after checkpoint-10 to load it, mine, publish and be
+    # consumed, and a longer SLURM allocation does not help because the trainer
+    # exits at step 32 regardless. 64 steps costs seconds.
+    <<: *async_fg_base
+    model_name: "async_fast_grass_smoke_bge_m3"
+    num_epochs: 4
+    B_doc: 512
+    T: 3
+    cache_update_interval: 1
+    async_mine_every_steps: 10
+    ready_poll_steps: 2
+    async_poll_interval: 5
+    max_age_steps: 10
+    logging_steps: 2
+    bootstrap_checkpoint_step: 0
+    pilot_gate_min_steps: 1  # 64 total steps cannot reach the pilot's 128
 
   ance:
     base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_mixed_bge_m3"

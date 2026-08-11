@@ -153,6 +153,65 @@ def make_dataloader(data_dir, corpus_lookup, m, batch_size, num_workers):
                       collate_fn=_collate)
 
 
+def _resolve_bootstrap_step(cfg, cli_value, mine_every):
+    """Resolve ``bootstrap_checkpoint_step``; 0/absent means disabled.
+
+    A nonzero value outside ``0 < step < mine_every`` RAISES rather than being
+    warned-about and ignored. Silently disabling a knob the operator explicitly set
+    would produce a run labelled "bootstrapped" that never wrote the extra
+    checkpoint — and because the bootstrap round mutates the persisted cache, that
+    mislabels an ablation arm rather than merely wasting a flag.
+    """
+    raw = cli_value if cli_value is not None else cfg.get('bootstrap_checkpoint_step', 0)
+    step = int(raw or 0)
+    if step == 0:
+        return 0
+    if step < 0:
+        raise ValueError(
+            f"bootstrap_checkpoint_step must be >= 0, got {step}")
+    if step >= mine_every:
+        # >= would collide with the regular cadence and save the same step twice
+        raise ValueError(
+            f"bootstrap_checkpoint_step={step} must be < async_mine_every_steps="
+            f"{mine_every}; at or above it the regular cadence already checkpoints "
+            f"that step. Use 0 to disable.")
+    return step
+
+
+def summarize_round_consumption(records, final_step):
+    """How many optimizer steps was each consumed round actually active for?
+
+    ``records`` are the swap events in order, each ``{round_no, consume_step,
+    source_checkpoint_step}``. A round stays active until the next swap, so its span is
+    the next ``consume_step`` (or ``final_step`` for the last one).
+
+    This is what the run validity gate reads: a round that was published but consumed
+    for two steps before being replaced did not shape the weights, and a run resting on
+    that is not evidence about lambda. Extracted as a pure function so the test grades
+    production code instead of a reimplementation.
+    """
+    recs = sorted(records, key=lambda r: int(r['consume_step']))
+    out = []
+    for i, r in enumerate(recs):
+        start = int(r['consume_step'])
+        end = int(recs[i + 1]['consume_step']) if i + 1 < len(recs) else int(final_step)
+        out.append({
+            'round_no': int(r['round_no']),
+            'consume_step': start,
+            'source_checkpoint_step': int(r.get('source_checkpoint_step', 0)),
+            'steps_active': max(end - start, 0),
+            'async_gap_steps': start - int(r.get('source_checkpoint_step', 0)),
+        })
+    return out
+
+
+def should_checkpoint(step, mine_every, max_steps, bootstrap_step=0):
+    """Does the trainer write a checkpoint at ``step``? Single source of truth."""
+    return (step % mine_every == 0
+            or step == max_steps
+            or (bootstrap_step and step == bootstrap_step))
+
+
 def save_checkpoint(model, tokenizer, optimizer, scheduler, output_dir, step):
     """ANCE-style checkpoint. ``optimizer.pt`` LAST — it is the validity flag."""
     ckpt = Path(output_dir) / f"checkpoint-{step}"
@@ -178,6 +237,9 @@ def main():
                          'processes must agree (see cached_mcdp.steps_per_epoch)')
     ap.add_argument('--recipe', default='async_fast_grass')
     ap.add_argument('--no_compile', action='store_true')
+    ap.add_argument('--bootstrap_checkpoint_step', type=int, default=None,
+                    help='override training.async_fast_grass.bootstrap_checkpoint_step. '
+                         '0 disables. See _resolve_bootstrap_step.')
     args = ap.parse_args()
 
     from models.temperature_scaled_loss import TemperatureScaledContrastiveLoss
@@ -204,6 +266,9 @@ def main():
     ready_poll_steps = cfg.get('ready_poll_steps', cfg.get('logging_steps', 100))
     mine_every = cfg.get('async_mine_every_steps', 1000)
     logging_steps = cfg.get('logging_steps', 100)
+    # raises on a nonzero-but-invalid value; 0 keeps behaviour bit-identical
+    bootstrap_step = _resolve_bootstrap_step(
+        cfg, args.bootstrap_checkpoint_step, mine_every)
 
     base_model = args.model_name_or_path or ctx['base_model']
     tokenizer = AutoTokenizer.from_pretrained(base_model)
@@ -244,9 +309,13 @@ def main():
     consume_step, source_checkpoint_step = 0, 0
     rounds_consumed = rounds_skipped = 0
     rejected_rounds = set()      # validated-and-failed; never retried
+    # swap log -> async_trainer_summary.json; the run validity gate needs to know how
+    # long each mined round was actually trained on, not merely that it was published.
+    swap_records = [{'round_no': 0, 'consume_step': 0, 'source_checkpoint_step': 0}]
     _log(f"initial_data: {len(loader.dataset):,} examples | max_steps="
          f"{args.max_steps:,} | poll every {ready_poll_steps} | checkpoint every "
-         f"{mine_every}")
+         f"{mine_every} | bootstrap_checkpoint_step="
+         f"{bootstrap_step if bootstrap_step else 'off'}")
 
     global_step = 0
     running_loss = 0.0
@@ -277,6 +346,9 @@ def main():
                     data_iter = iter(loader)
                     active_round = latest
                     rounds_consumed += 1
+                    swap_records.append({
+                        'round_no': latest, 'consume_step': global_step,
+                        'source_checkpoint_step': source_checkpoint_step})
                     _log(f"SWAP -> round {latest} at step {global_step} | "
                          f"source_checkpoint_step={source_checkpoint_step} | "
                          f"async_gap_steps={global_step - source_checkpoint_step} | "
@@ -316,7 +388,7 @@ def main():
                  f"async_gap_steps={consume_step - source_checkpoint_step}")
             running_loss = 0.0
 
-        if global_step % mine_every == 0 or global_step == args.max_steps:
+        if should_checkpoint(global_step, mine_every, args.max_steps, bootstrap_step):
             dt = save_checkpoint(_student_raw, tokenizer, optimizer, scheduler,
                                  output_dir, global_step)
             _log(f"saved checkpoint-{global_step} (checkpoint_write_time={dt:.1f}s)")
@@ -325,6 +397,20 @@ def main():
     raw = getattr(student, '_orig_mod', student)
     raw.save_pretrained(str(output_dir))
     tokenizer.save_pretrained(str(output_dir))
+
+    rounds = summarize_round_consumption(swap_records, global_step)
+    (output_dir / "async_trainer_summary.json").write_text(json.dumps({
+        'final_step': global_step,
+        'max_steps': args.max_steps,
+        'steps_per_epoch': args.steps_per_epoch,
+        'rounds_consumed': rounds_consumed,
+        'rounds_skipped': rounds_skipped,
+        'rejected_rounds': sorted(rejected_rounds),
+        'rounds': rounds,
+    }, indent=2))
+    for r in rounds:
+        _log(f"round {r['round_no']}: consumed at step {r['consume_step']} for "
+             f"{r['steps_active']} steps (async_gap_steps={r['async_gap_steps']})")
     _log(f"done at step {global_step} | rounds_consumed={rounds_consumed} "
          f"rounds_skipped={rounds_skipped}")
     return 0

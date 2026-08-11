@@ -59,6 +59,27 @@ ASYNC_FG_NO_COMPILE="${ASYNC_FG_NO_COMPILE:-}"  # disable torch.compile
 ASYNC_FG_LAMBDA="${ASYNC_FG_LAMBDA:-}"          # override lambda_val (sweep arm)
 ASYNC_FG_SUFFIX="${ASYNC_FG_SUFFIX:-}"          # isolate model dir + handoff root
 ASYNC_FG_FRESH="${ASYNC_FG_FRESH:-}"            # wipe the handoff root before starting
+ASYNC_FG_BOOTSTRAP_CKPT="${ASYNC_FG_BOOTSTRAP_CKPT:-}"  # extra early checkpoint (ABLATION)
+ASYNC_FG_RECIPE="${ASYNC_FG_RECIPE:-}"          # training.<recipe> block; see below
+ASYNC_FG_MANIFEST="${ASYNC_FG_MANIFEST:-}"      # pilot manifest JSONL
+
+# RECIPES (config/config.yaml -> training.*), selected with ASYNC_FG_RECIPE:
+#   async_fast_grass        full corrected run   (max_age_steps 1000, no gate)
+#   async_fast_grass_pilot  10% lambda pilot     (1032 steps, gate >= 128 steps)
+#   async_fast_grass_smoke  GPU wiring smoke     (64 steps, gate >= 1 step)
+# The pilot/smoke recipes carry `pilot_gate_min_steps`, so the orchestrator evaluates
+# the run validity gate and EXITS NONZERO if the run never consumed a refreshed mined
+# round. The full recipe has no such key and its exit behaviour is unchanged.
+#
+# SLURM wall-clock is set per stage on the sbatch line rather than by editing this file:
+#   sbatch --time=01:00:00 ...   # GPU smoke
+#   sbatch --time=04:00:00 ...   # one pilot arm
+
+# ASYNC_FG_BOOTSTRAP_CKPT: trainer saves ONE extra checkpoint at this step (e.g. 200)
+# so the miner stops idling ~37 min at startup. Must be 0 < N < async_mine_every_steps
+# or the trainer RAISES. This is NOT a free speedup: the extra mined round runs ~51
+# maintenance intervals that mutate the PERSISTED cache and shift the weights, so the
+# run trajectory forks permanently. Hold it constant across every arm of a sweep.
 
 # LAMBDA SWEEP: every arm MUST set both ASYNC_FG_LAMBDA and a distinct
 # ASYNC_FG_SUFFIX. Without the suffix all arms share one model dir and one handoff
@@ -72,7 +93,8 @@ mkdir -p logs
 
 echo "🚀 Async Fast-GRASS (cached-MCDP) — trainer GPU 0 / miner GPU 1"
 echo "   debug=${ASYNC_FG_DEBUG:-off} | max_rounds=${ASYNC_FG_MAX_ROUNDS:-unbounded}"
-echo "   lambda=${ASYNC_FG_LAMBDA:-<config>} | suffix=${ASYNC_FG_SUFFIX:-<none>}"
+echo "   lambda=${ASYNC_FG_LAMBDA:-<config>} | suffix=${ASYNC_FG_SUFFIX:-<none>} | bootstrap_ckpt=${ASYNC_FG_BOOTSTRAP_CKPT:-off}"
+echo "   recipe=${ASYNC_FG_RECIPE:-async_fast_grass} | manifest=${ASYNC_FG_MANIFEST:-<full mixture>}"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader || true
 
 # --- 1. CPU correctness gate (fail fast before burning 2 GPUs) ---
@@ -86,6 +108,7 @@ if [ -n "${ASYNC_FG_RUN_TESTS}" ]; then
             python -u scripts/async_fast_grass_handoff_test.py
             python -u scripts/async_fast_grass_cache_semantics_test.py
             python -u scripts/async_fast_grass_persistence_test.py
+            python -u scripts/async_fast_grass_pilot_test.py
             python -u scripts/async_fast_grass_integration_smoke.py
             python -u scripts/fast_grass_test.py
         '
@@ -107,7 +130,10 @@ singularity exec \
     --bind /scratch/${USER}:/scratch/${USER} \
     --bind /home/${USER}:/home/${USER} \
     ${CONTAINER} \
-    python -u scripts/train_async_fast_grass.py --preflight ${ASYNC_FG_DEBUG:+--debug}
+    python -u scripts/train_async_fast_grass.py --preflight \
+        ${ASYNC_FG_DEBUG:+--debug} \
+        ${ASYNC_FG_RECIPE:+--recipe $ASYNC_FG_RECIPE} \
+        ${ASYNC_FG_MANIFEST:+--manifest $ASYNC_FG_MANIFEST}
 PRE_EXIT=$?
 if [ $PRE_EXIT -ne 0 ]; then
     echo "❌ preflight failed with code $PRE_EXIT — aborting before GPU work"
@@ -121,18 +147,25 @@ singularity exec --nv \
     --bind /home/${USER}:/home/${USER} \
     ${CONTAINER} \
     python -u scripts/train_async_fast_grass.py \
+        ${ASYNC_FG_RECIPE:+--recipe $ASYNC_FG_RECIPE} \
+        ${ASYNC_FG_MANIFEST:+--manifest $ASYNC_FG_MANIFEST} \
         ${ASYNC_FG_DEBUG:+--debug} \
         ${ASYNC_FG_MAX_ROUNDS:+--max_rounds $ASYNC_FG_MAX_ROUNDS} \
         ${ASYNC_FG_NO_EVAL:+--no_eval} \
         ${ASYNC_FG_NO_COMPILE:+--no_compile} \
         ${ASYNC_FG_LAMBDA:+--lambda_val $ASYNC_FG_LAMBDA} \
         ${ASYNC_FG_SUFFIX:+--run_suffix $ASYNC_FG_SUFFIX} \
+        ${ASYNC_FG_BOOTSTRAP_CKPT:+--bootstrap_checkpoint_step $ASYNC_FG_BOOTSTRAP_CKPT} \
         ${ASYNC_FG_FRESH:+--fresh}
 RUN_EXIT=$?
 
 echo "=========================================="
 echo "Job $SLURM_JOB_ID completed with code $RUN_EXIT"
-echo "Handoff artifacts: \$DATA_BASE_DIR/temp_fast_grass_workdir/async_mining/"
+echo "Handoff artifacts: \$DATA_BASE_DIR/temp_fast_grass_workdir/async_mining${ASYNC_FG_SUFFIX:+_$ASYNC_FG_SUFFIX}/"
+echo "Run summary:       \$DATA_BASE_DIR/models/<model_name>/async_run_summary.json"
+echo "RUN_EXIT=1 with a PASS/FAIL gate block above means the run completed but is"
+echo "  INVALID evidence about lambda (no refreshed mined round was trained on long"
+echo "  enough). Do NOT submit the nonzero arms on a failed lambda=0 run."
 echo "Tuning signals to read from the log:"
 echo "  async_gap_steps / data_age_steps rising + miner_idle_time ~0"
 echo "     => miner is the bottleneck: raise async_mine_every_steps or lower B_doc/T"

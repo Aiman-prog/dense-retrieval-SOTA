@@ -50,6 +50,10 @@ from async_fast_grass_handoff import (  # noqa: E402
     newest_valid_checkpoint, checkpoint_step, round_paths, work_paths,
     initial_paths,
 )
+# PRODUCTION predicate + resolver, not a reimplementation of them
+from run_async_fast_grass_train import (  # noqa: E402
+    should_checkpoint, _resolve_bootstrap_step,
+)
 
 
 # ---- tree builders ---------------------------------------------------------
@@ -476,6 +480,64 @@ def _run(name, fn):
         return False
 
 
+def _fired(max_steps, mine_every, bootstrap_step=0):
+    """Steps at which the PRODUCTION predicate says the trainer checkpoints."""
+    return [s for s in range(1, max_steps + 1)
+            if should_checkpoint(s, mine_every, max_steps, bootstrap_step)]
+
+
+def test_bootstrap_default_off_is_a_noop():
+    """With the key absent or 0, checkpoints are exactly the old cadence.
+
+    This is what makes the change safe to push while sweep arms are queued: those
+    jobs read the .py at launch, so the default MUST be bit-identical to before.
+    """
+    cfg = {}
+    assert _resolve_bootstrap_step(cfg, None, 1000) == 0, "absent key must mean off"
+    assert _resolve_bootstrap_step({'bootstrap_checkpoint_step': 0}, None, 1000) == 0
+
+    expected = [1000 * k for k in range(1, 11)] + [10314]   # + the final step
+    assert _fired(10314, 1000, 0) == expected, "default-off changed the cadence"
+    # and the CLI default (None) resolves through config, not around it
+    assert _fired(10314, 1000, _resolve_bootstrap_step(cfg, None, 1000)) == expected
+
+
+def test_bootstrap_adds_exactly_one_checkpoint():
+    """bootstrap=200 adds step 200 and nothing else."""
+    step = _resolve_bootstrap_step({'bootstrap_checkpoint_step': 200}, None, 1000)
+    assert step == 200
+    off = _fired(10314, 1000, 0)
+    on = _fired(10314, 1000, step)
+    assert set(on) - set(off) == {200}, f"expected only 200 added, got {set(on) - set(off)}"
+    assert set(off) - set(on) == set(), "bootstrap must not remove a checkpoint"
+    assert on.count(200) == 1, "bootstrap step must fire exactly once"
+    # CLI overrides config
+    assert _resolve_bootstrap_step({'bootstrap_checkpoint_step': 200}, 400, 1000) == 400
+
+
+def test_invalid_bootstrap_raises_not_silently_disabled():
+    """A nonzero value >= mine_every RAISES.
+
+    Warning-and-disabling would yield a run labelled bootstrapped that never wrote
+    the extra checkpoint. Because the bootstrap round mutates the PERSISTED cache,
+    that silently mislabels an ablation arm.
+    """
+    for bad in (1000, 1500, -1):
+        try:
+            _resolve_bootstrap_step({'bootstrap_checkpoint_step': bad}, None, 1000)
+        except ValueError:
+            continue
+        raise AssertionError(
+            f"bootstrap_checkpoint_step={bad} must raise, not be silently disabled")
+    # the CLI path is validated too, not just the config path
+    try:
+        _resolve_bootstrap_step({}, 1000, 1000)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("invalid CLI override must raise")
+
+
 TESTS = [
     # commit semantics
     ("ready_initial ignored by marker scan", test_ready_initial_ignored_by_marker_scan),
@@ -497,6 +559,10 @@ TESTS = [
     ("ready_poll vs checkpoint cadence independent", test_ready_poll_and_checkpoint_cadences_are_independent),
     ("async_gap / data_age / round counters", test_async_gap_and_data_age_arithmetic),
     ("swap keeps optimizer + scheduler + step", test_dataloader_swap_keeps_optimizer_and_scheduler),
+    # bootstrap checkpoint (mining-schedule ablation, ships OFF)
+    ("bootstrap default-off is a no-op", test_bootstrap_default_off_is_a_noop),
+    ("bootstrap adds exactly one checkpoint", test_bootstrap_adds_exactly_one_checkpoint),
+    ("invalid bootstrap RAISES, not disabled", test_invalid_bootstrap_raises_not_silently_disabled),
 ]
 
 

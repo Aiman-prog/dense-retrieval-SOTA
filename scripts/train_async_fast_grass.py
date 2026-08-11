@@ -51,10 +51,14 @@ from async_fast_grass_cached_mcdp import (  # noqa: E402
     build_async_cfg, mine_batch_cached_mcdp, maintenance_interval_mined_queries,
     steps_per_epoch, QueryMCReservoir, MaintenanceDriver,
     maintain_interval_cached_mcdp, canonicalize_positives,
-    UnresolvablePositivesError,
+    UnresolvablePositivesError, validate_refresh_schedule, format_refresh_report,
 )
 from async_fast_grass_handoff import (  # noqa: E402
     initial_paths, write_ready_initial, latest_committed_round,
+)
+from async_fast_grass_pilot import (  # noqa: E402
+    maybe_apply_manifest, manifest_source_counts, load_manifest, ManifestError,
+    evaluate_pilot_gate, format_gate_report,
 )
 
 
@@ -62,20 +66,41 @@ def _log(msg):
     print(f"[AsyncFG] {msg}", flush=True)
 
 
-def _preflight(corpus_file, qrels_file, debug=False):
+def _preflight_paths():
+    """Resolve the processed inputs WITHOUT running ``run_setup``.
+
+    ``run_setup`` regenerates missing derived files. Preflight must be a pure
+    inspection: it runs before a long job to confirm what is already on disk, and a
+    validator that silently builds its own input validates nothing. Missing files are
+    reported, not created.
+
+    Returns ``(corpus_file, qrels_file, missing)``.
+    """
+    processed = get_path("processed")
+    corpus_file = processed / "reasonir_corpus.jsonl"
+    qrels_file = processed / "train_qrels.txt"
+    mixture_dir = processed / "training_mixture"
+    missing = [str(p) for p in (corpus_file, qrels_file, mixture_dir)
+               if not p.exists()]
+    return corpus_file, qrels_file, missing
+
+
+def _preflight(corpus_file, qrels_file, debug=False, manifest=None, config=None,
+               ctx=None):
     """Validate the REAL processed data before a long GPU job is submitted.
 
     The trainer resolves docids strictly, so any positive that is absent from
     ``reasonir_corpus.jsonl`` is a hard failure at step 0. ``run_setup`` MD5-dedupes
     passages and remaps only the corpus and qrels — the mixture keeps its original
-    positive docid — so this is exactly where that bites. No GPU is touched.
+    positive docid — so this is exactly where that bites. No GPU is touched and
+    nothing is regenerated.
     """
     corpus_lookup = _load_corpus_lookup(corpus_file)
     qrels_dict = _load_qrels(qrels_file)
     train_items = run_fast_grass._load_train_items(debug=debug)
 
     print("\n" + "=" * 66)
-    print("  ASYNC FAST-GRASS — PREFLIGHT (no GPU)")
+    print("  ASYNC FAST-GRASS — PREFLIGHT (no GPU, no regeneration)")
     print("=" * 66)
     print(f"  corpus docs      : {len(corpus_lookup):,}")
     print(f"  qrels queries    : {len(qrels_dict):,}")
@@ -83,6 +108,17 @@ def _preflight(corpus_file, qrels_file, debug=False):
     if not train_items:
         print("  ❌ the training mixture is EMPTY in the processed schema "
               "(positive_passages). Run preprocessing first.")
+        return 2
+
+    # The stale pickle supplies the initial H docid sample. It is a hard failure deep
+    # inside build_initial_round, so catch it here rather than after the job starts.
+    stale_pkl = get_path("temp_grass") / "stale_index" / "corpus.pkl"
+    if stale_pkl.exists():
+        print(f"  stale index      : found ({stale_pkl})")
+    else:
+        print(f"  ❌ stale index MISSING at {stale_pkl}. Async Fast-GRASS does not "
+              f"rebuild the corpus index; build it once via run_fast_grass.py.")
+        print("=" * 66)
         return 2
 
     qrels_docids = {d for s in qrels_dict.values() for d in s}
@@ -110,10 +146,45 @@ def _preflight(corpus_file, qrels_file, debug=False):
     print(f"  after canonicalization: kept {stats['kept']:,}/{stats['total']:,} "
           f"(remapped {stats['remapped']:,}, dropped {stats['dropped']:,}); "
           f"{len(still_bad):,} still unresolvable")
-    print("-" * 66)
+
     ok = not still_bad and stats['kept'] == stats['total'] and stats['kept'] > 0
+
+    # --- manifest: same load + apply the orchestrator and miner use ---
+    if manifest:
+        print("-" * 66)
+        try:
+            rows = load_manifest(manifest)
+            out = maybe_apply_manifest(out, manifest,
+                                       log=lambda m: print(f"  {m}"))[0]
+        except ManifestError as e:
+            print(f"  ❌ {e}")
+            print("=" * 66)
+            return 2
+        counts = manifest_source_counts(rows)
+        for source in sorted(counts):
+            print(f"    {source:<9}: {counts[source]:>8,}")
+        print(f"  manifest total   : {len(out):,}")
+
+    # --- derived schedule + refresh eligibility ---
+    if config is not None and ctx is not None:
+        batch_size = int(ctx['args'].get('batch_size', 64))
+        # build the cfg with the REAL steps_per_epoch: the max_age_epochs fallback
+        # multiplies by it, so a placeholder would validate the wrong schedule
+        spe = steps_per_epoch(len(out), batch_size)
+        cfg = build_async_cfg(config, ctx, spe)
+        print("-" * 66)
+        print(f"  batch_size       : {batch_size}")
+        print(f"  steps_per_epoch  : {spe:,}")
+        print(f"  total_steps      : {cfg['total_steps']:,} "
+              f"({cfg['num_epochs']} epochs)")
+        errors, warnings, info = validate_refresh_schedule(cfg)
+        print(format_refresh_report(errors, warnings, info))
+        if errors:
+            ok = False
+
+    print("-" * 66)
     print(f"  {'PASS' if ok else 'FAIL'}  every mixture item has a strictly "
-          f"resolvable positive")
+          f"resolvable positive and refresh can influence training")
     print("=" * 66)
     return 0 if ok else 1
 
@@ -359,10 +430,19 @@ def main():
                     help='override training.async_fast_grass.lambda_val for the '
                          'lambda sweep. Pinned at submit time so a queued job cannot '
                          'pick up whatever value config.yaml holds when it starts.')
+    ap.add_argument('--bootstrap_checkpoint_step', type=int, default=None,
+                    help='trainer saves ONE extra checkpoint at this step so the '
+                         'miner stops idling at startup. 0/absent = off. This is an '
+                         'ABLATION, not a speedup: the extra round mutates the '
+                         'persisted cache, so hold it constant across a sweep.')
     ap.add_argument('--run_suffix', default=None,
                     help='isolate this run: appends to the model dir name AND the '
                          'async handoff root, so concurrent sweep arms cannot '
                          'overwrite each other\'s checkpoints or mined rounds.')
+    ap.add_argument('--manifest', default=None,
+                    help='pilot manifest JSONL (scripts/async_fast_grass_pilot.py '
+                         'build-manifest). Restricts and orders the mixture; passed '
+                         'through to the miner so both processes see the same set.')
     args = ap.parse_args()
 
     config = load_config()
@@ -376,11 +456,21 @@ def main():
         ctx['args']['model_name'] = f"{ctx['args']['model_name']}_{args.run_suffix}"
     set_seed(config.get('seed', 42))
 
+    # PREFLIGHT FIRST, deliberately ahead of run_setup(): run_setup regenerates missing
+    # derived files, and a validator that builds its own input validates nothing.
+    if args.preflight:
+        corpus_file, qrels_file, missing = _preflight_paths()
+        if missing:
+            print("\n❌ preflight cannot run — these processed inputs are absent:")
+            for p in missing:
+                print(f"     {p}")
+            print("   Preflight never regenerates data; run preprocessing first.")
+            return 2
+        return _preflight(corpus_file, qrels_file, debug=args.debug,
+                          manifest=args.manifest, config=config, ctx=ctx)
+
     from data.preprocessor import run_setup
     corpus_file, _query_file, qrels_file = run_setup()
-
-    if args.preflight:
-        return _preflight(corpus_file, qrels_file, debug=args.debug)
 
     # Detect GPUs BEFORE restricting visibility; subprocesses get their own pin.
     n_gpus = torch.cuda.device_count()
@@ -434,6 +524,9 @@ def main():
     # corpus and qrels, not the mixture); resolve them before anything is mined
     train_items, _canon = canonicalize_positives(train_items, qrels_dict,
                                                  corpus_lookup, log=_log)
+    # manifest AFTER canonicalization, exactly as the miner does it
+    train_items, manifest_meta = maybe_apply_manifest(train_items, args.manifest,
+                                                      log=_log)
     qid_to_text = {it['query_id']: it['query'] for it in train_items}
 
     batch_size = ctx['args'].get('batch_size', 64)
@@ -444,6 +537,16 @@ def main():
     _log(f"{len(train_items):,} examples | {spe:,} steps/epoch | "
          f"{num_epochs} epochs | {max_steps:,} total steps | maintain every "
          f"{maintenance_interval_mined_queries(cfg, batch_size):,} mined queries")
+
+    # Refresh eligibility is a START-of-run decision: a config in which no refreshed
+    # round can reach the trainer produces a run that looks fine and answers nothing.
+    refresh_errors, refresh_warnings, refresh_info = validate_refresh_schedule(cfg)
+    _log("refresh schedule:\n" + format_refresh_report(
+        refresh_errors, refresh_warnings, refresh_info))
+    if refresh_errors:
+        raise RuntimeError(
+            "refusing to start: the cache-refresh schedule cannot influence this run "
+            "(" + "; ".join(refresh_errors) + ")")
 
     output_model_dir = get_path("models") / ctx['args']['model_name']
     output_model_dir.mkdir(parents=True, exist_ok=True)
@@ -472,6 +575,10 @@ def main():
         # The miner rebuilds cfg from the recipe, so the override must travel with
         # it — lambda is a MINING parameter and the trainer never reads it.
         miner_cmd += ['--lambda_val', repr(float(args.lambda_val))]
+    if args.manifest:
+        # both processes must mine/size the SAME set, or steps_per_epoch and the
+        # maintenance budget would be derived from a different mixture than is mined
+        miner_cmd += ['--manifest', str(args.manifest)]
     if args.max_rounds:
         miner_cmd += ['--max_rounds', str(args.max_rounds)]
     if args.debug:
@@ -491,12 +598,51 @@ def main():
     ]
     if args.no_compile:
         trainer_cmd += ['--no_compile']
+    if args.bootstrap_checkpoint_step is not None:
+        trainer_cmd += ['--bootstrap_checkpoint_step',
+                        str(int(args.bootstrap_checkpoint_step))]
 
     trainer = subprocess.Popen(trainer_cmd, env=trainer_env)
     _log(f"trainer started on GPU {trainer_gpu} (pid {trainer.pid})")
 
     miner_failed, trainer_rc = supervise(trainer, miner, log=_log)
-    _log(f"miner stopped | rounds committed: {latest_committed_round(root)}")
+    committed = latest_committed_round(root)
+    _log(f"miner stopped | rounds committed: {committed}")
+
+    # --- validity gate -------------------------------------------------------
+    # The summary is written FIRST and unconditionally: a failing run is exactly the
+    # one whose diagnostics matter, and raising before writing would discard them.
+    gate_min_steps = ctx['args'].get('pilot_gate_min_steps')
+    trainer_summary = {}
+    summary_path = output_model_dir / "async_trainer_summary.json"
+    if summary_path.exists():
+        trainer_summary = json.loads(summary_path.read_text())
+
+    gate_ok, gate_reasons, gate_details = (True, [], None)
+    if gate_min_steps is not None:
+        gate_ok, gate_reasons, gate_details = evaluate_pilot_gate(
+            root, trainer_summary, output_model_dir, miner_failed,
+            int(gate_min_steps))
+
+    (output_model_dir / "async_run_summary.json").write_text(json.dumps({
+        'recipe': args.recipe,
+        'run_suffix': args.run_suffix,
+        'lambda_val': cfg['lambda_val'],
+        'manifest': str(args.manifest) if args.manifest else None,
+        'manifest_sha256': (manifest_meta or {}).get('sha256'),
+        'num_train_items': len(train_items),
+        'steps_per_epoch': spe,
+        'max_steps': max_steps,
+        'max_age_steps': cfg['max_age_steps'],
+        'miner_failed': miner_failed,
+        'trainer_returncode': trainer_rc,
+        'rounds_committed': committed,
+        'refresh_info': refresh_info,
+        'pilot_gate_min_steps': gate_min_steps,
+        'pilot_gate_ok': gate_ok if gate_min_steps is not None else None,
+        'pilot_gate_reasons': gate_reasons,
+        'pilot_gate_details': gate_details,
+    }, indent=2, default=str))
 
     if miner_failed is not None:
         raise RuntimeError(
@@ -504,6 +650,15 @@ def main():
             f"trainer would otherwise have continued on stale mined data")
     if trainer_rc != 0:
         raise RuntimeError(f"trainer exited with code {trainer_rc}")
+
+    if gate_min_steps is not None:
+        # Nonzero exit, not just a printed FAIL: SLURM would otherwise report the job
+        # as successful, and an invalid lambda=0 arm would appear to authorise the
+        # nonzero arms. Recipes without the key (the full run) never reach this.
+        print(format_gate_report(gate_ok, gate_reasons, gate_details), flush=True)
+        if not gate_ok:
+            _log(f"run summary written to {output_model_dir/'async_run_summary.json'}")
+            return 1
 
     if not args.no_eval:
         evaluate_bright(ctx, config, output_model_dir)

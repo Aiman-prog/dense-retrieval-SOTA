@@ -56,8 +56,9 @@ import run_fast_grass  # noqa: E402
 from async_fast_grass_cached_mcdp import (  # noqa: E402
     mine_batch_cached_mcdp, maintain_interval_cached_mcdp, QueryMCReservoir,
     MaintenanceDriver, maintenance_interval_mined_queries, build_async_cfg,
-    steps_per_epoch, canonicalize_positives,
+    steps_per_epoch, canonicalize_positives, MiningDiagnostics,
 )
+from async_fast_grass_pilot import maybe_apply_manifest  # noqa: E402
 from async_fast_grass_handoff import (  # noqa: E402
     publish_round, reap_orphans, prune_cache_states, resolve_cache_state,
     work_paths, round_paths, newest_valid_checkpoint, read_meta,
@@ -136,6 +137,7 @@ def mine_round(cache, student, tokenizer, train_items, qid_to_text, corpus_looku
     reservoir = QueryMCReservoir(cfg.get('recent_query_reservoir_size', 128))
     driver = MaintenanceDriver(cfg, batch_size)
     maint_records, maint_time = [], 0.0
+    diag = MiningDiagnostics()
     doc_calls_mining = 0
     q_examples = q_batches = 0
     n_batches = max(int(math.ceil(len(train_items) / batch_size)), 1)
@@ -157,11 +159,15 @@ def mine_round(cache, student, tokenizer, train_items, qid_to_text, corpus_looku
 
             mined, _slots, q_mc, mstats = mine_batch_cached_mcdp(
                 cache, student, tokenizer, batch_qids, qid_to_text, qrels_dict,
-                T, cfg, device, chunk_size=chunk_size)
+                T, cfg, device, chunk_size=chunk_size,
+                # model time, so selected-doc age is measured against the SAME frozen
+                # checkpoint the whole round uses
+                age_step=source_checkpoint_step)
 
             doc_calls_mining += mstats['mcdp_doc_encoder_calls_mining']
             q_examples += mstats['query_examples_encoded']
             q_batches += mstats['query_forward_batches']
+            diag.add(mstats)
 
             # docid-only records: the trainer resolves text through the same
             # corpus_lookup, so rounds stay small over the full mixture.
@@ -256,6 +262,9 @@ def mine_round(cache, student, tokenizer, train_items, qid_to_text, corpus_looku
         'cache_score_pairs': int(cache.cache_score_pairs),
         'cache_maintenance_time': maint_time,
         **_cache_age_stats(cache, source_checkpoint_step),
+        # cached-MCDP selection diagnostics: previously computed per batch and thrown
+        # away, so a finished run could not say whether lambda changed anything
+        **diag.summary(),
     }
 
     cache.save_state(w['cache_state'])
@@ -281,6 +290,10 @@ def main():
     ap.add_argument('--lambda_val', type=float, default=None,
                     help='override training.async_fast_grass.lambda_val; passed '
                          'down by the orchestrator for the lambda sweep')
+    ap.add_argument('--manifest', default=None,
+                    help='pilot manifest JSONL; restricts and orders the mixture. '
+                         'MUST match the orchestrator\'s, or the miner would mine a '
+                         'different set than the run was sized for.')
     args = ap.parse_args()
 
     config = load_config()
@@ -304,6 +317,10 @@ def main():
     # canonical ids that actually exist in the corpus (see canonicalize_positives)
     train_items, canon = canonicalize_positives(train_items, qrels_dict,
                                                 corpus_lookup, log=_log)
+    # manifest AFTER canonicalization, exactly as the orchestrator does it, so both
+    # processes end up with the identical ordered item list
+    train_items, _manifest_meta = maybe_apply_manifest(train_items, args.manifest,
+                                                       log=_log)
     qid_to_text = {it['query_id']: it['query'] for it in train_items}
 
     batch_size = ctx['args'].get('batch_size', 64)

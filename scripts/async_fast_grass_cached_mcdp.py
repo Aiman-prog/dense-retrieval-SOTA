@@ -51,6 +51,7 @@ __all__ = [
     'encode_queries_mc', 'encode_docs_mc', 'init_Z_mc',
     'QueryMCReservoir', 'MaintenanceDriver', 'maintenance_interval_mined_queries',
     'maintain_interval_cached_mcdp', 'mine_batch_cached_mcdp',
+    'validate_refresh_schedule', 'format_refresh_report', 'MiningDiagnostics',
 ]
 
 
@@ -131,6 +132,14 @@ def build_async_cfg(config, ctx, steps_per_epoch):
     behaves identically.
 
     ``L`` is absent by construction: cached-MCDP scores all of ``H``.
+
+    **``max_age_steps`` precedence.** An explicit non-null ``max_age_steps`` in the
+    recipe WINS; ``max_age_epochs`` is only the fallback. The derived form
+    (``max_age_epochs * steps_per_epoch``) silently produced ``2 * 5157 = 10314``,
+    exactly ``total_steps``, and ``NegativeCache._plan_actions`` tests
+    ``age >= max_age_steps`` — so over-age refresh became eligible only on the final
+    round and no refreshed round ever reached the trainer. Recipes that omit
+    ``max_age_steps`` keep the old value bit-for-bit.
     """
     cfg = dict(ctx['args'])
     cfg.pop('L', None)
@@ -139,8 +148,106 @@ def build_async_cfg(config, ctx, steps_per_epoch):
     cfg['passage_max_len'] = config['model']['passage_max_len']
     cfg['steps_per_epoch'] = int(steps_per_epoch)
     cfg['total_steps'] = cfg['steps_per_epoch'] * cfg['num_epochs']
-    cfg['max_age_steps'] = cfg['max_age_epochs'] * cfg['steps_per_epoch']
+
+    explicit = cfg.get('max_age_steps')
+    if explicit is None:
+        if cfg.get('max_age_epochs') is None:
+            raise ValueError(
+                "the recipe defines neither max_age_steps nor max_age_epochs; cache "
+                "maintenance cannot decide when a document state is over-age")
+        cfg['max_age_steps'] = int(cfg['max_age_epochs']) * cfg['steps_per_epoch']
+        cfg['max_age_source'] = 'max_age_epochs'
+    else:
+        cfg['max_age_steps'] = int(explicit)
+        cfg['max_age_source'] = 'max_age_steps'
+    if cfg['max_age_steps'] < 1:
+        raise ValueError(f"max_age_steps must be >= 1, got {cfg['max_age_steps']}")
     return cfg
+
+
+def validate_refresh_schedule(cfg):
+    """Can over-age refresh actually influence this run? -> (errors, warnings, info).
+
+    Three things have to line up, and none of them are checked anywhere else:
+
+    * ``max_age_steps < total_steps`` — otherwise no refreshed numeric round can ever
+      reach the trainer (the pre-fix default sat exactly ON this boundary);
+    * ``max_age_steps <= async_mine_every_steps`` — the miner freezes model time at
+      ``source_checkpoint_step``, and slots start at ``last_refreshed_step = 0``, so
+      the first round whose checkpoint step reaches ``max_age_steps`` is the first
+      one that can refresh anything;
+    * the interval budget must be non-zero, or maintenance plans actions it cannot pay
+      for.
+
+    Errors are fatal (the orchestrator refuses to start); warnings are printed.
+    """
+    errors, warnings = [], []
+    max_age = int(cfg['max_age_steps'])
+    total = int(cfg.get('total_steps', 0))
+    mine_every = int(cfg.get('async_mine_every_steps', 0) or 0)
+
+    if total and max_age >= total:
+        errors.append(
+            f"max_age_steps={max_age} >= total_steps={total}: no refreshed numeric "
+            f"round can influence training, because a slot only becomes over-age at "
+            f"or after the last checkpoint. Set max_age_steps to about the checkpoint "
+            f"cadence (async_mine_every_steps={mine_every or 'n/a'}).")
+
+    first_refresh = None
+    if mine_every > 0:
+        first_refresh = int(math.ceil(max_age / mine_every)) * mine_every
+        if max_age > mine_every:
+            warnings.append(
+                f"max_age_steps={max_age} > async_mine_every_steps={mine_every}: the "
+                f"first numeric round that can refresh is the one mined from "
+                f"checkpoint-{first_refresh}, not checkpoint-{mine_every}.")
+        if total and first_refresh > total:
+            errors.append(
+                f"the first refresh-eligible checkpoint would be step {first_refresh}, "
+                f"beyond total_steps={total}: refresh can never fire.")
+
+    budget = None
+    if cfg.get('B_doc') and cfg.get('steps_per_epoch'):
+        budget = round(cfg['rho_start'] * int(cfg['B_doc'])
+                       * int(cfg['cache_update_interval'])
+                       / int(cfg['steps_per_epoch']))
+        if budget < 1:
+            errors.append(
+                f"the initial maintenance budget rounds to {budget} slots per interval "
+                f"(rho_start={cfg['rho_start']} * B_doc={cfg['B_doc']} * "
+                f"cache_update_interval={cfg['cache_update_interval']} / "
+                f"steps_per_epoch={cfg['steps_per_epoch']}): maintenance would be a "
+                f"no-op and nothing could ever be refreshed.")
+
+    info = {
+        'max_age_steps': max_age,
+        'max_age_source': cfg.get('max_age_source'),
+        'total_steps': total,
+        'async_mine_every_steps': mine_every,
+        'first_refresh_checkpoint_step': first_refresh,
+        'initial_interval_budget': budget,
+        'maintenance_interval_mined_queries': (
+            maintenance_interval_mined_queries(cfg) if cfg.get('cache_update_interval')
+            else None),
+    }
+    return errors, warnings, info
+
+
+def format_refresh_report(errors, warnings, info):
+    """Human-readable block for the preflight / orchestrator log."""
+    lines = [
+        f"  max_age_steps    : {info['max_age_steps']} "
+        f"(from {info['max_age_source']})",
+        f"  total_steps      : {info['total_steps']}",
+        f"  checkpoint every : {info['async_mine_every_steps']} steps",
+        f"  first refresh-eligible checkpoint: "
+        f"{info['first_refresh_checkpoint_step']}",
+        f"  initial maintenance budget/interval: {info['initial_interval_budget']} "
+        f"slots every {info['maintenance_interval_mined_queries']} mined queries",
+    ]
+    lines += [f"  ⚠️  {w}" for w in warnings]
+    lines += [f"  ❌ {e}" for e in errors]
+    return "\n".join(lines)
 
 
 # ---- cfg-shaped encode wrappers --------------------------------------------
@@ -306,13 +413,17 @@ def maintain_interval_cached_mcdp(cache, student, tokenizer, corpus_lookup,
 
 def mine_batch_cached_mcdp(cache, student, tokenizer, batch_qids,
                            qid_to_text, qrels_dict, T, cfg, device,
-                           chunk_size=None):
+                           chunk_size=None, age_step=None):
     """One virtual mining batch: T query passes + T matmuls over all of H.
 
     Performs **zero document encoder calls** — that invariant is what separates
     cached-MCDP from the lazy top-``L`` path and is asserted by the timing harness
     and the CPU tests. There is no top-``L``: every query is scored against all of
     ``H`` from the cached MC states.
+
+    ``age_step`` is **model time** (``source_checkpoint_step``); pass it to get the
+    selected-document age diagnostic. ``None`` skips that field — it never affects
+    selection, only reporting.
 
     Returns ``(mined, slots, q_mc, stats)``.
     """
@@ -323,13 +434,16 @@ def mine_batch_cached_mcdp(cache, student, tokenizer, batch_qids,
     g, s_hat, sigma = cache.score_cached_mcdp(q_mc, cfg['lambda_val'],
                                               chunk_size=chunk_size)
     g = cache.mask_positives(g, batch_qids, qrels_dict, inplace=True)
-    slots, neg_docids = cache.select(g, m=cfg['m'], mode=cfg['selection_mode'],
+    mode = cfg['selection_mode']
+    slots, neg_docids = cache.select(g, m=cfg['m'], mode=mode,
                                      beta=cfg.get('beta', 5.0), L=None)
     cache.record_selection(slots)
 
     mined = {qid: neg_docids[i] for i, qid in enumerate(batch_qids)}
     sel_g = torch.gather(g, 1, slots)
     sel_sigma = torch.gather(sigma, 1, slots)
+    sel_s_hat = torch.gather(s_hat, 1, slots)
+    lam = float(cfg['lambda_val'])
     stats = {
         'query_mc_passes': enc['mc_passes'],
         'query_examples_encoded': enc['examples_encoded'],
@@ -339,7 +453,82 @@ def mine_batch_cached_mcdp(cache, student, tokenizer, batch_qids,
         'cache_score_pairs_batch': len(batch_qids) * cache.B_doc,
         'sel_g_mean': float(sel_g.float().mean()),
         'sel_sigma_mean': float(sel_sigma.float().mean()),
+        'sel_s_hat_mean': float(sel_s_hat.float().mean()),
+        'sel_lambda_sigma_mean': lam * float(sel_sigma.float().mean()),
         's_hat_mean': float(s_hat[torch.isfinite(s_hat)].float().mean()),
         'sigma_mean': float(sigma.float().mean()),
+        'num_queries': len(batch_qids),
     }
+
+    # --- selected document age (model time - last refresh) ---
+    if age_step is not None:
+        age = (int(age_step) - cache.last_refreshed_step[slots.reshape(-1)]).float()
+        stats['sel_age_mean'] = float(age.mean())
+        stats['sel_age_max'] = float(age.max())
+
+    # --- flip rate vs lambda=0, TopK ONLY ---
+    # `softmax` selection is a Gumbel top-k SAMPLE, so comparing it to a lambda=0
+    # argmax would measure sampling noise, not the uncertainty term. Report null
+    # rather than a misleading number.
+    if str(mode).lower() == 'topk':
+        s0 = cache.mask_positives(s_hat.clone(), batch_qids, qrels_dict, inplace=True)
+        top0 = torch.argmax(s0, dim=1)
+        stats['flip_rate_vs_lambda0'] = float(
+            (top0 != slots[:, 0]).float().mean())
+        stats['flip_rate_unsupported_reason'] = None
+    else:
+        stats['flip_rate_vs_lambda0'] = None
+        stats['flip_rate_unsupported_reason'] = (
+            f"selection_mode={mode!r} draws a Gumbel top-k sample; a flip against the "
+            f"lambda=0 argmax would report sampling noise, not the uncertainty term")
     return mined, slots, q_mc, stats
+
+
+class MiningDiagnostics:
+    """Query-weighted accumulator for the per-batch cached-MCDP diagnostics.
+
+    The miner discarded these before: ``mine_batch_cached_mcdp`` already computed
+    selected ``s_hat``/``sigma`` every batch and threw them away, so a finished run
+    could not answer "did lambda change anything, and against what document ages?".
+
+    Weighting by ``num_queries`` (not by batch count) keeps a short final batch from
+    counting as much as a full one.
+    """
+
+    _MEAN_KEYS = ('sel_s_hat_mean', 'sel_sigma_mean', 'sel_lambda_sigma_mean',
+                  'sel_g_mean', 's_hat_mean', 'sigma_mean', 'flip_rate_vs_lambda0',
+                  'sel_age_mean')
+
+    def __init__(self):
+        self._sums = {k: 0.0 for k in self._MEAN_KEYS}
+        self._weights = {k: 0 for k in self._MEAN_KEYS}
+        self.num_queries = 0
+        self.num_batches = 0
+        self.sel_age_max = None
+        self.flip_rate_unsupported_reason = None
+
+    def add(self, stats):
+        n = int(stats.get('num_queries', 0))
+        self.num_queries += n
+        self.num_batches += 1
+        for k in self._MEAN_KEYS:
+            v = stats.get(k)
+            if v is None:
+                continue
+            self._sums[k] += float(v) * n
+            self._weights[k] += n
+        if stats.get('sel_age_max') is not None:
+            self.sel_age_max = (stats['sel_age_max'] if self.sel_age_max is None
+                                else max(self.sel_age_max, stats['sel_age_max']))
+        if stats.get('flip_rate_unsupported_reason'):
+            self.flip_rate_unsupported_reason = stats['flip_rate_unsupported_reason']
+
+    def summary(self):
+        """``mining_meta`` fields. Keys with no observations are ``None``, never 0.0."""
+        out = {k: (self._sums[k] / self._weights[k] if self._weights[k] else None)
+               for k in self._MEAN_KEYS}
+        out['sel_age_max'] = self.sel_age_max
+        out['flip_rate_unsupported_reason'] = self.flip_rate_unsupported_reason
+        out['diagnostics_num_queries'] = self.num_queries
+        out['diagnostics_num_batches'] = self.num_batches
+        return out
