@@ -770,6 +770,46 @@ def test_orchestrator_gate_wiring():
     assert 'pilot_gate_min_steps' not in load_config()['training']['async_fast_grass']
 
 
+def test_manifest_is_required_by_pilot_and_smoke_recipes():
+    """An empty ASYNC_FG_MANIFEST must be a hard error, not a full-mixture run.
+
+    Reproduces the real failure: `${ASYNC_FG_MANIFEST:+--manifest $X}` expands to
+    NOTHING when the shell variable is unset, so the job silently ran the smoke recipe
+    against all 330,000 items — steps_per_epoch 5,157 instead of 16, and a maintenance
+    budget of 0.5*512*1/5157 that rounds to zero. The pilot would not even have failed
+    loudly; it would have trained 10,314 steps instead of 1,032.
+    """
+    import train_async_fast_grass as orch
+    for recipe in ('async_fast_grass_pilot', 'async_fast_grass_smoke'):
+        ctx = _ctx(recipe)
+        assert ctx['args'].get('requires_manifest') is True, recipe
+        err = orch.check_manifest_required(ctx, None, recipe)
+        assert err and 'requires --manifest' in err, (recipe, err)
+        assert orch.check_manifest_required(ctx, '', recipe), \
+            "an EMPTY manifest path must fail too, not just a missing one"
+        assert orch.check_manifest_required(ctx, '/some/m.jsonl', recipe) is None
+
+    # the full run has no manifest and must stay unaffected
+    full = _ctx('async_fast_grass')
+    assert 'requires_manifest' not in full['args']
+    assert orch.check_manifest_required(full, None, 'async_fast_grass') is None
+
+
+def test_budget_collapses_without_a_manifest():
+    """The exact arithmetic that failed: full mixture + smoke recipe -> zero budget."""
+    config = load_config()
+    ctx = _ctx('async_fast_grass_smoke')
+    cfg = build_async_cfg(config, ctx, steps_per_epoch=steps_per_epoch(330000, 64))
+    errors, _w, info = validate_refresh_schedule(cfg)
+    assert info['initial_interval_budget'] == 0, info
+    assert any('no-op' in e for e in errors), errors
+    # with the manifest applied it is healthy again
+    cfg_ok = build_async_cfg(config, ctx, steps_per_epoch=steps_per_epoch(1024, 64))
+    errors_ok, _w2, info_ok = validate_refresh_schedule(cfg_ok)
+    assert not errors_ok, errors_ok
+    assert info_ok['initial_interval_budget'] == 16, info_ok
+
+
 def test_preflight_does_not_regenerate_data():
     """--preflight must inspect paths, never call run_setup (which rebuilds files)."""
     import inspect
@@ -1061,6 +1101,8 @@ TESTS = [
     ("gate min_steps: 128 fails, smoke 1 passes", test_gate_requires_min_steps),
     ("gate fails on dead miner / no model", test_gate_fails_on_dead_miner_and_missing_model),
     ("orchestrator exits nonzero on gate FAIL", test_orchestrator_gate_wiring),
+    ("pilot/smoke recipes REQUIRE a manifest", test_manifest_is_required_by_pilot_and_smoke_recipes),
+    ("budget collapses to 0 without a manifest", test_budget_collapses_without_a_manifest),
     ("preflight never calls run_setup", test_preflight_does_not_regenerate_data),
     ("preflight reports missing inputs", test_preflight_reports_missing_inputs),
     ("eval --domains routing + validation", test_eval_domain_list_routing_and_validation),

@@ -66,6 +66,30 @@ def _log(msg):
     print(f"[AsyncFG] {msg}", flush=True)
 
 
+def check_manifest_required(ctx, manifest, recipe):
+    """Recipes built around a manifest must not silently run on the full mixture.
+
+    ``async_fast_grass_pilot`` and ``_smoke`` derive every schedule number from their
+    manifest: ``steps_per_epoch`` (516 / 16), the ``cache_update_interval`` that sizes
+    the maintenance budget, and ``max_age_steps``. Point either at the full 330k
+    mixture and you get a different experiment that still looks like a healthy run —
+    the pilot would train 10,314 steps instead of 1,032 and nothing downstream would
+    say so. An unset shell variable is enough to cause it, so this is a hard error
+    rather than a warning.
+
+    Returns an error string, or ``None`` when satisfied.
+    """
+    if ctx['args'].get('requires_manifest') and not manifest:
+        return (f"recipe {recipe!r} requires --manifest but none was given. Its "
+                f"steps_per_epoch, maintenance budget and max_age_steps are all "
+                f"derived from a manifest-sized mixture; against the full mixture "
+                f"this silently becomes a different experiment. Build one with "
+                f"scripts/async_fast_grass_pilot.py build-manifest, and check that "
+                f"ASYNC_FG_MANIFEST is actually set (an empty shell variable expands "
+                f"to no flag at all).")
+    return None
+
+
 def _preflight_paths():
     """Resolve the processed inputs WITHOUT running ``run_setup``.
 
@@ -458,7 +482,12 @@ def main():
 
     # PREFLIGHT FIRST, deliberately ahead of run_setup(): run_setup regenerates missing
     # derived files, and a validator that builds its own input validates nothing.
+    manifest_error = check_manifest_required(ctx, args.manifest, args.recipe)
+
     if args.preflight:
+        if manifest_error:
+            print(f"\n❌ {manifest_error}")
+            return 2
         corpus_file, qrels_file, missing = _preflight_paths()
         if missing:
             print("\n❌ preflight cannot run — these processed inputs are absent:")
@@ -468,6 +497,9 @@ def main():
             return 2
         return _preflight(corpus_file, qrels_file, debug=args.debug,
                           manifest=args.manifest, config=config, ctx=ctx)
+
+    if manifest_error:
+        raise RuntimeError(manifest_error)
 
     from data.preprocessor import run_setup
     corpus_file, _query_file, qrels_file = run_setup()

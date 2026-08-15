@@ -91,6 +91,25 @@ ASYNC_FG_MANIFEST="${ASYNC_FG_MANIFEST:-}"      # pilot manifest JSONL
 
 mkdir -p logs
 
+# An UNSET ASYNC_FG_MANIFEST makes `${ASYNC_FG_MANIFEST:+--manifest $X}` expand to
+# nothing, so a pilot/smoke job would run against the full 330k mixture instead of its
+# manifest — a different experiment that still looks healthy. Catch the typo here,
+# before the queue, instead of relying on the Python check inside the job.
+case "${ASYNC_FG_RECIPE}" in
+  *_pilot|*_smoke)
+    if [ -z "${ASYNC_FG_MANIFEST}" ]; then
+        echo "❌ ASYNC_FG_RECIPE=${ASYNC_FG_RECIPE} requires ASYNC_FG_MANIFEST, which is empty."
+        echo "   Did the shell variable get lost? Use an absolute path:"
+        echo "   ASYNC_FG_MANIFEST=/scratch/\$USER/dense-retrieval-SOTA/data/processed/pilot_manifests/<name>.jsonl"
+        exit 2
+    fi
+    if [ ! -f "${ASYNC_FG_MANIFEST}" ]; then
+        echo "❌ ASYNC_FG_MANIFEST does not exist: ${ASYNC_FG_MANIFEST}"
+        exit 2
+    fi
+    ;;
+esac
+
 echo "🚀 Async Fast-GRASS (cached-MCDP) — trainer GPU 0 / miner GPU 1"
 echo "   debug=${ASYNC_FG_DEBUG:-off} | max_rounds=${ASYNC_FG_MAX_ROUNDS:-unbounded}"
 echo "   lambda=${ASYNC_FG_LAMBDA:-<config>} | suffix=${ASYNC_FG_SUFFIX:-<none>} | bootstrap_ckpt=${ASYNC_FG_BOOTSTRAP_CKPT:-off}"

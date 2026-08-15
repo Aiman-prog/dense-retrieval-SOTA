@@ -27,6 +27,12 @@ CONTAINER="/scratch/${USER}/containers/pytorch_2.1.sif"
 
 # --- CONFIGURATION ---
 MODEL_PATH="${EVAL_MODEL_PATH:?Error: EVAL_MODEL_PATH must be set}"
+# Comma-separated subset. The lambda pilot evaluates four development domains:
+#   EVAL_DOMAINS=biology,economics,stackoverflow,theoremqa_questions
+EVAL_DOMAINS="${EVAL_DOMAINS:-}"
+# Refuse to build missing BRIGHT domain files. Set for the pilot so an evaluation job
+# can never regenerate processed data as a side effect mid-experiment.
+EVAL_REQUIRE_EXISTING="${EVAL_REQUIRE_EXISTING:-}"
 
 # --- Create output directories ---
 mkdir -p logs
@@ -34,14 +40,20 @@ mkdir -p logs
 # --- Run Evaluation in Container ---
 # K and batch_size are read from config/config.yaml by the Python scripts
 echo "🔍 Starting evaluation for model: ${MODEL_PATH}"
-echo "📊 Evaluating on all BRIGHT domains (settings from config.yaml)"
+echo "📊 Domains: ${EVAL_DOMAINS:-all (config.yaml evaluation.eval_domains)}"
+echo "📊 require_existing: ${EVAL_REQUIRE_EXISTING:-off}"
+
+RESULTS_JSON="${DATA_BASE_DIR}/results/bright_benchmark/$(basename ${MODEL_PATH})/summary.json"
 
 singularity exec --nv \
     --bind /scratch/${USER}:/scratch/${USER} \
     --bind /home/${USER}:/home/${USER} \
     ${CONTAINER} \
     python -u scripts/run_all_evals.py \
-        --model_path "${MODEL_PATH}"
+        --model_path "${MODEL_PATH}" \
+        --results_json "${RESULTS_JSON}" \
+        ${EVAL_DOMAINS:+--domains $EVAL_DOMAINS} \
+        ${EVAL_REQUIRE_EXISTING:+--require_existing}
 
 EXIT_CODE=$?
 

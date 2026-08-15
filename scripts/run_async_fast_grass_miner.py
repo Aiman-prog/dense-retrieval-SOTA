@@ -298,6 +298,14 @@ def main():
 
     config = load_config()
     ctx = get_training_context(args.recipe)
+    # Same requirement as the orchestrator: a manifest-derived recipe mined against the
+    # full mixture is a different experiment. The orchestrator passes --manifest down,
+    # so this only bites on a manual invocation — which is exactly when it is easy to
+    # forget.
+    if ctx['args'].get('requires_manifest') and not args.manifest:
+        raise RuntimeError(
+            f"recipe {args.recipe!r} requires --manifest; mining the full mixture "
+            f"would not match the schedule the trainer was sized for")
     # build_async_cfg copies dict(ctx['args']), so injecting here reaches every
     # score_cached_mcdp call for the life of the miner
     if args.lambda_val is not None:

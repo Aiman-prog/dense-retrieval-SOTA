@@ -281,6 +281,11 @@ training:
                              # is already eligible to refresh over-age slots
     logging_steps: 10
     bootstrap_checkpoint_step: 0
+    requires_manifest: true  # HARD requirement, not a default. Every number in this
+                             # block (steps_per_epoch 516, the cache_update_interval
+                             # 10 that sizes the budget, max_age_steps 100) is derived
+                             # from the 33k manifest. Running it against the full 330k
+                             # mixture silently becomes a different experiment.
     pilot_gate_min_steps: 128   # a numeric mined round with num_refresh_total > 0
                              # must be consumed for at least this many optimizer
                              # steps or the run is INVALID and exits nonzero.
@@ -310,6 +315,9 @@ training:
     max_age_steps: 10
     logging_steps: 2
     bootstrap_checkpoint_step: 0
+    requires_manifest: true  # see async_fast_grass_pilot; without the 1,024-item
+                             # manifest steps_per_epoch becomes 5,157 and the budget
+                             # 0.5*512*1/5157 rounds to ZERO slots per interval
     pilot_gate_min_steps: 1  # 64 total steps cannot reach the pilot's 128
 
   ance:
