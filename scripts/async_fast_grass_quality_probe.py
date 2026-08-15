@@ -75,6 +75,22 @@ REGIME_CAVEAT = (
     "quality — that is decided by the pilot arms and their BRIGHT evaluation.")
 
 
+# torch.quantile() rejects inputs above 2**24 elements. The probe's sigma tensor is
+# num_queries * B_doc (2048 * 32000 = 65.5M at the real settings), so it is always over
+# the cap on a real run and always under it on the synthetic smoke. Above the cap, take
+# the exact order statistic instead; kthvalue has no size limit.
+QUANTILE_MAX_NUMEL = 2 ** 24
+
+
+def _quantile(t, q):
+    """Quantile that survives a tensor larger than torch.quantile's 2**24 cap."""
+    flat = t.reshape(-1).float()
+    if flat.numel() <= QUANTILE_MAX_NUMEL:
+        return float(torch.quantile(flat, q))
+    k = min(max(int(round(q * (flat.numel() - 1))) + 1, 1), flat.numel())
+    return float(torch.kthvalue(flat.cpu(), k).values)
+
+
 # ---- one seed, whole grid ---------------------------------------------------
 
 def probe_grid(cache, Z_mc, student, tokenizer, qids, qid_to_text, qrels_dict,
@@ -143,6 +159,7 @@ def probe_grid(cache, Z_mc, student, tokenizer, qids, qid_to_text, qrels_dict,
 
     all_sigma = (torch.cat(sigma_chunks) if sigma_chunks
                  else torch.zeros(1, dtype=torch.float32))
+    all_sigma = all_sigma.reshape(-1)
     out = {}
     for lam, a in acc.items():
         n = max(a['n'], 1)
@@ -162,7 +179,7 @@ def probe_grid(cache, Z_mc, student, tokenizer, qids, qid_to_text, qrels_dict,
     sigma_stats = {
         'sigma_mean': float(all_sigma.mean()),
         'sigma_p50': float(all_sigma.median()),
-        'sigma_p90': float(torch.quantile(all_sigma, 0.9)),
+        'sigma_p90': _quantile(all_sigma, 0.9),
         'sigma_max': float(all_sigma.max()),
         'sigma_all_zero': bool(float(all_sigma.abs().max()) == 0.0),
         'sigma_nonfinite': bool(not torch.isfinite(all_sigma).all()),
