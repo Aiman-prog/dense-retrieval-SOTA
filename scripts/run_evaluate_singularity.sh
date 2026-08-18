@@ -27,9 +27,18 @@ CONTAINER="/scratch/${USER}/containers/pytorch_2.1.sif"
 
 # --- CONFIGURATION ---
 MODEL_PATH="${EVAL_MODEL_PATH:?Error: EVAL_MODEL_PATH must be set}"
-# Comma-separated subset. The lambda pilot evaluates four development domains:
-#   EVAL_DOMAINS=biology,economics,stackoverflow,theoremqa_questions
-EVAL_DOMAINS="${EVAL_DOMAINS:-}"
+# Comma-separated subset, DEFAULTING to the four lambda-pilot development domains so a
+# pilot evaluation never has to spell them out (and can never quietly disagree with the
+# set the decision rule reads). Evaluating all twelve costs ~3x more GPU hours and is not
+# what the pilot compares, so it must be asked for explicitly:
+#   EVAL_DOMAINS=all                      -> all twelve (config.yaml evaluation.eval_domains)
+#   EVAL_DOMAINS=biology,economics        -> that subset
+PILOT_DOMAINS="biology,economics,stackoverflow,theoremqa_questions"
+EVAL_DOMAINS="${EVAL_DOMAINS:-$PILOT_DOMAINS}"
+# `all` is the escape hatch: an empty --domains makes run_all_evals use every domain.
+if [ "${EVAL_DOMAINS}" = "all" ]; then
+    EVAL_DOMAINS=""
+fi
 # Refuse to build missing BRIGHT domain files. Set for the pilot so an evaluation job
 # can never regenerate processed data as a side effect mid-experiment.
 EVAL_REQUIRE_EXISTING="${EVAL_REQUIRE_EXISTING:-}"
