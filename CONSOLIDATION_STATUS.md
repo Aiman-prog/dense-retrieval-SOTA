@@ -11,12 +11,10 @@ Authoritative inputs: `CONSOLIDATION_PROMPT.md` (procedure), `ACCEPTANCE_CRITERI
 ## Next command
 
 ```bash
-# Step 6 — startup config logging in the 6 entry points (the ONLY permitted code change)
-#   log: resolved ctx['base_model'], temperature, query_max_len, passage_max_len,
-#        batch_size, learning_rate, num_epochs, recipe name -- BEFORE training starts.
-#   no new CLI flags, no argparse restructuring, no new config keys.
-KMP_DUPLICATE_LIB_OK=TRUE python scripts/consolidation_preproc_check.py
-# then re-run EVERY AC-COMP-* row, plus AC-SURFACE-01, AC-TEST-01, AC-INV-06.
+# Step 7 — doc reference audit, REPORT ONLY. Fix nothing.
+#   check every file path / module / class / CLI flag referenced by
+#   DELFTBLUE_SETUP.md, README.md, fast_grass_*.md, async_fast_grass_*.md,
+#   lambda_pilot*.md against what exists on main.
 ```
 
 ---
@@ -31,7 +29,7 @@ KMP_DUPLICATE_LIB_OK=TRUE python scripts/consolidation_preproc_check.py
 | 3 | fast-forward `main` → `fast-grass`; tag `archive/main-post-promotion`; apply AC-SURFACE-01 amendment | **DONE** |
 | 4 | MS MARCO additive files + `training.ance_msmarco` | **DONE** |
 | 5 | **gated** merge: preprocessor MS MARCO methods (A3 scope) | **DONE** — gate passed |
-| 6 | startup config logging in the 6 entry points | pending |
+| 6 | startup config logging in the 6 entry points | **DONE** |
 | 7 | doc reference audit (report only) | pending |
 | 8 | deletion proposal — **stop for approval** | pending |
 | — | `GPU_CHECKLIST.md` deliverable | pending |
@@ -41,7 +39,7 @@ KMP_DUPLICATE_LIB_OK=TRUE python scripts/consolidation_preproc_check.py
 | branch | tip | merged into `main`? | archive tag pushed? | safe to delete? |
 |---|---|---|---|---|
 | `fast-grass` | `d0571e4` (pushed) | **YES** — `main` fast-forwarded to it | n/a | needs Step 8 approval |
-| `main` | `f37c74f` | — | `archive/main-pre-consolidation` ✅ `archive/main-post-promotion` ✅ | **NO** (kept — this is the target) |
+| `main` | `d74e5b3` | — | `archive/main-pre-consolidation` ✅ `archive/main-post-promotion` ✅ | **NO** (kept — this is the target) |
 | `new-grass` | `b633376` | same commit as `main` | n/a (same commit) | needs Step 8 approval |
 | `sequential-grass` | `8669117` | ancestor of `fast-grass` | n/a (ancestor) | needs Step 8 approval |
 | `baseline` | `56a9e15` | **NO** — 6 unique commits | `archive/baseline` ✅ | needs Step 8 approval |
@@ -305,6 +303,69 @@ git reset --hard fada4ca
 
 ---
 
+## Step 6 — startup config logging — DONE
+
+Commit `d74e5b3`. One implementation, `log_startup_config()` in `src/utils/helpers.py`;
+six call sites. No duplicated logging code.
+
+Every entry point prints, before training begins:
+
+```
+==================================================================
+RESOLVED TRAINING CONFIG
+  recipe               : fast_grass
+  base_model           : /scratch/.../models/inbatch_mixed_bge_m3
+  base_model source    : as configured (no HF snapshot dir with config.json)  [PATH DOES NOT EXIST]
+  temperature          : 0.02
+  query_max_len        : 1024
+  passage_max_len      : 512
+  batch_size           : 64
+  learning_rate        : 1e-5
+  num_epochs           : 2
+==================================================================
+```
+
+Grep target: `RESOLVED TRAINING CONFIG`.
+
+- `base_model` is the **post-snapshot-resolution** value. `get_training_context()` falls back
+  to the raw configured string when no snapshot dir holds a `config.json`, silently — this
+  block is the guard against training cleanly on the wrong weights. An absolute path that is
+  not on disk is marked `[PATH DOES NOT EXIST]`; that fires for the four checkpoint recipes
+  whenever `/scratch/.../models/inbatch_mixed_bge_m3` is missing.
+- Recipes do not share one spelling, so the block reports the key actually present rather than
+  inventing one: `per_device_batch_size` for `crossbatch` (it has no `batch_size`),
+  `total_epochs` for `ance` / `ance_msmarco` (they have no `num_epochs`).
+- Calls sit **after** any CLI override (`--num_epochs`, `--lambda_val`, `--model_suffix`, …)
+  so the block reports what will actually run. In the async orchestrator it also sits ahead of
+  the `--preflight` branch, so both paths print it.
+- No CLI flag added, no argument parsing restructured, no config key introduced.
+
+**Not changed:** `train_inbatch.py`'s and `run_fast_grass.py`'s pre-existing print blocks are
+left exactly as they were, per rule 1. A few values therefore appear twice in those two logs.
+Removing the older lines would be an unrequested change and could break existing greps.
+
+Step 0 regression re-run: `STEP0_REGRESSION_OK`.
+
+Rollback:
+```bash
+git reset --hard f37c74f
+```
+
+### Mandatory post-Step-6 re-run — every eligible row executed
+
+| row | result |
+|---|---|
+| AC-SURFACE-01 | **PASS** `SURFACE_ALLOWLIST_OK` — reference diff shows only the two Step-4 launchers + one config hunk; all six entry-point CLI/recipe/env/`sys.path`/main fingerprints unchanged despite the logging edits |
+| AC-COMP-01 … 07 | **PASS** (re-run) |
+| AC-COMP-08 | **PASS** `MSMARCO_ACCEPT_STATE STEP5_LANDED` (re-run) |
+| AC-TEST-01 | **PASS** — 13/13 `CPU_SUITE_OK` |
+| AC-INV-06 | **PASS** `SRC_IMPORT_BOUNDARY_OK 11 Python files checked` |
+
+No exit-2 `IMPORT_ENVIRONMENT_OUT_OF_SCOPE` anywhere. `grass_test.py`'s known MQ hash-collision
+flake did not occur (`PYTHONHASHSEED=0` is pinned by the criterion).
+
+---
+
 ## Pre-existing defects — NOT introduced by consolidation, NOT fixed here
 
 Recorded so they are not rediscovered from scratch. Each says what breaks and why. Fixing them
@@ -380,21 +441,20 @@ All rows NOT RUNNABLE YET (gated at Step 3 or later).
 
 | row | gate | state |
 |---|---|---|
-| AC-COMP-01 (preprocessor) | Step 3 | **PASS** — `IMPORT_OK ... run_setup callable` |
-| AC-COMP-02 (in-batch) | Step 3 | **PASS** |
-| AC-COMP-03 (cross-batch) | Step 3 | **PASS** |
-| AC-COMP-04 (ANCE BRIGHT) | Step 3 | **PASS** — 3/3 modules import |
-| AC-COMP-05 (sync GRASS) | Step 3 | **PASS** |
-| AC-COMP-06 (async GRASS) | Step 3 | **PASS** — 3/3 modules import |
-| AC-COMP-07 (sequential Fast-GRASS) | Step 3 | **PASS** |
-| AC-COMP-08 (ANCE MS MARCO) | Step 5 | **PASS** — `STEP5_LANDED` |
-| AC-SURFACE-01 | Step 6 | **PASS** early at Step 4 (`SURFACE_ALLOWLIST_OK`) — must be re-run after Step 6 |
-| AC-TEST-01 | Step 6 | not runnable yet |
-| AC-INV-06 | Step 6 | not runnable yet |
+| AC-SURFACE-01 | Step 6 | **PASS** (post-Step-6 re-run) |
+| AC-COMP-01 (preprocessor) | Step 3 | **PASS** (re-run after Step 6) |
+| AC-COMP-02 (in-batch) | Step 3 | **PASS** (re-run after Step 6) |
+| AC-COMP-03 (cross-batch) | Step 3 | **PASS** (re-run after Step 6) |
+| AC-COMP-04 (ANCE BRIGHT) | Step 3 | **PASS** (re-run after Step 6) |
+| AC-COMP-05 (sync GRASS) | Step 3 | **PASS** (re-run after Step 6) |
+| AC-COMP-06 (async GRASS) | Step 3 | **PASS** (re-run after Step 6) |
+| AC-COMP-07 (sequential Fast-GRASS) | Step 3 | **PASS** (re-run after Step 6) |
+| AC-COMP-08 (ANCE MS MARCO) | Step 5 | **PASS** `STEP5_LANDED` (re-run after Step 6) |
+| AC-TEST-01 | Step 6 | **PASS** — 13/13 `CPU_SUITE_OK` |
+| AC-INV-06 | Step 6 | **PASS** — 11 files checked |
 
-No exit-2 `IMPORT_ENVIRONMENT_OUT_OF_SCOPE` results — every module imported cleanly.
-
-Every `AC-COMP-*` row is re-run after Step 6.
+**All eligible rows executed and passing.** CPU acceptance proves consolidation mechanics
+only — not retrieval quality, not GPU training correctness.
 
 ---
 
