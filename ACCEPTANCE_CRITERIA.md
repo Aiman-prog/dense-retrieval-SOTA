@@ -10,13 +10,22 @@ The import harnesses set `CUDA_VISIBLE_DEVICES` empty and force Transformers/Hug
 
 ## AC-SURFACE-01
 
+> **Amended during consolidation (approved at Gate A; evidence in `CONSOLIDATION_STATUS.md`).**
+> **A1** — `BASE` is `archive/main-post-promotion` (`main` immediately after the Step-3
+> fast-forward), not `archive/main-pre-consolidation`. The latter is `main` @ `b633376`, which
+> predates all of `fast-grass`: the fast-forward alone adds 8 launchers, modifies 11 more, and
+> two entry points do not exist there, so four assertions fired before Step 4 was reached.
+> `archive/main-pre-consolidation` still points at `b633376` and remains the Step-3 rollback anchor.
+> **A2** — `data.msmarco` is byte-identical on `main`, `fast-grass` and `baseline`, so it is not
+> a Step-4 addition; the sole additive block is `training.ance_msmarco`.
+
 **Runnable after step:** 6
 
 **Exact command:**
 
 ```bash
 set -euo pipefail
-git diff archive/main-pre-consolidation..main -- 'scripts/*.sh' 'config/config.yaml'
+git diff archive/main-post-promotion..main -- 'scripts/*.sh' 'config/config.yaml'
 python - <<'PY'
 import ast
 import copy
@@ -25,7 +34,7 @@ import re
 import subprocess
 import sys
 
-BASE = "archive/main-pre-consolidation"
+BASE = "archive/main-post-promotion"
 HEAD = "main"
 ALLOWED_NEW_SH = {
     "scripts/eval_msmarco_singularity.sh",
@@ -77,12 +86,11 @@ def block_range(lines, parent, child):
     return start, end
 
 head_lines = head_text.splitlines(keepends=True)
-ranges = [block_range(head_lines, "data", "msmarco"),
-          block_range(head_lines, "training", "ance_msmarco")]
+ranges = [block_range(head_lines, "training", "ance_msmarco")]
 
-# Removing exactly the two Step-4 blocks, plus at most one adjacent blank line
-# per block, must reproduce the tagged config byte-for-byte. This makes every
-# deletion, replacement, relocation, comment edit, or other added hunk fail.
+# Removing exactly the Step-4 block, plus at most one adjacent blank line, must
+# reproduce the tagged config byte-for-byte. This makes every deletion,
+# replacement, relocation, comment edit, or other added hunk fail.
 def candidates(lines, ranges):
     choices = [[]]
     for start, end in ranges:
@@ -97,7 +105,7 @@ def candidates(lines, ranges):
 if not any("".join(line for i, line in enumerate(head_lines)
                     if not any(start <= i < end for start, end in selected)) == base_text
            for selected in candidates(head_lines, ranges)):
-    raise AssertionError("config diff is not exactly the two additive Step-4 blocks")
+    raise AssertionError("config diff is not exactly the additive Step-4 block")
 
 try:
     import yaml
@@ -105,10 +113,15 @@ except Exception as exc:
     raise AssertionError("PyYAML is required for the config semantic check") from exc
 base_cfg = yaml.safe_load(base_text)
 head_cfg = yaml.safe_load(head_text)
-if "msmarco" in base_cfg.get("data", {}) or "ance_msmarco" in base_cfg.get("training", {}):
-    raise AssertionError("Step-4 blocks unexpectedly existed before consolidation")
+# data.msmarco is NOT a Step-4 addition: it is byte-identical on main, fast-grass
+# and baseline, so it must already be present at BASE. Only training.ance_msmarco
+# is new.
+if "msmarco" not in base_cfg.get("data", {}):
+    raise AssertionError("data.msmarco was expected to pre-exist at BASE")
+if "ance_msmarco" in base_cfg.get("training", {}):
+    raise AssertionError("Step-4 block unexpectedly existed before consolidation")
 trimmed = copy.deepcopy(head_cfg)
-for parent, child in (("data", "msmarco"), ("training", "ance_msmarco")):
+for parent, child in (("training", "ance_msmarco"),):
     if child not in trimmed.get(parent, {}):
         raise AssertionError(f"missing required Step-4 block: {parent}.{child}")
     del trimmed[parent][child]
@@ -177,9 +190,9 @@ print("SURFACE_ALLOWLIST_OK")
 PY
 ```
 
-**Expected output:** The reference diff prints only the two new Step-4 launcher files and the added `data.msmarco` and `training.ance_msmarco` blocks; it prints no modification to any pre-existing shell script or pre-existing config text. The final line is `SURFACE_ALLOWLIST_OK`. Step-6 logging is in `.py` files and therefore is not displayed by the literal reference pathspec; the static fingerprints verify that those permitted logging additions did not alter entry-point presence, CLI flags, recipe/config path keys, environment keys, or `sys.path` assumptions.
+**Expected output:** The reference diff prints only the two new Step-4 launcher files and the added `training.ance_msmarco` block; it prints no modification to any pre-existing shell script or pre-existing config text. The final line is `SURFACE_ALLOWLIST_OK`. Step-6 logging is in `.py` files and therefore is not displayed by the literal reference pathspec; the static fingerprints verify that those permitted logging additions did not alter entry-point presence, CLI flags, recipe/config path keys, environment keys, or `sys.path` assumptions.
 
-**Pass/fail condition:** **PASS:** command exits 0 and ends with `SURFACE_ALLOWLIST_OK`. **FAIL:** any pre-existing launcher byte changes; a shell file other than the two Step-4 launchers is added/removed; config differs by anything other than the two additive Step-4 blocks; either block changes an existing value; or any inspected entry point changes its main/CLI/config-path/env/`sys.path` fingerprint.
+**Pass/fail condition:** **PASS:** command exits 0 and ends with `SURFACE_ALLOWLIST_OK`. **FAIL:** any pre-existing launcher byte changes; a shell file other than the two Step-4 launchers is added/removed; config differs by anything other than the additive Step-4 block; the block changes an existing value; or any inspected entry point changes its main/CLI/config-path/env/`sys.path` fingerprint.
 
 ## AC-COMP-01 (preprocessor)
 
