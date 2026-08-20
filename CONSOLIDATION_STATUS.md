@@ -10,9 +10,10 @@ Authoritative inputs: `CONSOLIDATION_PROMPT.md` (procedure), `ACCEPTANCE_CRITERI
 
 ## Next command
 
-```bash
-# Step 8 — deletion PROPOSAL ONLY. Commands listed, nothing executed.
-# Requires explicit approval; every archive tag is already pushed and verified.
+```
+CONSOLIDATION COMPLETE. No next command.
+`main` is the only branch. All work is on `main` or behind a pushed `archive/*` tag.
+Outstanding, requiring separate authorisation: defect P1 (see below) and the cleanup list.
 ```
 
 ---
@@ -29,23 +30,26 @@ Authoritative inputs: `CONSOLIDATION_PROMPT.md` (procedure), `ACCEPTANCE_CRITERI
 | 5 | **gated** merge: preprocessor MS MARCO methods (A3 scope) | **DONE** — gate passed |
 | 6 | startup config logging in the 6 entry points | **DONE** |
 | 7 | doc reference audit (report only) | **DONE** |
-| 8 | deletion proposal — **stop for approval** | pending |
-| — | `GPU_CHECKLIST.md` deliverable | pending |
+| 8 | branch deletion — approved and **EXECUTED** |  **DONE** |
+| — | `GPU_CHECKLIST.md` deliverable | **DONE** |
 
 ## Branch state
 
-| branch | tip | merged into `main`? | archive tag pushed? | safe to delete? |
-|---|---|---|---|---|
-| `fast-grass` | `d0571e4` (pushed) | **YES** — `main` fast-forwarded to it | n/a | needs Step 8 approval |
-| `main` | `d74e5b3` | — | `archive/main-pre-consolidation` ✅ `archive/main-post-promotion` ✅ | **NO** (kept — this is the target) |
-| `new-grass` | `b633376` | same commit as `main` | n/a (same commit) | needs Step 8 approval |
-| `sequential-grass` | `8669117` | ancestor of `fast-grass` | n/a (ancestor) | needs Step 8 approval |
-| `baseline` | `56a9e15` | **NO** — 6 unique commits | `archive/baseline` ✅ | needs Step 8 approval |
-| `good-grass` | `201c7c1` | **NO** — 1 unique commit, never merged by design | `archive/good-grass` ✅ | needs Step 8 approval |
-| `async-grass-v2` | `46e548e` | **NO** — 7 unique commits, never merged by design | `archive/async-grass-v2` ✅ | needs Step 8 approval |
+**`main` is the only branch, locally and on `origin`.** All six others were deleted at Step 8
+with explicit approval, after the pre-deletion gate passed.
 
-**Nothing may be deleted** until Step 8 and explicit approval. Tags being pushed is a
-precondition, not permission.
+| former branch | tip | disposition | recover with |
+|---|---|---|---|
+| `main` | `0b5463a`+ | **kept — the only branch** | — |
+| `new-grass` | `b633376` | deleted; was the same commit as old `main` | `git checkout -b new-grass archive/main-pre-consolidation` |
+| `sequential-grass` | `8669117` | deleted; ancestor of `main` | already in `main`'s history |
+| `fast-grass` | `d0571e4` | deleted; ancestor of `main` | `git checkout -b fast-grass archive/main-post-promotion` |
+| `baseline` | `56a9e15` | deleted; **6 commits never merged** | `git checkout -b baseline archive/baseline` |
+| `good-grass` | `201c7c1` | deleted; **1 commit never merged** | `git checkout -b good-grass archive/good-grass` |
+| `async-grass-v2` | `46e548e` | deleted; **7 commits never merged** | `git checkout -b async-grass-v2 archive/async-grass-v2` |
+
+All five `archive/*` tags are pushed and **auto-fetch on clone**. Recovery was verified from a
+fresh clone *after* deletion: each rebuilt branch reproduced its exact commit and tree SHA.
 
 ---
 
@@ -395,6 +399,57 @@ documented name finds nothing, which is the practical cost.
 
 Audit script: `<scratchpad>/doc_audit.py` — deliberately **not** committed; it is a one-off
 report generator, not part of the pipeline.
+
+---
+
+## Step 8 — branch deletion — APPROVED AND EXECUTED
+
+### Pre-deletion verification (all passed before anything was deleted)
+
+1. **Commit coverage** — for all seven branches, commits not reachable from `main` + the five
+   tags: **0**. `ALL_COMMITS_COVERED`.
+2. **Pipelines** — all seven components plus the preprocessor, lambda-pilot harness, shared
+   `src/` and config present on `main`: **33/33 files**. `ALL_PIPELINES_PRESENT`.
+3. **Docs** — all 10 architecture/design/setup docs present on `main`.
+4. **Baseline contribution** — the three MS MARCO scripts byte-identical to `baseline`, the
+   three preprocessor methods present, `training.ance_msmarco` present.
+   `BASELINE_MSMARCO_FULLY_LANDED`.
+5. **File-level coverage** — every file on every branch accounted for:
+   - `new-grass`, `sequential-grass`, `fast-grass`: **0 files** not on `main`;
+   - `baseline`: 1 (`scripts/train_grass.py`, superseded by `scripts/run_grass.py`);
+   - `good-grass`: 16 (bandit/seq GRASS generation, never merged by design);
+   - `async-grass-v2`: 15 (ANN-refresh async architecture, never merged by design).
+6. **Pre-deletion gate** — every branch tip `==` its `origin` tip (no unpushed work), all five
+   tags on the remote and matching, no tracked working-tree changes.
+   `PRE_DELETION_GATE_PASSED`.
+
+### Executed
+
+```bash
+git branch -d new-grass sequential-grass fast-grass     # -d: refused if not merged
+git branch -D baseline good-grass async-grass-v2        # -D: unmerged, tag-protected
+git push origin --delete new-grass sequential-grass fast-grass baseline good-grass async-grass-v2
+```
+
+### Post-deletion recovery proof
+
+A fresh `git clone` of the remote now shows **one branch** (`origin/main`) and **five tags**,
+all fetched automatically. All three never-merged branches were rebuilt from their tags and
+matched exactly:
+
+```
+archive/baseline       -> 56a9e15a9  MATCHES  (6 unique commits recovered)
+archive/good-grass     -> 201c7c140  MATCHES  (1 unique commit  recovered)
+archive/async-grass-v2 -> 46e548e88  MATCHES  (7 unique commits recovered)
+```
+
+Spot-checked files that exist nowhere on `main` — `src/utils/bandit.py`,
+`scripts/run_grass_seq_bandit.py`, `scripts/train_grass_async_v2.py`,
+`scripts/run_grass_case_lite.py` — all recovered from their tags.
+
+**Caveat, recorded deliberately:** recoverable is not the same as visible. `good-grass` and
+`async-grass-v2` no longer appear in `git branch -a`, and their work is on `main` nowhere at
+all. The tags are named in `CLAUDE.md`'s branch header and in this file.
 
 ---
 
