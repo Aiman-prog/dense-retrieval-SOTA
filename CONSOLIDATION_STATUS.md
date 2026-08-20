@@ -11,10 +11,8 @@ Authoritative inputs: `CONSOLIDATION_PROMPT.md` (procedure), `ACCEPTANCE_CRITERI
 ## Next command
 
 ```bash
-# Step 7 — doc reference audit, REPORT ONLY. Fix nothing.
-#   check every file path / module / class / CLI flag referenced by
-#   DELFTBLUE_SETUP.md, README.md, fast_grass_*.md, async_fast_grass_*.md,
-#   lambda_pilot*.md against what exists on main.
+# Step 8 — deletion PROPOSAL ONLY. Commands listed, nothing executed.
+# Requires explicit approval; every archive tag is already pushed and verified.
 ```
 
 ---
@@ -30,7 +28,7 @@ Authoritative inputs: `CONSOLIDATION_PROMPT.md` (procedure), `ACCEPTANCE_CRITERI
 | 4 | MS MARCO additive files + `training.ance_msmarco` | **DONE** |
 | 5 | **gated** merge: preprocessor MS MARCO methods (A3 scope) | **DONE** — gate passed |
 | 6 | startup config logging in the 6 entry points | **DONE** |
-| 7 | doc reference audit (report only) | pending |
+| 7 | doc reference audit (report only) | **DONE** |
 | 8 | deletion proposal — **stop for approval** | pending |
 | — | `GPU_CHECKLIST.md` deliverable | pending |
 
@@ -363,6 +361,40 @@ git reset --hard f37c74f
 
 No exit-2 `IMPORT_ENVIRONMENT_OUT_OF_SCOPE` anywhere. `grass_test.py`'s known MQ hash-collision
 flake did not occur (`PYTHONHASHSEED=0` is pinned by the criterion).
+
+---
+
+## Step 7 — doc reference audit — DONE (report only, nothing fixed)
+
+Scope: `DELFTBLUE_SETUP.md`, `README.md`, `fast_grass_implementation_details.md`,
+`fast_grass_negative_cache_architecture.md`, `async_fast_grass_architecture.md`,
+`async_fast_grass_implementation_details.md`, `lambda_pilot.md`,
+`lambda_pilot_experiment_summary.md`. Every backticked reference outside fenced code blocks
+was resolved against `main`. **Conceptual accuracy of the prose was not assessed.**
+
+**324 references checked: 34 file paths, 22 CLI flags, 268 module/class/field names.**
+
+| category | result |
+|---|---|
+| repo file paths | **0 missing, 0 moved** — every `scripts/…`, `src/…`, `config/…` path resolves |
+| CLI flags | **0 missing** — every `--flag` appears in a committed `.py` or `.sh` |
+| names | **3 stale** (below) |
+| runtime artifacts | 18 references to files produced on `/scratch` (`cache_state_N.pt`, `mining_meta_N.json`, `optimizer.pt`, `async_run_summary.json`, …) plus two Tevatron files (`collator.py`, `dense.py`). Correctly absent from the repo, and every one is named somewhere in code. Not findings. |
+
+### The three stale names — NOT fixed
+
+| where | reference | reality on `main` |
+|---|---|---|
+| `fast_grass_implementation_details.md:116` | `selection_history` | no such attribute. `NegativeCache` tracks per-slot **`utility_ema`** (`src/utils/negative_cache.py:190`), which is what drives replacement and `R` admission |
+| `fast_grass_negative_cache_architecture.md:243` | `selection_history` | same; also appears unbackticked at lines 240 and 388 |
+| `async_fast_grass_architecture.md:526` | `active_round_no` | the trainer emits **`round_no`** (`scripts/run_async_fast_grass_train.py:199,314`). `active_round` exists but only as a local variable, never as a log field |
+
+Both are cosmetic doc drift in field naming, not architectural error: the mechanisms described
+are real, only the identifiers are wrong. Anyone grepping a log or a cache attribute for the
+documented name finds nothing, which is the practical cost.
+
+Audit script: `<scratchpad>/doc_audit.py` — deliberately **not** committed; it is a one-off
+report generator, not part of the pipeline.
 
 ---
 
