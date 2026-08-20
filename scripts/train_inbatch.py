@@ -15,7 +15,8 @@ from pathlib import Path
 project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root / 'src'))
 
-from utils.helpers import get_training_context, patch_tevatron_loss, load_config, set_seed
+from utils.helpers import get_training_context, patch_tevatron_loss, load_config, set_seed, \
+                          log_startup_config
 from tevatron.retriever.modeling import DenseModel
 from tevatron.retriever.driver.train import main as tevatron_train_main
 
@@ -39,6 +40,7 @@ def main():
     config = load_config()
     set_seed(config.get('seed', 42))
     ctx = get_training_context("inbatch")
+    log_startup_config("inbatch", ctx)
     
     # --- PATH MODIFICATION: Resolve the mixture directory ---
     # We look for the folder named 'training_mixture' inside the data directory

@@ -46,7 +46,7 @@ project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root / 'src'))
 
 from utils.helpers import (
-    get_path, get_training_context, load_config,
+    get_path, get_training_context, load_config, log_startup_config,
     encode_batch, encode_batch_tensor, encode_to_pickle, build_faiss_index,
     _load_qrels, _load_corpus_lookup,
     _pool_and_fresh_rerank, set_seed, evaluate_bright,
@@ -470,6 +470,9 @@ def main():
         cfg = {**cfg, 'lambda_val': args.lambda_val}
     if args.model_suffix is not None:
         cfg = {**cfg, 'model_name': cfg['model_name'] + '_' + args.model_suffix}
+
+    # after the CLI overrides, so the block reports what will actually run
+    log_startup_config(args.recipe, ctx, cfg)
 
     from data.preprocessor import run_setup
     corpus_file, query_file, qrels_file = run_setup()

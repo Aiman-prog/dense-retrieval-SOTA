@@ -51,7 +51,7 @@ sys.path.append(str(project_root / 'src'))
 sys.path.append(str(project_root / 'scripts'))
 
 from utils.helpers import (
-    get_path, get_training_context, load_config,
+    get_path, get_training_context, load_config, log_startup_config,
     encode_batch_tensor, encode_to_pickle, build_faiss_index,
     _load_qrels, _load_corpus_lookup, set_seed, evaluate_bright,
 )
@@ -662,6 +662,9 @@ def main():
 
     if args.model_suffix is not None:
         cfg = {**cfg, 'model_name': cfg['model_name'] + '_' + args.model_suffix}
+
+    # after the CLI overrides, so the block reports what will actually run
+    log_startup_config('fast_grass', ctx, cfg)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 

@@ -101,6 +101,67 @@ def get_training_context(training_type: str = "inbatch") -> Dict[str, Any]:
     }
 
 
+def log_startup_config(recipe_name: str, ctx: Dict[str, Any], recipe: Dict[str, Any] = None):
+    """Print the resolved training configuration before training begins.
+
+    ``base_model`` is the value AFTER get_training_context()'s HF-snapshot
+    resolution, which falls back to the raw configured string when no snapshot
+    directory holds a config.json. That fallback is silent, so a run can train
+    cleanly against the wrong weights; this block is what catches it. The four
+    recipes that train from /scratch/.../models/inbatch_mixed_bge_m3 are the
+    ones at risk, hence the explicit on-disk existence check.
+
+    ``recipe`` defaults to ctx['args']; callers that apply CLI overrides pass
+    their effective config so the block reports what will actually run.
+    """
+    args = recipe if recipe is not None else (ctx.get('args') or {})
+    resolved = ctx.get('base_model')
+
+    try:
+        configured = args.get('base_model') or load_config()['model']['base_model']
+    except Exception:
+        configured = None
+
+    if configured is not None and resolved != configured:
+        source = f"HF snapshot resolved from {configured!r}"
+    else:
+        source = "as configured (no HF snapshot dir with config.json)"
+    if isinstance(resolved, str) and resolved.startswith("/") and not Path(resolved).exists():
+        source += "  [PATH DOES NOT EXIST]"
+
+    # Recipes do not share one spelling: crossbatch has no batch_size (it sizes by
+    # per_device_batch_size / target_batch_size) and the ANCE recipes use
+    # total_epochs rather than num_epochs. Report the key that is actually present
+    # rather than inventing one.
+    def first_present(*keys):
+        for key in keys:
+            if args.get(key) is not None:
+                return key, args[key]
+        return keys[0], None
+
+    batch_key, batch_value = first_present("batch_size", "per_device_batch_size",
+                                           "target_batch_size")
+    epoch_key, epoch_value = first_present("num_epochs", "total_epochs")
+
+    rows = [
+        ("recipe", recipe_name),
+        ("base_model", resolved),
+        ("base_model source", source),
+        ("temperature", ctx.get('temperature')),
+        ("query_max_len", ctx.get('max_q')),
+        ("passage_max_len", ctx.get('max_p')),
+        (batch_key, batch_value),
+        ("learning_rate", args.get('learning_rate')),
+        (epoch_key, epoch_value),
+    ]
+    print("=" * 66, flush=True)
+    print("RESOLVED TRAINING CONFIG", flush=True)
+    for label, value in rows:
+        print(f"  {label:<21}: {'<absent>' if value is None else value}", flush=True)
+    print("=" * 66, flush=True)
+
+
+
 def encode_to_pickle(model_path, input_file, output_pkl, is_query, ctx, config):
     """Run Tevatron encode subprocess and save embeddings to a pickle file."""
     cmd = [

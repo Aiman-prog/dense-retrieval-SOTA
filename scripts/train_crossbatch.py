@@ -6,7 +6,8 @@ from tevatron.retriever.driver.train import main as tevatron_train_main
 # Setup pathing
 project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root / 'src'))
-from utils.helpers import get_training_context, patch_tevatron_loss, load_config, set_seed
+from utils.helpers import get_training_context, patch_tevatron_loss, load_config, set_seed, \
+                          log_startup_config
 
 def main():
     # 1. Configuration & Paths via Centralized Context
@@ -14,6 +15,7 @@ def main():
     set_seed(config.get('seed', 42))
     ctx = get_training_context("crossbatch")
     recipe = ctx['args'] 
+    log_startup_config("crossbatch", ctx, recipe)
     
     # Resolve the mixture directory path
     processed_dir = Path(ctx['processed_dir'])

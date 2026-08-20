@@ -20,7 +20,7 @@ sys.path.append(str(project_root / 'src'))
 
 from utils.helpers import get_path, get_training_context, load_config, \
                           encode_to_pickle, build_faiss_index, count_jsonl_examples, \
-                          _load_qrels, evaluate_bright
+                          _load_qrels, evaluate_bright, log_startup_config
 from data.preprocessor import BRIGHTPreprocessor
 
 # 🩹 Tevatron Bug Patch
@@ -143,6 +143,7 @@ def main():
 
     ctx    = get_training_context(recipe)
     config = load_config()
+    log_startup_config(recipe, ctx)
     corpus_file, query_file, qrels_file = run_setup(ctx['args'])
 
     # Detect GPU count BEFORE restricting visibility.

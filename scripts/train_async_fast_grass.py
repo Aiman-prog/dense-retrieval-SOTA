@@ -42,7 +42,7 @@ sys.path.insert(0, str(project_root / 'src'))
 sys.path.insert(0, str(project_root / 'scripts'))
 
 from utils.helpers import (  # noqa: E402
-    get_path, get_training_context, load_config, set_seed,
+    get_path, get_training_context, load_config, set_seed, log_startup_config,
     _load_corpus_lookup, _load_qrels, evaluate_bright,
 )
 from utils.negative_cache import NegativeCache  # noqa: E402
@@ -479,6 +479,10 @@ def main():
     if args.run_suffix:
         ctx['args']['model_name'] = f"{ctx['args']['model_name']}_{args.run_suffix}"
     set_seed(config.get('seed', 42))
+
+    # after the lambda_val / run_suffix overrides land in ctx['args'], and ahead of
+    # the preflight branch so both the validator and the training path print it
+    log_startup_config(args.recipe, ctx)
 
     # PREFLIGHT FIRST, deliberately ahead of run_setup(): run_setup regenerates missing
     # derived files, and a validator that builds its own input validates nothing.
