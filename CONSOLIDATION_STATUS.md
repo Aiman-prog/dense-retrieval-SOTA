@@ -497,10 +497,24 @@ verified against. Pushed, so `AC-SURFACE-01` stays reproducible against
 | **P1** — add `temp_ance_msmarco` to `path_map` | `src/utils/helpers.py` | `--recipe ance_msmarco` raised `TypeError` at `train_ance.py:161` seconds into the job. Verified fixed. |
 | restore in-batch wall clock `14:00:00` → `24:00:00` | `scripts/run_inbatch_singularity.sh` | the value was a temporary OOM-smoke setting; the file's own comment said to restore it |
 
-⚠️ **`AC-SURFACE-01` no longer holds against `main`** and is not expected to: it asserts that
-no pre-existing launcher changed by a byte, and the in-batch launcher has now deliberately
-changed. That is a post-consolidation edit, not consolidation drift. Re-run the criterion
-against `archive/consolidation-verified` to reproduce the recorded result.
+**Amendment A4 — `AC-SURFACE-01` passes again on `main`.** The row asserts that no pre-existing
+launcher changed by a byte, which the authorised in-batch edit broke. Reverting the edit was
+not an option (the 14 h value kills a real run), so the criterion now allowlists that one file
+**narrowly**: it must differ from `BASE` by exactly one line, that line must be the
+`#SBATCH --time=` directive, and its new value must be exactly `#SBATCH --time=24:00:00`.
+
+Mutation-tested — the allowlist is not a loophole. Unmutated `main` passes; all five of these
+are rejected:
+
+| mutation | rejection |
+|---|---|
+| second line changed in the allowlisted launcher | `changed 2 lines, expected 1` |
+| `--time` restored to a different value | `change is not the permitted one` |
+| a **different** pre-existing launcher edited | `pre-existing launcher changed: run_grass_singularity.sh` |
+| a line inserted into the allowlisted launcher | `changed line count` |
+| a pre-existing config value changed | `config diff is not exactly the additive Step-4 block` |
+
+`archive/consolidation-verified` still pins the pre-edit state.
 
 Re-verified after both fixes: Step-0 preprocessor hashes unchanged (`STEP0_REGRESSION_OK`),
 and 9/9 CPU suites green (`helpers.py` is imported by all of them).

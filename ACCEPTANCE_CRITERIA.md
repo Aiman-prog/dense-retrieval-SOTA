@@ -18,6 +18,12 @@ The import harnesses set `CUDA_VISIBLE_DEVICES` empty and force Transformers/Hug
 > `archive/main-pre-consolidation` still points at `b633376` and remains the Step-3 rollback anchor.
 > **A2** — `data.msmarco` is byte-identical on `main`, `fast-grass` and `baseline`, so it is not
 > a Step-4 addition; the sole additive block is `training.ance_msmarco`.
+> **A4 (post-consolidation)** — `scripts/run_inbatch_singularity.sh` was edited after Step 8 with
+> explicit authorisation, restoring `--time` from a temporary `14:00:00` OOM-smoke value to
+> `24:00:00` as the file's own comment instructed. It is allowlisted, but narrowly: the file must
+> differ from `BASE` by **exactly one line**, that line must be the `#SBATCH --time=` directive,
+> and its new value must be exactly `#SBATCH --time=24:00:00`. Any other edit to this launcher,
+> or a second changed line, still fails. `archive/consolidation-verified` pins the pre-edit state.
 
 **Runnable after step:** 6
 
@@ -39,6 +45,15 @@ HEAD = "main"
 ALLOWED_NEW_SH = {
     "scripts/eval_msmarco_singularity.sh",
     "scripts/run_ance_msmarco_singularity.sh",
+}
+# Amendment A4. One pre-existing launcher was edited AFTER consolidation, with
+# explicit authorisation: run_inbatch_singularity.sh carried --time=14:00:00 with
+# its own comment marking that a temporary OOM-smoke value to be restored to
+# 24:00:00 for a real run. Allowing it is not a loophole -- the permitted change
+# is pinned to a single line whose new value must be exactly the restored wall
+# clock, so any other edit to this launcher still fails.
+ALLOWED_CHANGED_SH = {
+    "scripts/run_inbatch_singularity.sh": ("#SBATCH --time=", "#SBATCH --time=24:00:00"),
 }
 ENTRY_POINTS = [
     "scripts/train_inbatch.py",
@@ -63,8 +78,23 @@ if head_sh - base_sh != ALLOWED_NEW_SH:
 if base_sh - head_sh:
     raise AssertionError(f"removed shell files: {sorted(base_sh - head_sh)}")
 for path in sorted(base_sh):
-    if git("show", f"{BASE}:{path}") != git("show", f"{HEAD}:{path}"):
+    before = git("show", f"{BASE}:{path}", text=True)
+    after = git("show", f"{HEAD}:{path}", text=True)
+    if before == after:
+        continue
+    if path not in ALLOWED_CHANGED_SH:
         raise AssertionError(f"pre-existing launcher changed: {path}")
+    old_prefix, new_line = ALLOWED_CHANGED_SH[path]
+    before_lines, after_lines = before.splitlines(), after.splitlines()
+    if len(before_lines) != len(after_lines):
+        raise AssertionError(f"allowlisted launcher changed line count: {path}")
+    differing = [i for i, (b, a) in enumerate(zip(before_lines, after_lines)) if b != a]
+    if len(differing) != 1:
+        raise AssertionError(
+            f"allowlisted launcher changed {len(differing)} lines, expected 1: {path}")
+    i = differing[0]
+    if not before_lines[i].startswith(old_prefix) or after_lines[i] != new_line:
+        raise AssertionError(f"allowlisted launcher change is not the permitted one: {path}")
 
 base_text = git("show", f"{BASE}:config/config.yaml", text=True)
 head_text = git("show", f"{HEAD}:config/config.yaml", text=True)
@@ -192,7 +222,7 @@ PY
 
 **Expected output:** The reference diff prints only the two new Step-4 launcher files and the added `training.ance_msmarco` block; it prints no modification to any pre-existing shell script or pre-existing config text. The final line is `SURFACE_ALLOWLIST_OK`. Step-6 logging is in `.py` files and therefore is not displayed by the literal reference pathspec; the static fingerprints verify that those permitted logging additions did not alter entry-point presence, CLI flags, recipe/config path keys, environment keys, or `sys.path` assumptions.
 
-**Pass/fail condition:** **PASS:** command exits 0 and ends with `SURFACE_ALLOWLIST_OK`. **FAIL:** any pre-existing launcher byte changes; a shell file other than the two Step-4 launchers is added/removed; config differs by anything other than the additive Step-4 block; the block changes an existing value; or any inspected entry point changes its main/CLI/config-path/env/`sys.path` fingerprint.
+**Pass/fail condition:** **PASS:** command exits 0 and ends with `SURFACE_ALLOWLIST_OK`. **FAIL:** any pre-existing launcher byte changes, other than the single allowlisted `--time` restoration in `scripts/run_inbatch_singularity.sh` (amendment A4); a shell file other than the two Step-4 launchers is added/removed; config differs by anything other than the additive Step-4 block; the block changes an existing value; or any inspected entry point changes its main/CLI/config-path/env/`sys.path` fingerprint.
 
 ## AC-COMP-01 (preprocessor)
 
