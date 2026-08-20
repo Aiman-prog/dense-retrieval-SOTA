@@ -11,13 +11,12 @@ Authoritative inputs: `CONSOLIDATION_PROMPT.md` (procedure), `ACCEPTANCE_CRITERI
 ## Next command
 
 ```bash
-# Step 4 — MS MARCO track: additive files only
-git checkout main
-git checkout baseline -- scripts/eval_msmarco.py scripts/eval_msmarco_singularity.sh \
-                         scripts/run_ance_msmarco_singularity.sh
-# then insert ONLY the training.ance_msmarco block into config/config.yaml (see A2:
-# data.msmarco already exists and must NOT be touched), commit, and re-run:
+# Step 5 — GATED. train_ance.py (_load_qrels, _evaluate) + preprocessor.py
+# (3 msmarco methods + setup_mode dispatch in run_setup). REAL MERGES, not copies.
+git diff archive/main-post-promotion baseline -- scripts/train_ance.py src/data/preprocessor.py
+# after merging:
 KMP_DUPLICATE_LIB_OK=TRUE python scripts/consolidation_preproc_check.py
+# ANY hash change => git reset --hard fada4ca, record the accepted gap, STOP.
 ```
 
 ---
@@ -30,7 +29,7 @@ KMP_DUPLICATE_LIB_OK=TRUE python scripts/consolidation_preproc_check.py
 | 1 | backup tags (4), pushed + verified | **DONE** |
 | 2 | commit untracked docs on `fast-grass` | **DONE** |
 | 3 | fast-forward `main` → `fast-grass`; tag `archive/main-post-promotion`; apply AC-SURFACE-01 amendment | **DONE** |
-| 4 | MS MARCO additive files + `training.ance_msmarco` | pending |
+| 4 | MS MARCO additive files + `training.ance_msmarco` | **DONE** |
 | 5 | **gated** merge: `train_ance.py` helpers + preprocessor methods/`setup_mode` | pending |
 | 6 | startup config logging in the 6 entry points | pending |
 | 7 | doc reference audit (report only) | pending |
@@ -42,7 +41,7 @@ KMP_DUPLICATE_LIB_OK=TRUE python scripts/consolidation_preproc_check.py
 | branch | tip | merged into `main`? | archive tag pushed? | safe to delete? |
 |---|---|---|---|---|
 | `fast-grass` | `d0571e4` (pushed) | **YES** — `main` fast-forwarded to it | n/a | needs Step 8 approval |
-| `main` | `d1ba880` (pushed) | — | `archive/main-pre-consolidation` ✅ `archive/main-post-promotion` ✅ | **NO** (kept — this is the target) |
+| `main` | `fada4ca` | — | `archive/main-pre-consolidation` ✅ `archive/main-post-promotion` ✅ | **NO** (kept — this is the target) |
 | `new-grass` | `b633376` | same commit as `main` | n/a (same commit) | needs Step 8 approval |
 | `sequential-grass` | `8669117` | ancestor of `fast-grass` | n/a (ancestor) | needs Step 8 approval |
 | `baseline` | `56a9e15` | **NO** — 6 unique commits | `archive/baseline` ✅ | needs Step 8 approval |
@@ -216,6 +215,47 @@ git tag -d archive/main-post-promotion && git push origin --delete archive/main-
 
 ---
 
+## Step 4 — MS MARCO track, additive files only — DONE
+
+Commit `fada4ca` on `main`. +169 lines of new scripts, +31 lines of config, nothing else.
+
+**Files** — taken verbatim from `baseline` via `git checkout baseline -- <paths>`; blob hashes
+and file modes identical to `baseline` (`100644` for all three, which is already the majority
+mode among `main`'s launchers):
+
+- `scripts/eval_msmarco.py`
+- `scripts/eval_msmarco_singularity.sh`
+- `scripts/run_ance_msmarco_singularity.sh`
+
+**Config** — `training.ance_msmarco` only (28 keys), inserted after the `ance` block.
+Per amendment A2, `data.msmarco` already existed and was **not** touched.
+
+Verified additive, not merely "looks additive":
+- deleting the new block reproduces `archive/main-post-promotion:config/config.yaml`
+  **byte-for-byte** (`CONFIG_ADDITION_EXACT`);
+- parsed config minus the block `==` the base config, so no pre-existing value changed;
+- `data.msmarco` identical to base.
+
+**`AC-SURFACE-01` now passes end to end** (`SURFACE_ALLOWLIST_OK`), ahead of its Step-6 gate.
+Re-run after Step 6 as required.
+
+### Note for Step 5 — the prompt's revert concern does not apply
+
+`CONSOLIDATION_PROMPT.md` Step 5 warns that "`eval_msmarco.py` referencing a missing
+`train_ance.py` helper is an acceptable outcome of reverting". It does not reference one:
+`eval_msmarco.py` imports only `utils.helpers` and `evaluation.trec_eval_wrapper` from `src/`,
+with **no** `train_ance` import and no use of `_load_qrels` / `_evaluate`. So `AC-COMP-08`'s
+import check is unaffected by whether Step 5 lands or reverts.
+
+Step 0 regression re-run: `STEP0_REGRESSION_OK`.
+
+Rollback:
+```bash
+git reset --hard d1ba880
+```
+
+---
+
 ## Recorded amendments to `ACCEPTANCE_CRITERIA.md` (approved at Gate A, applied at Step 3)
 
 ### A1 — `AC-SURFACE-01` `BASE` must be post-promotion `main`, not `b633376`
@@ -270,7 +310,7 @@ All rows NOT RUNNABLE YET (gated at Step 3 or later).
 | AC-COMP-06 (async GRASS) | Step 3 | **PASS** — 3/3 modules import |
 | AC-COMP-07 (sequential Fast-GRASS) | Step 3 | **PASS** |
 | AC-COMP-08 | Step 5 | not runnable yet |
-| AC-SURFACE-01 | Step 6 | not runnable yet (partial dry run passes; see Step 3) |
+| AC-SURFACE-01 | Step 6 | **PASS** early at Step 4 (`SURFACE_ALLOWLIST_OK`) — must be re-run after Step 6 |
 | AC-TEST-01 | Step 6 | not runnable yet |
 | AC-INV-06 | Step 6 | not runnable yet |
 
