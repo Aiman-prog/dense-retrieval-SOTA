@@ -105,10 +105,15 @@ H = uniform random sample of B_doc docs from the corpus
 If the stale corpus embedding pickle already exists, the initial deterministic embeddings for selected docs can be copied from it. For estimator-specific states, initialize `Z_H` for the selected docs:
 
 ```text
-MCDP:     Z_H[d] = T stochastic document embeddings
+MCDP:     Z_H[d] = deterministic/eval-mode document embedding for cheap scoring
 EMA:      Z_H[d] = student embedding + EMA teacher embedding
 Ensemble: Z_H[d] = E ensemble embeddings
 ```
+
+For MCDP, do not store `T` stochastic document embeddings for all of `H` in the first
+implementation. Use cached deterministic document embeddings to cheaply shortlist
+inside `H`, then compute stochastic query/document embeddings only for the top-`L`
+shortlist.
 
 The stale full-corpus index is therefore only an initialization/source artifact. It is not the per-query mining mechanism anymore.
 
@@ -126,9 +131,26 @@ Then score every query against cached document states in `H`:
 scores = Q_batch x Z_H
 ```
 
-For uncertainty-aware modes, `Z_H` stores the document-side states needed to compute both `s_hat(q,d)` and `sigma(q,d)`.
+For uncertainty-aware modes, `Z_H` stores the document-side states needed for the cheap
+selection stage.
 
-For cheap estimators such as EMA, score all of `H`. For expensive estimators such as MCDP, first cheap-score `H`, keep an optional top-`L` inside `H`, then compute uncertainty only on that lazy shortlist.
+For cheap estimators such as EMA, score all of `H`. For expensive estimators such as
+MCDP, first cheap-score all of `H`, keep top-`L` inside `H` for each query, then compute
+uncertainty only on that lazy shortlist.
+
+MCDP is the paper-faithful dropout estimator when stochasticity is applied to the
+query/document pair:
+
+```text
+q_t = f_q(q; dropout_t)
+d_t = f_d(d; dropout_t)
+s_t(q,d) = q_t dot d_t
+s_hat(q,d) = mean_t s_t(q,d)
+sigma(q,d) = std_t s_t(q,d)
+```
+
+Fast-GRASS MCDP should use this full query/document dropout estimator on the
+top-`L` shortlist. Query-side-only MCDP is not part of the first implementation.
 
 For each query, mask all known positives/qrels before selection if they are present in `H`. Unknown false negatives can still occur, especially in dense QA corpora, so track them qualitatively when inspecting mined negatives.
 
@@ -233,9 +255,9 @@ Use step-based age:
 age = current_global_step - last_refreshed_step
 ```
 
-For v0, use one age per cache entry. Separate document-state and uncertainty-state ages are only needed later if parts of `Z_H[d]` are refreshed independently.
+In the first implementation, use one age per cache entry. Separate document-state and uncertainty-state ages are only needed later if parts of `Z_H[d]` are refreshed independently.
 
-For v0, utility is a selection-frequency heuristic: selected documents update a binary `selected_indicator`, which is folded into `utility_ema` at cache-update time. Future variants may use normalized `g(q,d)` as the utility signal.
+In the first implementation, utility is a selection-frequency heuristic: selected documents update a binary `selected_indicator`, which is folded into `utility_ema` at cache-update time. Future variants may use normalized `g(q,d)` as the utility signal.
 
 Maintenance runs periodically for batching efficiency, but replacement identity
 is utility-triggered. The design removes arbitrary time-based eviction, not
@@ -327,7 +349,7 @@ Uniform corpus exploration remains dominant:
 ```text
 R_fraction = 0.25
 uniform_candidate_fraction = 0.75
-uniform_candidate_fraction >= 0.75 for v0
+uniform_candidate_fraction >= 0.75 in the first implementation
 ```
 
 Build the replacement candidate set as:
@@ -422,16 +444,26 @@ Fast-GRASS:
 B_doc = global cache size
 ```
 
-`L` is also no longer the old fresh-reranked shortlist from top-`P`. In Fast-GRASS, `L` only means an optional cheap shortlist inside global `H` before final `TopK` or `Softmax` selection.
+`L` is also no longer the old fresh-reranked shortlist from top-`P`. In Fast-GRASS,
+`L` means a cheap shortlist inside global `H`.
 
-For the clean first implementation, `TopK` does not need `L`:
+For EMA with `TopK`, `L` is not needed:
 
 ```text
 score against H
 select top-m by g
 ```
 
-`L` is mainly useful for Softmax sampling or lazy uncertainty computation.
+For MCDP, `L` is required for lazy uncertainty:
+
+```text
+cheap-score all H
+keep top-L per query
+run T stochastic query/document passes only on top-L
+select top-m by g
+```
+
+`L` is also useful for Softmax sampling.
 
 ## Why This Should Be Faster
 

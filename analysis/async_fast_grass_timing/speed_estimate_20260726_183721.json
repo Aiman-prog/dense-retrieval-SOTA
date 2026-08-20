@@ -1,0 +1,51 @@
+{
+  "kind": "async_speed_estimate",
+  "inputs": {
+    "seconds_per_train_step": 0.42,
+    "t_mine_round": 5400.0,
+    "t_cache_mc_init": 300.0,
+    "mining_only_s": 5400.0,
+    "maint_time_s": 0.0,
+    "num_maintenance_intervals_per_round": 0,
+    "checkpoint_write_time_s": 0.0,
+    "checkpoint_write_time_excluded": true,
+    "peak_mem_reserved_bytes": 10000000000.0,
+    "gpu_capacity_bytes": 80000000000.0,
+    "total_queries_mixture": 367000,
+    "batch_size": 64,
+    "num_epochs": 3,
+    "cache_update_interval": 100,
+    "safety_margin": 1.2,
+    "train_timing_json": null,
+    "mine_timing_json": null
+  },
+  "derived": {
+    "steps_per_epoch": 5735,
+    "total_steps": 17205,
+    "trainer_steps_per_mining_round": 12857.142857142857,
+    "mining_rounds_per_epoch": 0.44605555555555554,
+    "recommended_async_mine_every_steps": 15429,
+    "n_checkpoints_over_run": 1,
+    "async_startup_s": 5700.0,
+    "peak_mem_fraction_of_gpu": 0.125
+  },
+  "gates": {
+    "architecture_zero_mining_doc_encodes": null,
+    "memory_within_budget": true,
+    "rounds_per_epoch_at_least_one": false,
+    "speedup_meets_threshold": true
+  },
+  "estimated_sequential_wall_s": 23426.1,
+  "estimated_sequential_wall_source": "analytic",
+  "estimated_sequential_wall_analytic_s": 23426.1,
+  "estimated_async_wall_s": 12926.099999999999,
+  "expected_speedup": 1.8123099774874092,
+  "min_speedup_threshold": 1.3,
+  "meets_speedup_threshold": true,
+  "warnings": [
+    "miner produces only 0.45 full rounds/epoch (< 1): data_age_steps will exceed one epoch and negatives go stale. Lower B_doc/T or accept staleness.",
+    "recommended async_mine_every_steps (15429) exceeds steps_per_epoch (5735): fewer than one checkpoint per epoch feeds the miner.",
+    "recommended async_mine_every_steps (15429) exceeds the documented practical range 1000-2000: the miner is slow relative to the trainer, so mined data will be stale on arrival.",
+    "checkpoint_write_time not in trainer JSON and not passed; async_wall EXCLUDES checkpoint I/O (optimistic). Run fast_grass_train_timing.py without --no_checkpoint_probe, or pass --checkpoint_write_time."
+  ]
+}

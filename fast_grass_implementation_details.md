@@ -1,8 +1,8 @@
 # Fast-GRASS Implementation Details
 
-This file complements `fast_grass_negative_cache_architecture.md`. The architecture is fixed; the choices below are v0 engineering defaults, not theoretical claims from Negative Cache.
+This file complements `fast_grass_negative_cache_architecture.md`. The architecture is fixed; the choices below are current engineering defaults, not theoretical claims from Negative Cache.
 
-## v0 Defaults
+## Current Defaults
 
 | Parameter | Default | Notes |
 |---|---:|---|
@@ -11,21 +11,23 @@ This file complements `fast_grass_negative_cache_architecture.md`. The architect
 | `selection_mode` | `TopK` | `Softmax` is optional after TopK works. |
 | `lambda_val` | `1.0` | Also run required baseline `lambda_val = 0`. |
 | `beta` | `5.0` | Used only for Softmax mode. |
-| `L` | `1024` | Used for Softmax or MCDP lazy uncertainty inside `H`. |
-| `uncertainty` | `EMA` | First implementation estimator. |
-| `ema_decay` | `0.999` | Maps to current config key `ema_alpha`. |
+| `L` | `128` | MCDP lazy top-`L` shortlist inside `H` (also the Softmax prefilter). MCDP cost ≈ `batch_size * L * T`, so keep it small — first real runs may prefer `L≈50–64`; larger `L` (e.g. `1024`) is only cheap for Softmax/EMA. |
+| `uncertainty` | `MCDP` | Current default uncertainty estimator; EMA remains a diagnostic/baseline. |
+| `T` | `3` | MC-dropout stochastic passes on the top-`L` shortlist. |
+| `mc_dropout_p` | `0.3` | Dropout probability for MCDP passes; matches current GRASS config. |
+| `ema_decay` | `0.999` | EMA diagnostic only; maps to current config key `ema_alpha`. |
 | `rho_start` | `0.50` | Initial linear-decay maintenance fraction; higher early while the model changes quickly. |
 | `rho_end` | `0.10` | Final linear-decay maintenance fraction. |
 | `cache_update_interval` | `100` steps | Batch cache maintenance for efficient encoding. |
 | `steps_per_epoch` | derived | Compute from dataloader length. |
 | `max_age_epochs` | `4` | Full cache turnover bound target. |
 | `max_age_steps` | `max_age_epochs * steps_per_epoch` | Step-level staleness cap. |
-| `utility_ema_decay` | `0.95` | v0 utility smoothing. |
+| `utility_ema_decay` | `0.95` | Current utility smoothing. |
 | `utility_floor` | `0.01` | Low-utility threshold for binary selected/not-selected EMA. |
 | `utility_remember_threshold` | `0.05` | Minimum peak utility for admitting an evicted doc to `R` if it was never selected. |
 | `K` | `3` | Replace eligibility also triggers after zero recent selections for K maintenance intervals. |
 | `R_fraction` | `0.25` | Fraction of replacement candidates nominated by retired challenger registry `R`. |
-| `uniform_candidate_fraction` | `0.75` | Uniform corpus candidates remain dominant; keep `>= 0.75` for v0. |
+| `uniform_candidate_fraction` | `0.75` | Uniform corpus candidates remain dominant; keep `>= 0.75` in the first implementation. |
 | `replacement_candidate_multiplier` | `2` | Engineering constant: recertify 2x the number of final replacement slots. |
 | `recent_query_reservoir_size` | `128` | Engineering constant for recertification query probe. |
 | `reentry_top_k` | `5` | Average the top-5 valid `g(q,d)` scores for candidate re-entry. |
@@ -46,15 +48,32 @@ sigma = abs(s_student - s_teacher)
 g = s_hat + lambda_val * sigma
 ```
 
-MCDP should use lazy uncertainty:
+MCDP should use lazy uncertainty and top-`L`:
 
 ```text
 cheap-score all H with deterministic/eval-mode cached doc embeddings
 use one deterministic/eval-mode query pass for s_hat_cheap
 keep top-L inside H by s_hat_cheap
-compute T-pass uncertainty only on top-L
+compute T-pass query/document dropout uncertainty only on top-L
 select by g
 ```
+
+The paper-faithful MCDP estimator applies dropout to the query/document pair:
+
+```text
+for t in 1..T:
+    q_t = encode query with dropout enabled
+    d_t = encode each top-L doc with dropout enabled
+    s_t(q,d) = q_t dot d_t
+
+s_hat(q,d) = mean_t s_t(q,d)
+sigma(q,d) = std_t s_t(q,d)
+g(q,d) = s_hat(q,d) + lambda_val * sigma(q,d)
+```
+
+Do not compute MCDP over all `B_doc`; that is too expensive and not the intended Fast-GRASS
+variant. Fast-GRASS MCDP uses full query/document dropout on the top-`L` shortlist;
+query-side-only MCDP is not part of the first implementation.
 
 Softmax mode, when enabled:
 
@@ -102,8 +121,8 @@ lifetime_selected_count
 peak_utility_ema
 ```
 
-`selected_count_recent` is maintained over maintenance intervals for the v0
-replacement eligibility rule.
+`selected_count_recent` is maintained over maintenance intervals for the
+first-implementation replacement eligibility rule.
 
 Compute interval budget:
 
@@ -172,7 +191,7 @@ R_fraction = 0.25
 num_candidate_docs = replacement_candidate_multiplier * num_replace
 ```
 
-Uniform corpus candidates must remain dominant in v0. Historical usefulness
+Uniform corpus candidates must remain dominant in the first implementation. Historical usefulness
 only nominates docs from `R`; current recertification decides re-entry.
 
 Recertification:
@@ -191,10 +210,10 @@ insert only top num_replace candidates into H
 Baseline variants:
 
 ```text
-v0a: no R, uniform corpus replacements only
-v0b: R nomination without recertification (diagnostic only)
-v0c: R nomination + current recertification
-v0d: max-g vs average top-k-g candidate_reentry_score
+A: no R, uniform corpus replacements only
+B: R nomination without recertification (diagnostic only)
+C: R nomination + current recertification
+D: max-g vs average top-k-g candidate_reentry_score
 ```
 
 Required ablations:
