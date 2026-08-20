@@ -11,12 +11,12 @@ Authoritative inputs: `CONSOLIDATION_PROMPT.md` (procedure), `ACCEPTANCE_CRITERI
 ## Next command
 
 ```bash
-# Step 5 — GATED. train_ance.py (_load_qrels, _evaluate) + preprocessor.py
-# (3 msmarco methods + setup_mode dispatch in run_setup). REAL MERGES, not copies.
-git diff archive/main-post-promotion baseline -- scripts/train_ance.py src/data/preprocessor.py
-# after merging:
+# Step 6 — startup config logging in the 6 entry points (the ONLY permitted code change)
+#   log: resolved ctx['base_model'], temperature, query_max_len, passage_max_len,
+#        batch_size, learning_rate, num_epochs, recipe name -- BEFORE training starts.
+#   no new CLI flags, no argparse restructuring, no new config keys.
 KMP_DUPLICATE_LIB_OK=TRUE python scripts/consolidation_preproc_check.py
-# ANY hash change => git reset --hard fada4ca, record the accepted gap, STOP.
+# then re-run EVERY AC-COMP-* row, plus AC-SURFACE-01, AC-TEST-01, AC-INV-06.
 ```
 
 ---
@@ -30,7 +30,7 @@ KMP_DUPLICATE_LIB_OK=TRUE python scripts/consolidation_preproc_check.py
 | 2 | commit untracked docs on `fast-grass` | **DONE** |
 | 3 | fast-forward `main` → `fast-grass`; tag `archive/main-post-promotion`; apply AC-SURFACE-01 amendment | **DONE** |
 | 4 | MS MARCO additive files + `training.ance_msmarco` | **DONE** |
-| 5 | **gated** merge: `train_ance.py` helpers + preprocessor methods/`setup_mode` | pending |
+| 5 | **gated** merge: preprocessor MS MARCO methods (A3 scope) | **DONE** — gate passed |
 | 6 | startup config logging in the 6 entry points | pending |
 | 7 | doc reference audit (report only) | pending |
 | 8 | deletion proposal — **stop for approval** | pending |
@@ -41,7 +41,7 @@ KMP_DUPLICATE_LIB_OK=TRUE python scripts/consolidation_preproc_check.py
 | branch | tip | merged into `main`? | archive tag pushed? | safe to delete? |
 |---|---|---|---|---|
 | `fast-grass` | `d0571e4` (pushed) | **YES** — `main` fast-forwarded to it | n/a | needs Step 8 approval |
-| `main` | `fada4ca` | — | `archive/main-pre-consolidation` ✅ `archive/main-post-promotion` ✅ | **NO** (kept — this is the target) |
+| `main` | `f37c74f` | — | `archive/main-pre-consolidation` ✅ `archive/main-post-promotion` ✅ | **NO** (kept — this is the target) |
 | `new-grass` | `b633376` | same commit as `main` | n/a (same commit) | needs Step 8 approval |
 | `sequential-grass` | `8669117` | ancestor of `fast-grass` | n/a (ancestor) | needs Step 8 approval |
 | `baseline` | `56a9e15` | **NO** — 6 unique commits | `archive/baseline` ✅ | needs Step 8 approval |
@@ -256,6 +256,84 @@ git reset --hard d1ba880
 
 ---
 
+## Step 5 — GATED merge — DONE, gate PASSED
+
+Commit `f37c74f`. **115 insertions, 0 deletions** in `src/data/preprocessor.py`;
+`run_setup()` verified byte-identical to `main`; no pre-existing method changed;
+method count 8 -> 11, no duplicate names. The three methods are byte-equal to `baseline`'s.
+
+**Gate:** `STEP5_GATE_PASSED` — all three Step-0 hashes unchanged. This was structurally
+guaranteed, not lucky: the change is a class-body append and never touches `run_setup()`.
+
+### The Given facts were wrong here — scope was smaller than billed
+
+`CONSOLIDATION_PROMPT.md` states baseline "uniquely has `_load_qrels()` and `_evaluate()`",
+and that the `setup_mode` dispatch must be merged into `preprocessor.run_setup()`. Neither holds:
+
+1. **The `setup_mode` dispatch is not in `preprocessor.py` at all.** It lives in
+   `scripts/train_ance.py`'s own `run_setup(recipe_args)`, and that function is **already
+   byte-identical on `main` and `baseline`**. Nothing to merge.
+2. **`_load_qrels` / `_evaluate` are not baseline-unique.** `fast-grass` refactored them into
+   `src/utils/helpers.py` as `_load_qrels` / `evaluate_bright`; `train_ance.py` already imports
+   and calls them. Bodies are line-for-line identical to baseline's except: an added docstring,
+   `open(f,'r')` -> `open(f)`, a defaulted `temp_workdir_key` parameter, and
+   `args['eval_metric']` -> `args.get('eval_metric', 'ndcg_cut_10')`. `evaluate_bright` contains
+   the MS MARCO single-file branch verbatim.
+3. `main` is additionally **newer**: it removes stale `checkpoint-*` dirs before training, which
+   `baseline` does not. Without it `get_last_checkpoint()` permanently shadows new saves.
+
+So the only real gap was the three `prepare_msmarco_*` methods, which `main`'s dispatch already
+called but which did not exist -> `AttributeError` on `--recipe ance_msmarco`.
+
+### Amendment A3 (approved) — AC-COMP-08 becomes a no-duplication check
+
+Requiring `_load_qrels`/`_evaluate` in `train_ance.py` would duplicate ~110 lines and force
+edits to `main`'s import line and its `evaluate_bright()` call site, undoing the refactor —
+against rule 1 (no refactoring) and rule 2 (`fast-grass` wins). `AC-COMP-08` now:
+- **requires** `_load_qrels` and `evaluate_bright` in `src/utils/helpers.py`;
+- **forbids** `_load_qrels` / `_evaluate` in `scripts/train_ance.py`;
+- decides landed-vs-absent on the three preprocessor methods alone.
+
+Strictly stronger than the original, and it encodes the no-duplication constraint in the suite.
+
+`AC-COMP-08`: **PASS** — `MSMARCO_ACCEPT_STATE STEP5_LANDED`.
+
+Rollback:
+```bash
+git reset --hard fada4ca
+```
+
+---
+
+## Pre-existing defects — NOT introduced by consolidation, NOT fixed here
+
+Recorded so they are not rediscovered from scratch. Each says what breaks and why. Fixing them
+is out of scope under rule 1; they need a separate, explicitly authorised task.
+
+### P1 — `--recipe ance_msmarco` crashes at startup: `get_path("temp_ance_msmarco")` is `None`
+
+**Symptom.** `TypeError: unsupported operand type(s) for /: 'NoneType' and 'str'` at
+`scripts/train_ance.py:161`, a few seconds into the job — before any GPU work.
+
+**Why.** `train_ance.py:159` does `get_path(ctx['args']['temp_workdir'])`. The
+`ance_msmarco` recipe sets `temp_workdir: "temp_ance_msmarco"` (`config.yaml:378`), but
+`helpers.get_path`'s `path_map` has only `temp_ance`, `temp_grass`, `temp_fast_grass`, and
+ends in `path_map.get(key)` — an unknown key returns `None` instead of raising. Line 161 then
+does `None / "ann_data"`.
+
+**Scope.** Pre-existing on `baseline` too — `baseline`'s `_evaluate` has the identical
+`get_path(args['temp_workdir'])`. Consolidation only made it reachable by bringing the recipe
+across. The BRIGHT `ance` recipe is unaffected (`temp_ance` is a known key).
+
+**Fix when authorised.** One line: add `"temp_ance_msmarco": base / "temp_ance_msmarco_workdir"`
+to `path_map`. Consider also making `get_path` raise on an unknown key rather than return
+`None`, which is what let this stay silent.
+
+**Consequence today.** The MS MARCO track is present, imports, and passes `AC-COMP-08`, but
+**will not run**. It fails fast and cheap, not 10 hours in.
+
+---
+
 ## Recorded amendments to `ACCEPTANCE_CRITERIA.md` (approved at Gate A, applied at Step 3)
 
 ### A1 — `AC-SURFACE-01` `BASE` must be post-promotion `main`, not `b633376`
@@ -309,7 +387,7 @@ All rows NOT RUNNABLE YET (gated at Step 3 or later).
 | AC-COMP-05 (sync GRASS) | Step 3 | **PASS** |
 | AC-COMP-06 (async GRASS) | Step 3 | **PASS** — 3/3 modules import |
 | AC-COMP-07 (sequential Fast-GRASS) | Step 3 | **PASS** |
-| AC-COMP-08 | Step 5 | not runnable yet |
+| AC-COMP-08 (ANCE MS MARCO) | Step 5 | **PASS** — `STEP5_LANDED` |
 | AC-SURFACE-01 | Step 6 | **PASS** early at Step 4 (`SURFACE_ALLOWLIST_OK`) — must be re-run after Step 6 |
 | AC-TEST-01 | Step 6 | not runnable yet |
 | AC-INV-06 | Step 6 | not runnable yet |
@@ -322,6 +400,7 @@ Every `AC-COMP-*` row is re-run after Step 6.
 
 ## Cleanup ideas — collected, NOT acted on
 
+0. **See "Pre-existing defects" above — P1 is the one that actually breaks a pipeline.**
 1. `prepare_msmarco_train_data()` (`src/data/preprocessor.py` ~line 289) calls
    `random.shuffle(indices)` unseeded despite `seed: 42` — the 83,030-row MS MARCO mixture
    slice is not reproducible.
