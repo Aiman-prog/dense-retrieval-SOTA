@@ -459,6 +459,9 @@ all. The tags are named in `CLAUDE.md`'s branch header and in this file.
 Recorded so they are not rediscovered from scratch. Each says what breaks and why. Fixing them
 is out of scope under rule 1; they need a separate, explicitly authorised task.
 
+**P1 is fixed** (see below). **P2-P6 are open** and were found while auditing `GPU_CHECKLIST.md`
+against the launcher bodies; every one of them is worked around in that checklist.
+
 ### P1 — `--recipe ance_msmarco` crashes at startup: `get_path("temp_ance_msmarco")` is `None`
 
 **Symptom.** `TypeError: unsupported operand type(s) for /: 'NoneType' and 'str'` at
@@ -518,6 +521,94 @@ are rejected:
 
 Re-verified after both fixes: Step-0 preprocessor hashes unchanged (`STEP0_REGRESSION_OK`),
 and 9/9 CPU suites green (`helpers.py` is imported by all of them).
+
+### P2 — `logs/` must exist before any `sbatch`; nothing creates it in time
+
+**Symptom.** Job fails immediately with no output file, so there is nothing to read.
+
+**Why.** Every launcher sets `--output=logs/<name>_%j.out`, and SLURM opens that file **before**
+executing the script body. `logs/` is in `.gitignore:54` and nothing under it is tracked, so a
+fresh clone lacks it. The `mkdir -p logs` present in `run_grass`, `run_fast_grass`,
+`run_async_fast_grass` and `run_evaluate` runs far too late to matter, and `run_inbatch`,
+`run_crossbatch`, `run_ance`, `run_ance_msmarco` and `eval_msmarco` do not have it at all.
+
+**Fix when authorised.** Track a `logs/.gitkeep`. Editing the launchers cannot fix it —
+anything inside the script already runs after SLURM has tried to open the file.
+
+**Workaround, in `GPU_CHECKLIST.md`:** `mkdir -p /home/$USER/dense-retrieval-SOTA/logs` once.
+
+### P3 — `run_crossbatch_singularity.sh` always exits 0
+
+**Symptom.** `sacct` reports `COMPLETED` even when `torchrun` dies.
+
+**Why.** The script's last statement is `echo "Job Completed"`, so the exit status is `echo`'s.
+Every other training launcher ends in `exit $EXIT_CODE`.
+
+**Fix when authorised.** Capture `EXIT_CODE=$?` after the `singularity exec` and `exit` it, as
+the sibling launchers do.
+
+### P4 — `eval_msmarco_singularity.sh` always exits 0, and can evaluate nothing
+
+**Symptom.** Job reports success; the MRR number is absent or meaningless.
+
+**Why.** Two independent problems: the script ends in `echo "Done: $?"`, so its status is
+`echo`'s; and `MODEL=$(… get_last_checkpoint('$MODEL_DIR'))` prints the string `None` when the
+model directory is absent, after which it runs `eval_msmarco.py --model_path None`.
+
+**Fix when authorised.** Propagate the exit code, and fail fast when `MODEL` is empty or
+`None`.
+
+**Detection meanwhile:** `head -1` of the log — `Evaluating checkpoint: None`.
+
+### P5 — `--debug` is unreachable from the GRASS launchers
+
+**Symptom.** No cheap smoke run for experiments 4 and 5.
+
+**Why.** `run_grass.py:455` and `run_fast_grass.py:655` both define
+`--debug` (512-item mixture), but `run_grass_singularity.sh` and
+`run_fast_grass_singularity.sh` contain **zero** occurrences of `debug` — the `${VAR:+--flag}`
+pass-throughs cover the other knobs only. `run_async_fast_grass_singularity.sh` does wire
+`ASYNC_FG_DEBUG`.
+
+**Fix when authorised.** Add `${GRASS_DEBUG:+--debug}` / `${FAST_GRASS_DEBUG:+--debug}`,
+matching the existing pattern.
+
+**Workaround, in `GPU_CHECKLIST.md`:** an interactive `srun` + `singularity exec` invocation.
+
+### P6 — the MS MARCO track needs the network, but its launcher forces offline mode
+
+**Symptom.** `--recipe ance_msmarco` cannot build its inputs; setup fails at the first
+`load_dataset`.
+
+**Why.** `run_ance_msmarco_singularity.sh` exports `HF_HUB_OFFLINE=1` and
+`TRANSFORMERS_OFFLINE=1`, while `prepare_msmarco_full_corpus`, `prepare_msmarco_tevatron_train`
+and `prepare_msmarco_dev` call `load_dataset()` on `Tevatron/msmarco-passage-corpus` and
+`Tevatron/msmarco-passage` — the latter two with `streaming=True`, which cannot work offline
+at all. Independently, `msmarco_dev_qrels.txt` exists in neither dataset and must be fetched
+from anserini-tools.
+
+**Scope.** Pre-existing on `baseline`; consolidation only made the recipe reachable. The
+offline exports are correct for the six BRIGHT experiments, whose data is already local.
+
+**Fix when authorised.** Either pre-generate the four processed MS MARCO files on a login node
+(`run_setup` skips what exists), or make the offline exports conditional for this recipe.
+
+**Consequence today.** Experiment 7 remains **blocked**, now on data rather than on P1.
+`GPU_CHECKLIST.md` §7 carries the login-node prep.
+
+### D1 — `bug_fixes.md` is gitignored, so the MS MARCO runbook is not on `main`
+
+`bug_fixes.md` holds the `load_dataset` invocations, the `msmarco_dev_qrels.txt` `wget` and
+the `streaming=True` / `split='validation'` notes. It is **explicitly** ignored at
+`.gitignore:82`, alongside `CLAUDE.md` — a deliberate local-notes choice, not an oversight,
+so it was **not** committed during this pass. `main` is therefore not self-contained for
+experiment 7; `GPU_CHECKLIST.md` §7 inlines the essential steps to compensate.
+
+**Decision needed:** un-ignore and commit it, or leave it local. One line of `.gitignore`
+either way.
+
+Note it also carries one stale claim: it says `per_device_eval_batch_size` "needs to be
+256" and is "NOT yet applied" — `config.yaml` already sets 256 for `ance_msmarco`.
 
 ---
 
