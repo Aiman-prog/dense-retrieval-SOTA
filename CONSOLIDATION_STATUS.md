@@ -11,12 +11,14 @@ Authoritative inputs: `CONSOLIDATION_PROMPT.md` (procedure), `ACCEPTANCE_CRITERI
 ## Next command
 
 ```bash
-# Step 2 — commit the untracked docs on `fast-grass`
-git add async_fast_grass_architecture.md async_fast_grass_implementation_details.md \
-        lambda_pilot.md lambda_pilot_experiment_summary.md analysis/ \
-        fast_grass_implementation_details.md fast_grass_negative_cache_architecture.md
-git commit    # CLAUDE.md stays gitignored; .html/.png/.zip/bib.tex/logs_cluster/* NOT committed
-KMP_DUPLICATE_LIB_OK=TRUE python scripts/consolidation_preproc_check.py   # must match baseline
+# Step 3 — promote main (fast-forward, no merge commit)
+git checkout main
+git merge --ff-only fast-grass
+git diff main fast-grass          # must be empty
+git push origin main
+git tag archive/main-post-promotion main && git push origin archive/main-post-promotion
+# then apply amendments A1+A2 to ACCEPTANCE_CRITERIA.md, and re-run:
+KMP_DUPLICATE_LIB_OK=TRUE python scripts/consolidation_preproc_check.py
 ```
 
 ---
@@ -27,7 +29,7 @@ KMP_DUPLICATE_LIB_OK=TRUE python scripts/consolidation_preproc_check.py   # must
 |---|---|---|
 | 0 | preprocessor baseline fixture | **DONE** (`86c74f3`) |
 | 1 | backup tags (4), pushed + verified | **DONE** |
-| 2 | commit untracked docs on `fast-grass` | pending |
+| 2 | commit untracked docs on `fast-grass` | **DONE** |
 | 3 | fast-forward `main` → `fast-grass`; tag `archive/main-post-promotion`; apply AC-SURFACE-01 amendment | pending |
 | 4 | MS MARCO additive files + `training.ance_msmarco` | pending |
 | 5 | **gated** merge: `train_ance.py` helpers + preprocessor methods/`setup_mode` | pending |
@@ -40,7 +42,7 @@ KMP_DUPLICATE_LIB_OK=TRUE python scripts/consolidation_preproc_check.py   # must
 
 | branch | tip | merged into `main`? | archive tag pushed? | safe to delete? |
 |---|---|---|---|---|
-| `fast-grass` | `e1f5523` | not yet (Step 3) | n/a | **NO** |
+| `fast-grass` | `3740a7c` (pushed) | not yet (Step 3) | n/a | **NO** |
 | `main` | `b633376` | — | `archive/main-pre-consolidation` ✅ | **NO** (kept) |
 | `new-grass` | `b633376` | same commit as `main` | n/a (same commit) | needs Step 8 approval |
 | `sequential-grass` | `8669117` | ancestor of `fast-grass` | n/a (ancestor) | needs Step 8 approval |
@@ -134,6 +136,48 @@ Rollback (tags only, nothing else to undo):
 ```bash
 git tag -d archive/baseline archive/good-grass archive/async-grass-v2 archive/main-pre-consolidation
 git push origin --delete archive/baseline archive/good-grass archive/async-grass-v2 archive/main-pre-consolidation
+```
+
+---
+
+## Step 2 — commit the untracked docs — DONE
+
+Commit `3740a7c` on `fast-grass`, pushed to `origin` (`4b05c68..3740a7c`).
+9 files, +2235/-25 lines, all `.md` or `.json` — verified nothing else was staged.
+
+Committed: `async_fast_grass_architecture.md`, `async_fast_grass_implementation_details.md`,
+`lambda_pilot.md`, `lambda_pilot_experiment_summary.md`, the two modified
+`fast_grass_*.md`, `analysis/fast_grass_lambda_internal_report.md`, and
+`analysis/async_fast_grass_timing/*.json` (2).
+
+`CLAUDE.md` remains gitignored (`.gitignore:78`) — confirmed, not committed.
+
+### Decision D3 — `analysis/` committed docs-only (approved)
+
+`analysis/` is 32 MB, of which ~16 KB is documentation:
+
+| kept | 8 K report + 8 K timing JSON |
+|---|---|
+| **not tracked** | 4× `cost_log.jsonl` (23.6 M), 4× `mining_log.jsonl` (6.8 M), `fg_logs.tgz` (1.6 M) |
+
+`CONSOLIDATION_PROMPT.md` Step 2 lists `analysis/` wholesale, but also forbids committing
+`.zip`/log artifacts without flagging — `fg_logs.tgz` and the per-run logs are exactly that
+class, and `main` is permanent. Approved: docs only. The raw logs remain on disk, untracked.
+
+### Flagged, deliberately NOT committed
+
+`Cached-MCDP Fast-GRASS Miner (standalone).html` (524 K),
+`Fast-GRASS Miner (standalone)-3.html` (436 K), `Fast-Grass Miner (standalone)-3.png` (192 K),
+`new-grass-architecture.png` (276 K), `bib.tex` (4 K), `logs_cluster/fg_32k_logs.zip` (1.3 M),
+`logs_cluster/fast_grass_mixed_bge_m3_l{0,1}_32k_ema/` (9.3 M + 9.5 M), `.claude/` (56 K).
+Also still untracked: `CONSOLIDATION_PROMPT.md`, `ACCEPTANCE_CRITERIA.md` — see Step 3, where
+the A1/A2 amendment makes tracking them a live question.
+
+Step 0 regression re-run: `STEP0_REGRESSION_OK`, all three hashes identical.
+
+Rollback:
+```bash
+git reset --hard e1f5523 && git push --force-with-lease origin fast-grass
 ```
 
 ---
