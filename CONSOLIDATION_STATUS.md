@@ -11,13 +11,12 @@ Authoritative inputs: `CONSOLIDATION_PROMPT.md` (procedure), `ACCEPTANCE_CRITERI
 ## Next command
 
 ```bash
-# Step 3 — promote main (fast-forward, no merge commit)
+# Step 4 — MS MARCO track: additive files only
 git checkout main
-git merge --ff-only fast-grass
-git diff main fast-grass          # must be empty
-git push origin main
-git tag archive/main-post-promotion main && git push origin archive/main-post-promotion
-# then apply amendments A1+A2 to ACCEPTANCE_CRITERIA.md, and re-run:
+git checkout baseline -- scripts/eval_msmarco.py scripts/eval_msmarco_singularity.sh \
+                         scripts/run_ance_msmarco_singularity.sh
+# then insert ONLY the training.ance_msmarco block into config/config.yaml (see A2:
+# data.msmarco already exists and must NOT be touched), commit, and re-run:
 KMP_DUPLICATE_LIB_OK=TRUE python scripts/consolidation_preproc_check.py
 ```
 
@@ -30,7 +29,7 @@ KMP_DUPLICATE_LIB_OK=TRUE python scripts/consolidation_preproc_check.py
 | 0 | preprocessor baseline fixture | **DONE** (`86c74f3`) |
 | 1 | backup tags (4), pushed + verified | **DONE** |
 | 2 | commit untracked docs on `fast-grass` | **DONE** |
-| 3 | fast-forward `main` → `fast-grass`; tag `archive/main-post-promotion`; apply AC-SURFACE-01 amendment | pending |
+| 3 | fast-forward `main` → `fast-grass`; tag `archive/main-post-promotion`; apply AC-SURFACE-01 amendment | **DONE** |
 | 4 | MS MARCO additive files + `training.ance_msmarco` | pending |
 | 5 | **gated** merge: `train_ance.py` helpers + preprocessor methods/`setup_mode` | pending |
 | 6 | startup config logging in the 6 entry points | pending |
@@ -42,8 +41,8 @@ KMP_DUPLICATE_LIB_OK=TRUE python scripts/consolidation_preproc_check.py
 
 | branch | tip | merged into `main`? | archive tag pushed? | safe to delete? |
 |---|---|---|---|---|
-| `fast-grass` | `3740a7c` (pushed) | not yet (Step 3) | n/a | **NO** |
-| `main` | `b633376` | — | `archive/main-pre-consolidation` ✅ | **NO** (kept) |
+| `fast-grass` | `d0571e4` (pushed) | **YES** — `main` fast-forwarded to it | n/a | needs Step 8 approval |
+| `main` | `d1ba880` (pushed) | — | `archive/main-pre-consolidation` ✅ `archive/main-post-promotion` ✅ | **NO** (kept — this is the target) |
 | `new-grass` | `b633376` | same commit as `main` | n/a (same commit) | needs Step 8 approval |
 | `sequential-grass` | `8669117` | ancestor of `fast-grass` | n/a (ancestor) | needs Step 8 approval |
 | `baseline` | `56a9e15` | **NO** — 6 unique commits | `archive/baseline` ✅ | needs Step 8 approval |
@@ -182,6 +181,41 @@ git reset --hard e1f5523 && git push --force-with-lease origin fast-grass
 
 ---
 
+## Step 3 — promote `main` — DONE
+
+```
+main  b6333767d  ->  d0571e44e   (fast-forward)
+```
+
+- `git merge --ff-only fast-grass`. **HEAD has 1 parent; 0 merge commits introduced.**
+- `git diff main fast-grass` empty; `main` and `fast-grass` are the same commit.
+- Pushed `b633376..d0571e4`. `STEP3_PROMOTION_VERIFIED` (local == remote for branch and tag).
+- Tag `archive/main-post-promotion` = `d0571e44e`, pushed and verified — this is the
+  `AC-SURFACE-01` diff base per amendment A1.
+
+Then, on `main`:
+- `87a11e0` — track `CONSOLIDATION_PROMPT.md` + `ACCEPTANCE_CRITERIA.md` (decision D4: both
+  were untracked, and amending an untracked file leaves no reviewable diff).
+- `d1ba880` — apply amendments **A1** and **A2** to `AC-SURFACE-01` (+26/-13). The amendment
+  is also quoted inline in `ACCEPTANCE_CRITERIA.md` itself, above the row.
+
+Amendment verified, not just written: the criterion's python block parses, and a dry run
+against the real base passes **launcher set equality, launcher byte-equality, and all six
+entry-point CLI/recipe/env/`sys.path`/main fingerprints**. It now fails at exactly one point —
+`unexpected added shell files: []` — because Step 4 has not yet added the two MS MARCO
+launchers. That is the intended pre-Step-4 state, and it confirms the four assertions that
+fired under the old base are gone.
+
+Step 0 regression re-run: `STEP0_REGRESSION_OK`.
+
+Rollback:
+```bash
+git branch -f main archive/main-pre-consolidation && git push --force-with-lease origin main
+git tag -d archive/main-post-promotion && git push origin --delete archive/main-post-promotion
+```
+
+---
+
 ## Recorded amendments to `ACCEPTANCE_CRITERIA.md` (approved at Gate A, applied at Step 3)
 
 ### A1 — `AC-SURFACE-01` `BASE` must be post-promotion `main`, not `b633376`
@@ -228,11 +262,19 @@ All rows NOT RUNNABLE YET (gated at Step 3 or later).
 
 | row | gate | state |
 |---|---|---|
-| AC-COMP-01…07 | Step 3 | not runnable yet |
+| AC-COMP-01 (preprocessor) | Step 3 | **PASS** — `IMPORT_OK ... run_setup callable` |
+| AC-COMP-02 (in-batch) | Step 3 | **PASS** |
+| AC-COMP-03 (cross-batch) | Step 3 | **PASS** |
+| AC-COMP-04 (ANCE BRIGHT) | Step 3 | **PASS** — 3/3 modules import |
+| AC-COMP-05 (sync GRASS) | Step 3 | **PASS** |
+| AC-COMP-06 (async GRASS) | Step 3 | **PASS** — 3/3 modules import |
+| AC-COMP-07 (sequential Fast-GRASS) | Step 3 | **PASS** |
 | AC-COMP-08 | Step 5 | not runnable yet |
-| AC-SURFACE-01 | Step 6 | not runnable yet |
+| AC-SURFACE-01 | Step 6 | not runnable yet (partial dry run passes; see Step 3) |
 | AC-TEST-01 | Step 6 | not runnable yet |
 | AC-INV-06 | Step 6 | not runnable yet |
+
+No exit-2 `IMPORT_ENVIRONMENT_OUT_OF_SCOPE` results — every module imported cleanly.
 
 Every `AC-COMP-*` row is re-run after Step 6.
 
