@@ -11,13 +11,12 @@ Authoritative inputs: `CONSOLIDATION_PROMPT.md` (procedure), `ACCEPTANCE_CRITERI
 ## Next command
 
 ```bash
-# Step 1 — backup tags (nothing destructive has happened yet)
-git tag archive/baseline baseline
-git tag archive/good-grass good-grass
-git tag archive/async-grass-v2 async-grass-v2
-git tag archive/main-pre-consolidation main
-git push origin archive/baseline archive/good-grass archive/async-grass-v2 archive/main-pre-consolidation
-git ls-remote --tags origin 'archive/*'   # verify all four on the remote
+# Step 2 — commit the untracked docs on `fast-grass`
+git add async_fast_grass_architecture.md async_fast_grass_implementation_details.md \
+        lambda_pilot.md lambda_pilot_experiment_summary.md analysis/ \
+        fast_grass_implementation_details.md fast_grass_negative_cache_architecture.md
+git commit    # CLAUDE.md stays gitignored; .html/.png/.zip/bib.tex/logs_cluster/* NOT committed
+KMP_DUPLICATE_LIB_OK=TRUE python scripts/consolidation_preproc_check.py   # must match baseline
 ```
 
 ---
@@ -27,7 +26,7 @@ git ls-remote --tags origin 'archive/*'   # verify all four on the remote
 | # | Step | State |
 |---|---|---|
 | 0 | preprocessor baseline fixture | **DONE** (`86c74f3`) |
-| 1 | backup tags (4), pushed + verified | pending |
+| 1 | backup tags (4), pushed + verified | **DONE** |
 | 2 | commit untracked docs on `fast-grass` | pending |
 | 3 | fast-forward `main` → `fast-grass`; tag `archive/main-post-promotion`; apply AC-SURFACE-01 amendment | pending |
 | 4 | MS MARCO additive files + `training.ance_msmarco` | pending |
@@ -39,17 +38,18 @@ git ls-remote --tags origin 'archive/*'   # verify all four on the remote
 
 ## Branch state
 
-| branch | tip | merged into `main`? | safe to delete? |
-|---|---|---|---|
-| `fast-grass` | `86c74f3` | not yet (Step 3) | **NO** |
-| `main` | `b633376` | — | **NO** (kept) |
-| `new-grass` | `b633376` | same commit as `main` | not yet — no approval, Step 8 |
-| `sequential-grass` | `8669117` | ancestor of `fast-grass` | not yet — no approval, Step 8 |
-| `baseline` | `56a9e15` | **NO** — 6 unique commits | **NO** — no tag pushed yet |
-| `good-grass` | `201c7c1` | **NO** — 1 unique commit, never merged by design | **NO** — no tag pushed yet |
-| `async-grass-v2` | `46e548e` | **NO** — 7 unique commits, never merged by design | **NO** — no tag pushed yet |
+| branch | tip | merged into `main`? | archive tag pushed? | safe to delete? |
+|---|---|---|---|---|
+| `fast-grass` | `e1f5523` | not yet (Step 3) | n/a | **NO** |
+| `main` | `b633376` | — | `archive/main-pre-consolidation` ✅ | **NO** (kept) |
+| `new-grass` | `b633376` | same commit as `main` | n/a (same commit) | needs Step 8 approval |
+| `sequential-grass` | `8669117` | ancestor of `fast-grass` | n/a (ancestor) | needs Step 8 approval |
+| `baseline` | `56a9e15` | **NO** — 6 unique commits | `archive/baseline` ✅ | needs Step 8 approval |
+| `good-grass` | `201c7c1` | **NO** — 1 unique commit, never merged by design | `archive/good-grass` ✅ | needs Step 8 approval |
+| `async-grass-v2` | `46e548e` | **NO** — 7 unique commits, never merged by design | `archive/async-grass-v2` ✅ | needs Step 8 approval |
 
-No archive tags exist yet. **Nothing may be deleted.**
+**Nothing may be deleted** until Step 8 and explicit approval. Tags being pushed is a
+precondition, not permission.
 
 ---
 
@@ -109,6 +109,32 @@ derived from the same 600 records, no RNG, no extra source data.
   despite `seed: 42`; it is deliberately excluded (recorded as a cleanup idea).
 - The script is `.py`, not the `.sh` named in the plan — it calls `run_setup()` directly, and
   a `.py` also stays clear of `AC-SURFACE-01`'s `scripts/*.sh` allowlist entirely.
+
+---
+
+## Step 1 — backup tags — DONE
+
+Four annotated-free lightweight tags created and pushed to `origin`
+(`https://github.com/Aiman-prog/dense-retrieval-SOTA.git`), each verified to match both the
+remote ref and its branch tip:
+
+```
+archive/baseline                 56a9e15a9   (= baseline)
+archive/good-grass               201c7c140   (= good-grass)
+archive/async-grass-v2           46e548e88   (= async-grass-v2)
+archive/main-pre-consolidation   b6333767d   (= main, pre fast-forward)
+```
+
+`STEP1_TAGS_VERIFIED_ON_REMOTE`. Every unreachable-work branch tip is now reachable from a
+pushed tag, so the deletion precondition in rule 3 is satisfied for Step 8.
+
+No files changed. Step 0 regression re-run: `STEP0_REGRESSION_OK`, all three hashes identical.
+
+Rollback (tags only, nothing else to undo):
+```bash
+git tag -d archive/baseline archive/good-grass archive/async-grass-v2 archive/main-pre-consolidation
+git push origin --delete archive/baseline archive/good-grass archive/async-grass-v2 archive/main-pre-consolidation
+```
 
 ---
 
