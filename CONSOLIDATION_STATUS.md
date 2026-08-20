@@ -459,8 +459,8 @@ all. The tags are named in `CLAUDE.md`'s branch header and in this file.
 Recorded so they are not rediscovered from scratch. Each says what breaks and why. Fixing them
 is out of scope under rule 1; they need a separate, explicitly authorised task.
 
-**P1 is fixed** (see below). **P2-P6 are open** and were found while auditing `GPU_CHECKLIST.md`
-against the launcher bodies; every one of them is worked around in that checklist.
+**P1-P5 are FIXED.** **P6 and D1 are open.** P2-P6 were found while auditing `GPU_CHECKLIST.md`
+against the launcher bodies; each entry below records what it was and how it was resolved.
 
 ### P1 — `--recipe ance_msmarco` crashes at startup: `get_path("temp_ance_msmarco")` is `None`
 
@@ -537,6 +537,10 @@ anything inside the script already runs after SLURM has tried to open the file.
 
 **Workaround, in `GPU_CHECKLIST.md`:** `mkdir -p /home/$USER/dense-retrieval-SOTA/logs` once.
 
+**FIXED.** `.gitignore` now reads `logs/*` + `!logs/.gitkeep`, and `logs/.gitkeep` is tracked, so a
+fresh clone has the directory. Verified: `git add logs/.gitkeep` succeeds while a real
+`logs/grass_99999.out` is still ignored by `git add -A logs/`.
+
 ### P3 — `run_crossbatch_singularity.sh` always exits 0
 
 **Symptom.** `sacct` reports `COMPLETED` even when `torchrun` dies.
@@ -546,6 +550,9 @@ Every other training launcher ends in `exit $EXIT_CODE`.
 
 **Fix when authorised.** Capture `EXIT_CODE=$?` after the `singularity exec` and `exit` it, as
 the sibling launchers do.
+
+**FIXED.** Captures `EXIT_CODE=$?` after the `singularity exec` and ends in `exit $EXIT_CODE`,
+matching its four sibling launchers. The original `echo "Job Completed"` line is retained.
 
 ### P4 — `eval_msmarco_singularity.sh` always exits 0, and can evaluate nothing
 
@@ -559,6 +566,9 @@ model directory is absent, after which it runs `eval_msmarco.py --model_path Non
 `None`.
 
 **Detection meanwhile:** `head -1` of the log — `Evaluating checkpoint: None`.
+
+**FIXED.** Propagates the exit code, and exits 2 with a clear message when `get_last_checkpoint`
+yields an empty string or `None` instead of evaluating `--model_path None`.
 
 ### P5 — `--debug` is unreachable from the GRASS launchers
 
@@ -574,6 +584,10 @@ pass-throughs cover the other knobs only. `run_async_fast_grass_singularity.sh` 
 matching the existing pattern.
 
 **Workaround, in `GPU_CHECKLIST.md`:** an interactive `srun` + `singularity exec` invocation.
+
+**FIXED.** Both launchers now pass `${GRASS_DEBUG:+--debug}` / `${FAST_GRASS_DEBUG:+--debug}`,
+matching the existing `${VAR:+--flag}` pattern, and document the knob. Verified: with the knob
+unset the expansion is empty and the resulting command line is byte-identical to before.
 
 ### P6 — the MS MARCO track needs the network, but its launcher forces offline mode
 
@@ -609,6 +623,38 @@ either way.
 
 Note it also carries one stale claim: it says `per_device_eval_batch_size` "needs to be
 256" and is "NOT yet applied" — `config.yaml` already sets 256 for `ance_msmarco`.
+
+---
+
+## Post-consolidation fix pass 2 — launcher defects P2–P5
+
+Commit `f07b188`, on top of `f633d8d`. Four launchers and `.gitignore` changed; **no Python
+touched**. `eval_msmarco_singularity.sh` is a Step-4 *new* file, so `AC-SURFACE-01` never
+byte-checks it; the three pre-existing launchers are pinned by amendment **A5**.
+
+**Amendment A5** replaces A4's one-line allowlist with an **exact unified-diff pin per file**.
+Strictly stronger: the permitted change is now the literal diff, so any extra, altered or
+missing line fails, as does any edit to a launcher not on the list.
+
+Mutation-tested — unmutated `main` passes, all six of these are rejected:
+
+| mutation | rejection |
+|---|---|
+| extra edit inside an allowlisted launcher | `diff is not the permitted one` |
+| `exit $EXIT_CODE` neutered to `exit 0` | `diff is not the permitted one` |
+| extra flag smuggled into the debug knob | `diff is not the permitted one` |
+| a **non**-allowlisted launcher edited | `pre-existing launcher changed: run_ance_singularity.sh` |
+| a pinned added line removed | `diff is not the permitted one` |
+| pre-existing config value changed | `config diff is not exactly the additive Step-4 block` |
+
+⚠️ The first two attempts at this mutation suite reported every mutation as passing. Both
+times the harness was at fault, not the criterion — once because mutations were committed to a
+branch the script did not read, once because `sed` patterns silently matched nothing. The
+suite now asserts the pattern exists and that the commit actually changed something before
+trusting a result. **A mutation test that never fails is reporting on your harness.**
+
+Re-verified after the pass: `STEP0_REGRESSION_OK`, `AC-COMP-02…08` pass, `AC-SURFACE-01`
+prints `SURFACE_ALLOWLIST_OK`.
 
 ---
 

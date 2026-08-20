@@ -12,17 +12,17 @@ consolidation rules. Where a smoke mode is reachable, use it; where it is not, a
 
 ## Before your first job — three things that will otherwise bite
 
-### 1. Create `logs/` by hand. Nothing else will. (defect P2)
+### 1. `logs/` — now tracked, but confirm it survived your checkout
 
 ```bash
-mkdir -p /home/$USER/dense-retrieval-SOTA/logs
+ls -d /home/$USER/dense-retrieval-SOTA/logs || mkdir -p /home/$USER/dense-retrieval-SOTA/logs
 ```
 
 Every launcher writes `--output=logs/<name>_%j.out`, and **SLURM opens that file before the
-script body runs**. `logs/` is gitignored and untracked, so a fresh clone does not have it.
-The `mkdir -p logs` that four launchers *do* contain executes far too late to help, and
-`run_inbatch`, `run_crossbatch`, `run_ance`, `run_ance_msmarco` and `eval_msmarco` don't have
-it at all. Without this, jobs fail with **no output file to explain why**.
+script body runs** — so an absent directory fails the job with no log to explain why, and the
+in-script `mkdir -p logs` some launchers carry is far too late to help. Defect **P2 is fixed**:
+`logs/.gitkeep` is tracked and `.gitignore` is now `logs/*` + `!logs/.gitkeep`, so a fresh
+clone has the directory. The check above costs nothing if you pulled onto an older checkout.
 
 ### 2. Know where the logs and models actually are
 
@@ -135,9 +135,8 @@ sbatch scripts/run_crossbatch_singularity.sh
 | smoke flag | none — and this entry point has **no CLI surface at all** |
 | checkpoint cadence | hard-coded `--save_steps 100` → first checkpoint early |
 
-🛑 **The exit code is meaningless here (defect P3).** The script's last statement is
-`echo "Job Completed"`, so it always exits 0 — `sacct` will report `COMPLETED` even when
-`torchrun` has died. **Read the log; do not trust the job state.**
+✅ **Defect P3 is fixed** — the launcher now propagates its exit code, so `sacct` is
+trustworthy again. (It previously ended in `echo`, reporting `COMPLETED` on a dead `torchrun`.)
 
 The startup block reports **`per_device_batch_size`**, not `batch_size` — this recipe has no
 `batch_size` key. Expect `512` (× 2 GPUs = 1024 pool).
@@ -189,10 +188,14 @@ GRASS_UNCERTAINTY=mc_dropout sbatch scripts/run_grass_singularity.sh   # or ema
 | checkpoint cadence | `save_steps: 1000` |
 | env knobs | `GRASS_UNCERTAINTY`, `GRASS_MODEL_SUFFIX`, `GRASS_NUM_EPOCHS`, `GRASS_P`, `GRASS_L`, `GRASS_LAMBDA` |
 
-⚠️ **There is no smoke path via `sbatch` (defect P5).** `run_grass.py` defines `--debug`
-(512-item mixture), but `run_grass_singularity.sh` has **no pass-through for it** — the env
-knobs above are the only ones wired. To smoke it, run the container by hand on an allocated
-node rather than editing the launcher:
+✅ **Defect P5 is fixed** — `GRASS_DEBUG=1` now reaches `--debug` (512-item mixture):
+
+```bash
+GRASS_DEBUG=1 GRASS_UNCERTAINTY=mc_dropout sbatch --time=01:00:00 scripts/run_grass_singularity.sh
+```
+
+With the knob unset the command line is byte-identical to before. The interactive form still
+works if you want a shell:
 
 ```bash
 srun --partition=gpu-a100 --gpus-per-task=1 --cpus-per-task=16 --time=00:30:00 \
@@ -229,9 +232,11 @@ FAST_GRASS_UNCERTAINTY=mcdp sbatch scripts/run_fast_grass_singularity.sh
 | checkpoint cadence | `save_steps: 1000` |
 | env knobs | `FAST_GRASS_{UNCERTAINTY,LAMBDA,B_DOC,L,T,M,MC_DROPOUT_P,SELECTION_MODE,EMA_ALPHA,NUM_EPOCHS,MODEL_SUFFIX,NO_EVAL,NO_REGISTRY}` |
 
-⚠️ Same as experiment 4: `--debug` exists on `run_fast_grass.py` but the launcher has **no
-pass-through** (defect P5). Use the interactive form above with
-`python -u scripts/run_fast_grass.py --debug`.
+✅ Defect P5 fixed here too — `FAST_GRASS_DEBUG=1` reaches `--debug`:
+
+```bash
+FAST_GRASS_DEBUG=1 FAST_GRASS_UNCERTAINTY=mcdp sbatch --time=01:00:00 scripts/run_fast_grass_singularity.sh
+```
 
 **Success signal**
 ```bash
@@ -364,14 +369,8 @@ ls $MODELS/ance_msmarco_bge_m3/checkpoint-1250/
 sbatch scripts/eval_msmarco_singularity.sh          # gpu-a100, 1 GPU, 4 h, metric recip_rank (MRR)
 ```
 
-🛑 **Exit code is meaningless here too (defect P4).** The script ends in `echo "Done: $?"`, so
-it always exits 0. Worse, it resolves the checkpoint with `get_last_checkpoint()`, which
-prints `None` when the model dir is absent — and then evaluates `--model_path None`. **Check
-the first line of the log:**
-
-```bash
-head -1 logs/eval_msmarco_<jobid>.out    # "Evaluating checkpoint: None" ⇒ nothing was evaluated
-```
+✅ **Defect P4 is fixed** — the launcher now propagates its exit code and **exits 2** with a
+clear message when no checkpoint exists, instead of silently evaluating `--model_path None`.
 
 ---
 
@@ -407,6 +406,9 @@ Verified by `AC-SURFACE-01` (`SURFACE_ALLOWLIST_OK`) against `archive/main-post-
   `sys.path` handling are byte-for-byte unchanged — the Step-6 logging added output only.
 
 So any behaviour difference you observe on the cluster is **not** consolidation drift in the
-job plumbing. The defects P2–P6 referenced above are **pre-existing**, not introduced here;
-they are written up in `CONSOLIDATION_STATUS.md` under *Pre-existing defects*, deliberately
-unfixed because fixing them means editing launchers.
+job plumbing.
+
+Defects **P1–P5 have since been fixed** in an authorised post-consolidation pass; the four
+launcher edits are pinned line-for-line by `AC-SURFACE-01` amendments A4/A5 and
+mutation-tested. **P6 (MS MARCO offline vs streaming) and D1 (`bug_fixes.md` gitignored)
+remain open** — see *Pre-existing defects* in `CONSOLIDATION_STATUS.md`.
