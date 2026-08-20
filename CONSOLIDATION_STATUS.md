@@ -11,9 +11,10 @@ Authoritative inputs: `CONSOLIDATION_PROMPT.md` (procedure), `ACCEPTANCE_CRITERI
 ## Next command
 
 ```
-CONSOLIDATION COMPLETE. No next command.
-`main` is the only branch. All work is on `main` or behind a pushed `archive/*` tag.
-Outstanding, requiring separate authorisation: defect P1 (see below) and the cleanup list.
+CONSOLIDATION COMPLETE, plus two authorised post-consolidation fixes (P1 and the
+in-batch wall clock). `main` is the only branch. All work is on `main` or behind a
+pushed `archive/*` tag. `archive/consolidation-verified` marks the exact commit the
+acceptance ledger was verified against.
 ```
 
 ---
@@ -477,8 +478,32 @@ across. The BRIGHT `ance` recipe is unaffected (`temp_ance` is a known key).
 to `path_map`. Consider also making `get_path` raise on an unknown key rather than return
 `None`, which is what let this stay silent.
 
-**Consequence today.** The MS MARCO track is present, imports, and passes `AC-COMP-08`, but
-**will not run**. It fails fast and cheap, not 10 hours in.
+**FIXED after consolidation** (`archive/consolidation-verified` marks the last pre-fix commit).
+`"temp_ance_msmarco": base / "temp_ance_msmarco_workdir"` added to `path_map`; verified that
+`get_path` now resolves it and `temp_workdir / "ann_data"` no longer raises. Still open, and
+deliberately not done: `get_path` returns `None` for **any** unknown key — a grep confirmed no
+caller depends on that, so making it raise is safe but is a separate change.
+
+---
+
+## Post-consolidation fixes (authorised separately, after Step 8)
+
+`archive/consolidation-verified` = `8b50a2c`, the commit the whole acceptance ledger was
+verified against. Pushed, so `AC-SURFACE-01` stays reproducible against
+`archive/main-post-promotion..archive/consolidation-verified`.
+
+| fix | file | why |
+|---|---|---|
+| **P1** — add `temp_ance_msmarco` to `path_map` | `src/utils/helpers.py` | `--recipe ance_msmarco` raised `TypeError` at `train_ance.py:161` seconds into the job. Verified fixed. |
+| restore in-batch wall clock `14:00:00` → `24:00:00` | `scripts/run_inbatch_singularity.sh` | the value was a temporary OOM-smoke setting; the file's own comment said to restore it |
+
+⚠️ **`AC-SURFACE-01` no longer holds against `main`** and is not expected to: it asserts that
+no pre-existing launcher changed by a byte, and the in-batch launcher has now deliberately
+changed. That is a post-consolidation edit, not consolidation drift. Re-run the criterion
+against `archive/consolidation-verified` to reproduce the recorded result.
+
+Re-verified after both fixes: Step-0 preprocessor hashes unchanged (`STEP0_REGRESSION_OK`),
+and 9/9 CPU suites green (`helpers.py` is imported by all of them).
 
 ---
 

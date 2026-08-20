@@ -55,6 +55,10 @@ def get_path(key: str, model_name: str = None) -> Path:
         "models": base / p_cfg['models_dir'],
         "results": base / p_cfg['results_dir'],
         "temp_ance": base / "temp_ance_workdir",
+        # ance_msmarco sets temp_workdir: "temp_ance_msmarco"; without this key
+        # get_path returned None and train_ance.py:161 raised TypeError on
+        # `None / "ann_data"` seconds into the job.
+        "temp_ance_msmarco": base / "temp_ance_msmarco_workdir",
         "temp_grass": base / "temp_grass_workdir",
         # async Fast-GRASS handoff root: temp_fast_grass_workdir/async_mining/
         "temp_fast_grass": base / "temp_fast_grass_workdir",

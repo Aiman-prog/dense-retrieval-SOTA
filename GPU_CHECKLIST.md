@@ -50,12 +50,9 @@ sbatch scripts/run_inbatch_singularity.sh
 
 | | |
 |---|---|
-| allocation | `gpu-a100`, 1 GPU, **`--time=14:00:00`** |
+| allocation | `gpu-a100`, 1 GPU, `--time=24:00:00` |
 | smoke flag | none — assert on first checkpoint |
 | checkpoint cadence | `total_steps // 5`; at 330k / bs 64 / 2 epochs that is step **2062** of 10314 |
-
-⚠️ The launcher's own comment says 14 h is a **temporary OOM-smoke value** and should be
-restored to `24:00:00` for a real run. Check before submitting.
 
 **Success signal**
 ```bash
@@ -200,33 +197,15 @@ over-checkpointing.
 
 ## 7. ANCE (MS MARCO) — `train_ance.py --recipe ance_msmarco`
 
-### 🛑 This will NOT run yet — pre-existing defect P1
-
 ```bash
-sbatch scripts/run_ance_msmarco_singularity.sh    # crashes seconds in, before any GPU work
+sbatch scripts/run_ance_msmarco_singularity.sh
 ```
 
-`train_ance.py:159` calls `get_path("temp_ance_msmarco")`. That key is **not** in
-`helpers.get_path`'s `path_map`, and `get_path` ends in `path_map.get(key)` — so it returns
-`None`, and line 161 raises:
-
-```
-TypeError: unsupported operand type(s) for /: 'NoneType' and 'str'
-```
-
-**Pre-existing on `baseline` too** — consolidation only made it reachable by bringing the
-recipe across. It fails fast and cheap, not hours in. Full write-up: **P1** in
-`CONSOLIDATION_STATUS.md`.
-
-**Fix before submitting** (one line, needs your authorisation — deliberately not applied):
-```python
-# src/utils/helpers.py, in get_path's path_map
-"temp_ance_msmarco": base / "temp_ance_msmarco_workdir",
-```
-Worth also making `get_path` raise on an unknown key instead of returning `None` — that silent
-`None` is what let this hide.
-
-Once fixed:
+✅ **Defect P1 is fixed.** `get_path("temp_ance_msmarco")` previously returned `None` (the key
+was absent from `path_map`), so `train_ance.py:161` raised
+`TypeError: unsupported operand type(s) for /: 'NoneType' and 'str'` seconds into the job.
+The key was added post-consolidation and the resolution verified. This is the **only one of
+the seven that has never been run end to end** — treat the first submission as a smoke test.
 
 | | |
 |---|---|
@@ -249,7 +228,9 @@ Verified by `AC-SURFACE-01` (`SURFACE_ALLOWLIST_OK`) against
 `archive/main-post-promotion`:
 
 - **no pre-existing `scripts/*.sh` launcher changed by a single byte** — job scripts, SLURM
-  headers, `--bind` mounts and env assumptions are exactly as they were;
+  headers, `--bind` mounts and env assumptions are exactly as they were. One deliberate
+  exception was made *after* that verification: `run_inbatch_singularity.sh`'s `--time` was
+  restored from its temporary `14:00:00` smoke value to `24:00:00`;
 - the only new launchers are `eval_msmarco_singularity.sh` and
   `run_ance_msmarco_singularity.sh`;
 - `config/config.yaml` differs only by the added `training.ance_msmarco` block; no
