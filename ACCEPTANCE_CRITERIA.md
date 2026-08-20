@@ -364,6 +364,15 @@ except Exception:
 
 ## AC-COMP-08 (ANCE MS MARCO, conditional)
 
+> **Amended during consolidation (A3; evidence in `CONSOLIDATION_STATUS.md`).**
+> `_load_qrels` and `_evaluate` are **not** baseline-unique. `fast-grass` refactored them into
+> `src/utils/helpers.py` as `_load_qrels` / `evaluate_bright` — bodies line-for-line identical
+> to baseline's apart from a docstring, an `open()` mode, a defaulted `temp_workdir_key`, and a
+> defaulted `eval_metric` — and `train_ance.py` already imports and calls them. Demanding them
+> in `train_ance.py` would duplicate ~110 lines and undo the refactor. The row now requires
+> them **in helpers** and **forbids** them in `train_ance.py`, and the landed/absent split
+> turns on the three preprocessor methods alone.
+
 **Runnable after step:** 5
 
 **Exact command:**
@@ -395,16 +404,28 @@ def source(path):
 
 ance_defs = {n.name for n in ast.walk(ast.parse(source("scripts/train_ance.py")))
              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+helper_defs = {n.name for n in ast.walk(ast.parse(source("src/utils/helpers.py")))
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
 prep_tree = ast.parse(source("src/data/preprocessor.py"))
 prep_methods = set()
 for node in ast.walk(prep_tree):
     if isinstance(node, ast.ClassDef) and node.name == "BRIGHTPreprocessor":
         prep_methods.update(n.name for n in node.body
                             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
-required_ance = {"_load_qrels", "_evaluate"}
+# Amendment A3. The qrels loader and the evaluator are NOT baseline-unique: fast-grass
+# refactored them out of train_ance.py into src/utils/helpers.py, where train_ance.py
+# already imports and calls them. Requiring them in train_ance.py would force ~110
+# duplicated lines and undo that refactor. They are therefore required in helpers, and
+# forbidden in train_ance.py, which turns this row into a no-duplication check.
+required_helpers = {"_load_qrels", "evaluate_bright"}
+forbidden_ance = {"_load_qrels", "_evaluate"}
+if not required_helpers <= helper_defs:
+    raise AssertionError(f"missing from src/utils/helpers.py: {sorted(required_helpers - helper_defs)}")
+if forbidden_ance & ance_defs:
+    raise AssertionError(f"duplicated into scripts/train_ance.py: {sorted(forbidden_ance & ance_defs)}")
 required_prep = {"prepare_msmarco_full_corpus", "prepare_msmarco_tevatron_train", "prepare_msmarco_dev"}
-landed = required_ance <= ance_defs and required_prep <= prep_methods
-fully_absent = not (required_ance & ance_defs) and not (required_prep & prep_methods)
+landed = required_prep <= prep_methods
+fully_absent = not (required_prep & prep_methods)
 if landed:
     print("MSMARCO_ACCEPT_STATE STEP5_LANDED")
 elif fully_absent:
@@ -423,7 +444,7 @@ PY
 
 **Expected output:** The two launcher invocation matches, `IMPORT_OK scripts/eval_msmarco.py main callable`, and exactly one accepted state: `MSMARCO_ACCEPT_STATE STEP5_LANDED` or `MSMARCO_ACCEPT_STATE STEP5_REVERTED_GAP_RECORDED`.
 
-**Pass/fail condition:** **PASS (landed):** additive entry/launchers exist and are distinct/wired, evaluation entry imports with callable `main`, both `train_ance.py` helpers and all three preprocessor methods are present. **PASS (reverted):** additive entry/launchers exist and are wired, evaluation entry imports with callable `main`, all five risky helpers/methods are absent, and `CONSOLIDATION_STATUS.md` explicitly records the Step-5 revert as a known accepted MS MARCO gap retained on `archive/baseline`. **FAIL:** partial helper state, missing status evidence, bad wiring, or real import error. Exit 2 is environmental/out of scope.
+**Pass/fail condition:** **PASS (landed):** additive entry/launchers exist and are distinct/wired, evaluation entry imports with callable `main`, `_load_qrels` and `evaluate_bright` are present in `src/utils/helpers.py` and absent from `scripts/train_ance.py`, and all three preprocessor methods are present. **PASS (reverted):** additive entry/launchers exist and are wired, evaluation entry imports with callable `main`, all three preprocessor methods are absent, and `CONSOLIDATION_STATUS.md` explicitly records the Step-5 revert as a known accepted MS MARCO gap retained on `archive/baseline`. **FAIL:** partial helper state, missing status evidence, bad wiring, or real import error. Exit 2 is environmental/out of scope.
 
 ## AC-TEST-01 (CLAUDE.md CPU roster)
 

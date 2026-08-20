@@ -313,6 +313,121 @@ class BRIGHTPreprocessor:
         print(f"✅ MS MARCO Complete! Saved: {count:,} | Skipped (pos==neg): {skipped:,}")
         return str(output_path)
 
+    def prepare_msmarco_full_corpus(self,
+                                    dataset_name: str = "Tevatron/msmarco-passage-corpus",
+                                    cache_dir: Optional[str] = None,
+                                    filename: str = "msmarco_corpus.jsonl") -> str:
+        """Write all 8.8M MS MARCO passages with real passage IDs for FAISS indexing."""
+        cache = Path(cache_dir) if cache_dir else get_path("bright")
+        print("📥 Loading MS MARCO full corpus (~8.8M passages)...")
+        dataset = load_dataset(dataset_name, split='train', cache_dir=str(cache), trust_remote_code=True)
+        corpus_df = pd.DataFrame({'doc_id': dataset['docid'], 'text': dataset['text']})
+        print(f"   Loaded {len(corpus_df):,} passages")
+        return self.prepare_tevatron_corpus(corpus_df, filename=filename)
+
+    def prepare_msmarco_tevatron_train(self,
+                                       dataset_name: str = "Tevatron/msmarco-passage",
+                                       cache_dir: Optional[str] = None,
+                                       mixture_filename: str = "msmarco_training_mixture/train_msmarco.jsonl",
+                                       queries_filename: str = "msmarco_train_queries.jsonl",
+                                       qrels_filename: str = "msmarco_train_qrels.txt") -> tuple:
+        """
+        From Tevatron/msmarco-passage train split, write:
+          - training mixture JSONL (real docids, for Trainer DataLoader)
+          - train queries JSONL (for Inferencer encode)
+          - train qrels TREC (for ANN mining: exclude true positives)
+
+        Uses streaming=True to avoid DatasetGenerationCastError: the underlying parquet
+        files mix train records (with positive_passages/negative_passages) and dev records
+        (query_id/query only). Streaming skips Arrow cache building, so no schema is
+        enforced. Records missing positive_passages are skipped.
+        Returns (mixture_path, queries_path, qrels_path).
+        """
+        cache = Path(cache_dir) if cache_dir else get_path("bright")
+        print("📥 Streaming Tevatron/msmarco-passage train split...")
+
+        mixture_path = self.output_dir / mixture_filename
+        mixture_path.parent.mkdir(parents=True, exist_ok=True)
+
+        queries = {}
+        qrel_rows = []
+        count = 0
+        skipped = 0
+
+        stream = load_dataset(dataset_name, split='train', cache_dir=str(cache),
+                              trust_remote_code=True, streaming=True)
+        with open(mixture_path, 'w') as f:
+            for entry in stream:
+                pos = entry.get('positive_passages')
+                neg = entry.get('negative_passages')
+                if not pos:
+                    skipped += 1
+                    continue
+                qid = str(entry['query_id'])
+                record = {
+                    "query_id": qid,
+                    "query":    entry['query'],
+                    "positive_passages": pos,
+                    "negative_passages": neg or [],
+                }
+                f.write(json.dumps(record, ensure_ascii=False) + '\n')
+                queries[qid] = entry['query']
+                for p in pos:
+                    qrel_rows.append({'query_id': qid, 'doc_id': str(p['docid']), 'relevance': 1})
+                count += 1
+                if count % 10000 == 0:
+                    print(f"   {count:,} / ~400,782 records written...", flush=True)
+
+        print(f"   Wrote {count:,} training records (skipped {skipped:,} schema-mismatch rows) → {mixture_path}")
+
+        queries_df = pd.DataFrame(
+            [{'query_id': k, 'query': v} for k, v in queries.items()]
+        )
+        q_path = self.prepare_tevatron_queries(queries_df, filename=queries_filename)
+
+        qr_path = self.prepare_trec_qrels(
+            pd.DataFrame(qrel_rows).drop_duplicates(), filename=qrels_filename
+        )
+        return mixture_path, q_path, qr_path
+
+    def prepare_msmarco_dev(self,
+                            dataset_name: str = "Tevatron/msmarco-passage",
+                            cache_dir: Optional[str] = None) -> tuple:
+        """Write dev queries JSONL and dev qrels for MRR@10 evaluation.
+
+        Uses streaming=True for the same mixed-schema reason as prepare_msmarco_tevatron_train.
+        """
+        cache = Path(cache_dir) if cache_dir else get_path("bright")
+        print("📥 Streaming Tevatron/msmarco-passage dev split...")
+
+        queries = {}
+        qrel_rows = []
+
+        stream = load_dataset(dataset_name, split='validation', cache_dir=str(cache),
+                              trust_remote_code=True, streaming=True)
+        for entry in stream:
+            qid = str(entry['query_id'])
+            queries[qid] = entry['query']
+            for pos in entry.get('positive_passages') or []:
+                qrel_rows.append({'query_id': qid, 'doc_id': str(pos['docid']), 'relevance': 1})
+
+        print(f"   Streamed {len(queries):,} dev queries")
+
+        queries_df = pd.DataFrame(
+            [{'query_id': k, 'query': v} for k, v in queries.items()]
+        )
+        q_path = self.prepare_tevatron_queries(queries_df, filename="msmarco_dev_queries.jsonl")
+
+        if qrel_rows:
+            qr_path = self.prepare_trec_qrels(
+                pd.DataFrame(qrel_rows).drop_duplicates(), filename="msmarco_dev_qrels.txt"
+            )
+        else:
+            print("   ⚠️  No positive_passages in validation split — qrels not written.")
+            print("      Download official qrels manually: msmarco.blob.core.windows.net/msmarcoranking/qrels.dev.small.tsv.gz")
+            qr_path = self.output_dir / "msmarco_dev_qrels.txt"
+        return q_path, qr_path
+
 def run_setup():
     """
     Prepares the three processed files required by any training script that does
