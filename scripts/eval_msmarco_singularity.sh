@@ -27,6 +27,13 @@ MODEL=$(singularity exec --bind /scratch/${USER}:/scratch/${USER} ${CONTAINER} \
     python -c "from transformers.trainer_utils import get_last_checkpoint; print(get_last_checkpoint('${MODEL_DIR}'))")
 echo "Evaluating checkpoint: ${MODEL}"
 
+# get_last_checkpoint prints the string "None" when MODEL_DIR holds no checkpoint;
+# without this guard the eval runs with --model_path None and fails obscurely.
+if [ -z "${MODEL}" ] || [ "${MODEL}" = "None" ]; then
+    echo "❌ no checkpoint found in ${MODEL_DIR} — nothing to evaluate"
+    exit 2
+fi
+
 singularity exec --nv \
     --bind /scratch/${USER}:/scratch/${USER} \
     --bind /home/${USER}:/home/${USER} \
@@ -35,4 +42,8 @@ singularity exec --nv \
         --model_path ${MODEL} \
         --recipe ance_msmarco
 
-echo "Done: $?"
+EXIT_CODE=$?
+
+echo "Done: $EXIT_CODE"
+
+exit $EXIT_CODE

@@ -31,6 +31,7 @@ export CC=gcc
 CONTAINER="/scratch/${USER}/containers/pytorch_2.1.sif"
 
 # --- Experiment Knobs (override via env vars before sbatch) ---
+# GRASS_DEBUG=1           # 512-item mixture smoke run
 # GRASS_UNCERTAINTY=mc_dropout    # Algorithm 2 σ estimator (mc_dropout | ema)
 # GRASS_MODEL_SUFFIX=run1         # appended to model output dir
 # GRASS_NUM_EPOCHS=3              # override config
@@ -53,7 +54,8 @@ singularity exec --nv \
         ${GRASS_NUM_EPOCHS:+--num_epochs $GRASS_NUM_EPOCHS} \
         ${GRASS_P:+--P $GRASS_P} \
         ${GRASS_L:+--L $GRASS_L} \
-        ${GRASS_LAMBDA:+--lambda_val $GRASS_LAMBDA}
+        ${GRASS_LAMBDA:+--lambda_val $GRASS_LAMBDA} \
+        ${GRASS_DEBUG:+--debug}
 
 EXIT_CODE=$?
 

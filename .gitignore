@@ -51,7 +51,10 @@ results/
 
 # Logs
 *.log
-logs/
+# logs/ must EXIST for sbatch: SLURM opens --output=logs/<name>_%j.out before the
+# job script runs, so an absent directory fails the job with no log to explain it.
+logs/*
+!logs/.gitkeep
 wandb/
 
 # OS

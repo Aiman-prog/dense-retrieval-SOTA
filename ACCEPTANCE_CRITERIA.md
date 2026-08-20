@@ -24,6 +24,15 @@ The import harnesses set `CUDA_VISIBLE_DEVICES` empty and force Transformers/Hug
 > differ from `BASE` by **exactly one line**, that line must be the `#SBATCH --time=` directive,
 > and its new value must be exactly `#SBATCH --time=24:00:00`. Any other edit to this launcher,
 > or a second changed line, still fails. `archive/consolidation-verified` pins the pre-edit state.
+> **A5 (post-consolidation)** — three more pre-existing launchers were edited with explicit
+> authorisation, fixing defects P3 and P5: `run_crossbatch_singularity.sh` now propagates its
+> exit code (it ended in `echo`, so `sacct` reported COMPLETED on a failed `torchrun`), and
+> `run_grass_singularity.sh` / `run_fast_grass_singularity.sh` now pass `--debug` through
+> (the flag existed on both entry points but no launcher wired it, leaving no smoke path;
+> with the knob unset the expansion is empty and the command line is byte-identical).
+> A4's one-line mechanism is replaced by an **exact unified-diff pin** per file, which is
+> strictly stronger: the permitted change is now the literal diff, so any extra, altered or
+> missing line fails, as does any edit to a launcher not listed.
 
 **Runnable after step:** 6
 
@@ -46,14 +55,47 @@ ALLOWED_NEW_SH = {
     "scripts/eval_msmarco_singularity.sh",
     "scripts/run_ance_msmarco_singularity.sh",
 }
-# Amendment A4. One pre-existing launcher was edited AFTER consolidation, with
-# explicit authorisation: run_inbatch_singularity.sh carried --time=14:00:00 with
-# its own comment marking that a temporary OOM-smoke value to be restored to
-# 24:00:00 for a real run. Allowing it is not a loophole -- the permitted change
-# is pinned to a single line whose new value must be exactly the restored wall
-# clock, so any other edit to this launcher still fails.
+# Amendments A4 + A5. Pre-existing launchers were edited AFTER consolidation, each
+# with explicit authorisation. Allowing them is not a loophole: every permitted
+# change is pinned to its EXACT unified diff below, so any additional, altered or
+# missing line in these files fails the row, and any edit to a launcher not listed
+# here fails immediately.
+#   A4  run_inbatch  -- restore --time from a temporary 14:00:00 OOM-smoke value
+#   A5  crossbatch   -- propagate the exit code (the script ended in `echo`, so a
+#                       failed torchrun was reported COMPLETED by sacct)
+#   A5  grass/fast_grass -- wire ${*_DEBUG:+--debug}; the flag existed on the entry
+#                       points but no launcher passed it through, so there was no
+#                       smoke path. With the knob unset the expansion is empty and
+#                       the command line is byte-identical to before.
 ALLOWED_CHANGED_SH = {
-    "scripts/run_inbatch_singularity.sh": ("#SBATCH --time=", "#SBATCH --time=24:00:00"),
+    "scripts/run_inbatch_singularity.sh": [
+        "-#SBATCH --time=14:00:00   # TEMP: OOM smoke test \u2014 passes step-1 mem peak then SLURM kills it. RESTORE to 24:00:00 for real run.",
+        "+#SBATCH --time=24:00:00",
+    ],
+    "scripts/run_crossbatch_singularity.sh": [
+        "+EXIT_CODE=$?",
+        "+",
+        "+if [ $EXIT_CODE -eq 0 ]; then",
+        "+    echo \"\u2705 Cross-batch training completed successfully\"",
+        "+else",
+        "+    echo \"\u274c Cross-batch training failed with code $EXIT_CODE\"",
+        "+fi",
+        "+",
+        "+",
+        "+exit $EXIT_CODE",
+    ],
+    "scripts/run_grass_singularity.sh": [
+        "+# GRASS_DEBUG=1           # 512-item mixture smoke run",
+        "-        ${GRASS_LAMBDA:+--lambda_val $GRASS_LAMBDA}",
+        "+        ${GRASS_LAMBDA:+--lambda_val $GRASS_LAMBDA} \\",
+        "+        ${GRASS_DEBUG:+--debug}",
+    ],
+    "scripts/run_fast_grass_singularity.sh": [
+        "+# FAST_GRASS_DEBUG=1      # 512-item mixture smoke run",
+        "-        ${FAST_GRASS_NO_EVAL:+--no_eval}",
+        "+        ${FAST_GRASS_NO_EVAL:+--no_eval} \\",
+        "+        ${FAST_GRASS_DEBUG:+--debug}",
+    ],
 }
 ENTRY_POINTS = [
     "scripts/train_inbatch.py",
@@ -77,6 +119,14 @@ if head_sh - base_sh != ALLOWED_NEW_SH:
     raise AssertionError(f"unexpected added shell files: {sorted(head_sh - base_sh)}")
 if base_sh - head_sh:
     raise AssertionError(f"removed shell files: {sorted(base_sh - head_sh)}")
+import difflib
+
+def change_lines(before, after):
+    """The exact +/- lines of the unified diff, in order, with no context."""
+    return [line for line in difflib.unified_diff(
+                before.splitlines(), after.splitlines(), lineterm="", n=0)
+            if not line.startswith(("---", "+++", "@@"))]
+
 for path in sorted(base_sh):
     before = git("show", f"{BASE}:{path}", text=True)
     after = git("show", f"{HEAD}:{path}", text=True)
@@ -84,17 +134,12 @@ for path in sorted(base_sh):
         continue
     if path not in ALLOWED_CHANGED_SH:
         raise AssertionError(f"pre-existing launcher changed: {path}")
-    old_prefix, new_line = ALLOWED_CHANGED_SH[path]
-    before_lines, after_lines = before.splitlines(), after.splitlines()
-    if len(before_lines) != len(after_lines):
-        raise AssertionError(f"allowlisted launcher changed line count: {path}")
-    differing = [i for i, (b, a) in enumerate(zip(before_lines, after_lines)) if b != a]
-    if len(differing) != 1:
+    actual = change_lines(before, after)
+    expected = ALLOWED_CHANGED_SH[path]
+    if actual != expected:
         raise AssertionError(
-            f"allowlisted launcher changed {len(differing)} lines, expected 1: {path}")
-    i = differing[0]
-    if not before_lines[i].startswith(old_prefix) or after_lines[i] != new_line:
-        raise AssertionError(f"allowlisted launcher change is not the permitted one: {path}")
+            f"allowlisted launcher diff is not the permitted one: {path}\n"
+            f"  expected: {expected}\n  actual:   {actual}")
 
 base_text = git("show", f"{BASE}:config/config.yaml", text=True)
 head_text = git("show", f"{HEAD}:config/config.yaml", text=True)
@@ -222,7 +267,7 @@ PY
 
 **Expected output:** The reference diff prints only the two new Step-4 launcher files and the added `training.ance_msmarco` block; it prints no modification to any pre-existing shell script or pre-existing config text. The final line is `SURFACE_ALLOWLIST_OK`. Step-6 logging is in `.py` files and therefore is not displayed by the literal reference pathspec; the static fingerprints verify that those permitted logging additions did not alter entry-point presence, CLI flags, recipe/config path keys, environment keys, or `sys.path` assumptions.
 
-**Pass/fail condition:** **PASS:** command exits 0 and ends with `SURFACE_ALLOWLIST_OK`. **FAIL:** any pre-existing launcher byte changes, other than the single allowlisted `--time` restoration in `scripts/run_inbatch_singularity.sh` (amendment A4); a shell file other than the two Step-4 launchers is added/removed; config differs by anything other than the additive Step-4 block; the block changes an existing value; or any inspected entry point changes its main/CLI/config-path/env/`sys.path` fingerprint.
+**Pass/fail condition:** **PASS:** command exits 0 and ends with `SURFACE_ALLOWLIST_OK`. **FAIL:** any pre-existing launcher byte changes, other than the four allowlisted launchers whose diffs match their pinned specs exactly (amendments A4, A5); a shell file other than the two Step-4 launchers is added/removed; config differs by anything other than the additive Step-4 block; the block changes an existing value; or any inspected entry point changes its main/CLI/config-path/env/`sys.path` fingerprint.
 
 ## AC-COMP-01 (preprocessor)
 

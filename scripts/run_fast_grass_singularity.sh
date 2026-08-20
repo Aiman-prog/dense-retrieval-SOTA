@@ -31,6 +31,7 @@ export CC=gcc
 CONTAINER="/scratch/${USER}/containers/pytorch_2.1.sif"
 
 # --- Experiment Knobs (override via env vars before sbatch) ---
+# FAST_GRASS_DEBUG=1      # 512-item mixture smoke run
 # FAST_GRASS_MODEL_SUFFIX=run1     # appended to model output dir
 # FAST_GRASS_NUM_EPOCHS=1          # override config
 # FAST_GRASS_B_DOC=100000          # global cache size (ablate 32k / 100k / 512k)
@@ -69,7 +70,8 @@ singularity exec --nv \
         ${FAST_GRASS_SELECTION_MODE:+--selection_mode $FAST_GRASS_SELECTION_MODE} \
         ${FAST_GRASS_M:+--m $FAST_GRASS_M} \
         ${FAST_GRASS_NO_REGISTRY:+--no_registry} \
-        ${FAST_GRASS_NO_EVAL:+--no_eval}
+        ${FAST_GRASS_NO_EVAL:+--no_eval} \
+        ${FAST_GRASS_DEBUG:+--debug}
 
 EXIT_CODE=$?
 

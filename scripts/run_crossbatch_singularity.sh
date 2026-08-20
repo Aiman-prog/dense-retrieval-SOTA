@@ -37,4 +37,14 @@ singularity exec --nv \
     ${CONTAINER} \
     torchrun --nproc_per_node=2 scripts/train_crossbatch.py
 
+EXIT_CODE=$?
+
+if [ $EXIT_CODE -eq 0 ]; then
+    echo "✅ Cross-batch training completed successfully"
+else
+    echo "❌ Cross-batch training failed with code $EXIT_CODE"
+fi
+
 echo "Job Completed"
+
+exit $EXIT_CODE
