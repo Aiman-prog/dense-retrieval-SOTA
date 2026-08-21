@@ -147,7 +147,7 @@ round.
 
 ## Lambda dosage probe
 
-`scripts/async_fast_grass_quality_probe.py`. Every λ on the grid is scored from the
+`scripts/dev/async_fast_grass_quality_probe.py`. Every λ on the grid is scored from the
 **same** `s_hat`/`sigma` draw, so differences are attributable to the uncertainty term
 alone rather than to a different dropout sample. One set of MC query encodes per seed
 covers the whole grid; `Z_mc` is built once.
@@ -294,7 +294,7 @@ for S in pilot_lam0 pilot_lamLOW pilot_lamMED; do
          scripts/run_evaluate_singularity.sh
 done
 
-singularity exec $BIND $CONTAINER python scripts/lambda_pilot_decide.py \
+singularity exec $BIND $CONTAINER python scripts/dev/lambda_pilot_decide.py \
   --baseline async_fast_grass_pilot_bge_m3_pilot_lam0 \
   --candidates async_fast_grass_pilot_bge_m3_pilot_lamLOW \
                async_fast_grass_pilot_bge_m3_pilot_lamMED \

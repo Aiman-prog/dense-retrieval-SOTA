@@ -4,13 +4,13 @@ in reasonir_corpus.jsonl. Missing entries mean the FAISS index can never retriev
 positive, making the qrel filter for that query partially blind during ANCE mining.
 
 Usage:
-    python scripts/check_coverage.py
+    python scripts/dev/check_coverage.py
 """
 import json
 import sys
 from pathlib import Path
 
-project_root = Path(__file__).resolve().parent.parent
+project_root = Path(__file__).resolve().parent.parent.parent
 sys.path.append(str(project_root / 'src'))
 from utils.helpers import get_path
 

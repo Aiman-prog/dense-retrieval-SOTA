@@ -267,7 +267,7 @@ def _mine_batch(cache, student, teacher, tokenizer, batch_qids, qid_to_text,
 def _build_fast_grass_cfg(config, args, steps_per_epoch):
     """Runtime fast_grass cfg: config defaults + CLI overrides + derived steps.
 
-    The feasibility script (fast_grass_feasibility.py:_fg_cfg) only sets B_doc /
+    The feasibility script (scripts/dev/fast_grass_feasibility.py:_fg_cfg) only sets B_doc /
     lambda_val / max lengths and derives the step fields separately in run_real;
     the trainer needs the full derived set, so this is its own helper.
     """

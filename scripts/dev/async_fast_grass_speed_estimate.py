@@ -46,13 +46,13 @@ any GPU artifacts.
 
 Usage:
   # from the newest timing JSONs
-  python scripts/async_fast_grass_speed_estimate.py
+  python scripts/dev/async_fast_grass_speed_estimate.py
   # explicit files
-  python scripts/async_fast_grass_speed_estimate.py \
+  python scripts/dev/async_fast_grass_speed_estimate.py \
       --train_timing_json analysis/async_fast_grass_timing/train_timing_bs64_m1_*.json \
       --mine_timing_json  analysis/async_fast_grass_timing/mine_timing_bdoc32000_*.json
   # pure what-if (no files)
-  python scripts/async_fast_grass_speed_estimate.py \
+  python scripts/dev/async_fast_grass_speed_estimate.py \
       --seconds_per_train_step 0.42 --t_mine_round 5400 \
       --total_queries 367000 --batch_size 64 --num_epochs 3
 """
@@ -63,7 +63,7 @@ import math
 import sys
 from pathlib import Path
 
-project_root = Path(__file__).resolve().parent.parent
+project_root = Path(__file__).resolve().parent.parent.parent
 OUT_DIR = project_root / 'analysis' / 'async_fast_grass_timing'
 
 

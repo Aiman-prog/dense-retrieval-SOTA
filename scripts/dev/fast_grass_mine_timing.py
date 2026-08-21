@@ -55,9 +55,9 @@ Modes:
                    harness runs (NO representative numbers).
 
 Usage:
-  python scripts/fast_grass_mine_timing.py --synthetic
-  python scripts/fast_grass_mine_timing.py --B_doc 32000 --T 3 --max_queries 12800
-  python scripts/fast_grass_mine_timing.py --B_doc 32000 --T 3 \
+  python scripts/dev/fast_grass_mine_timing.py --synthetic
+  python scripts/dev/fast_grass_mine_timing.py --B_doc 32000 --T 3 --max_queries 12800
+  python scripts/dev/fast_grass_mine_timing.py --B_doc 32000 --T 3 \
       --seconds_per_train_step 0.42
 """
 import argparse
@@ -76,7 +76,7 @@ import numpy as np
 import torch
 from transformers import AutoTokenizer, AutoModel
 
-project_root = Path(__file__).resolve().parent.parent
+project_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(project_root / 'src'))
 sys.path.insert(0, str(project_root / 'scripts'))
 # the --synthetic path reuses mock fixtures that live with the suites in tests/

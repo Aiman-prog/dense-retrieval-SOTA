@@ -36,6 +36,8 @@ import torch
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root / 'src'))
 sys.path.insert(0, str(project_root / 'scripts'))
+# the dosage probe and the pilot decision rule are developer tools under scripts/dev/
+sys.path.insert(0, str(project_root / 'scripts' / 'dev'))
 
 from utils.negative_cache import NegativeCache  # noqa: E402
 from utils.helpers import load_config, get_training_context  # noqa: E402

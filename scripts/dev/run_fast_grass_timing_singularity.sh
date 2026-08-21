@@ -118,8 +118,8 @@ if [ -n "${FG_RUN_TESTS}" ]; then
             python -u tests/async_fast_grass_handoff_test.py
             python -u tests/async_fast_grass_cache_semantics_test.py
             python -u tests/fast_grass_test.py
-            python -u scripts/fast_grass_mine_timing.py --synthetic
-            python -u scripts/async_fast_grass_quality_probe.py --synthetic
+            python -u scripts/dev/fast_grass_mine_timing.py --synthetic
+            python -u scripts/dev/async_fast_grass_quality_probe.py --synthetic
         '
     TEST_EXIT=$?
     if [ $TEST_EXIT -ne 0 ]; then
@@ -137,7 +137,7 @@ if [ -z "${FG_SKIP_TRAIN}" ]; then
         --bind /scratch/${USER}:/scratch/${USER} \
         --bind /home/${USER}:/home/${USER} \
         ${CONTAINER} \
-        python -u scripts/fast_grass_train_timing.py \
+        python -u scripts/dev/fast_grass_train_timing.py \
             --steps ${FG_TRAIN_STEPS} \
             --warmup_steps ${FG_TRAIN_WARMUP} \
             ${FG_MAX_QUERIES:+--max_queries $FG_MAX_QUERIES}
@@ -156,7 +156,7 @@ singularity exec --nv \
     --bind /scratch/${USER}:/scratch/${USER} \
     --bind /home/${USER}:/home/${USER} \
     ${CONTAINER} \
-    python -u scripts/fast_grass_mine_timing.py \
+    python -u scripts/dev/fast_grass_mine_timing.py \
         --B_doc ${FG_B_DOC} \
         --T ${FG_T} \
         --safety_margin ${FG_SAFETY_MARGIN} \
@@ -183,7 +183,7 @@ singularity exec \
     --bind /scratch/${USER}:/scratch/${USER} \
     --bind /home/${USER}:/home/${USER} \
     ${CONTAINER} \
-    python -u scripts/async_fast_grass_speed_estimate.py \
+    python -u scripts/dev/async_fast_grass_speed_estimate.py \
         --num_epochs ${FG_NUM_EPOCHS} \
         --safety_margin ${FG_SAFETY_MARGIN} \
         --min_speedup ${FG_MIN_SPEEDUP} \
@@ -203,7 +203,7 @@ if [ -n "${FG_SIGNAL_PROBE}" ]; then
         --bind /scratch/${USER}:/scratch/${USER} \
         --bind /home/${USER}:/home/${USER} \
         ${CONTAINER} \
-        python -u scripts/async_fast_grass_quality_probe.py --real \
+        python -u scripts/dev/async_fast_grass_quality_probe.py --real \
             --B_doc ${FG_B_DOC} --T ${FG_T} \
             --seeds ${FG_PROBE_SEEDS} \
             --max_queries ${FG_PROBE_QUERIES} \

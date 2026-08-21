@@ -7,14 +7,14 @@ These are true positives mislabelled as negatives — bad training signal that A
 only partially repair after the first ANN refresh.
 
 Usage:
-    python scripts/check_neg_contamination.py
+    python scripts/dev/check_neg_contamination.py
 """
 import json
 import sys
 from pathlib import Path
 from collections import defaultdict
 
-project_root = Path(__file__).resolve().parent.parent
+project_root = Path(__file__).resolve().parent.parent.parent
 sys.path.append(str(project_root / 'src'))
 from utils.helpers import get_path
 

@@ -50,8 +50,15 @@ The import harnesses set `CUDA_VISIBLE_DEVICES` empty and force Transformers/Hug
 >
 > **A8 (post-consolidation)** — `scripts/run_negcache_feasibility_singularity.sh` was deleted
 > alongside its only target, `scripts/grass_negcache_feasibility.py` (901 lines), which
-> `scripts/fast_grass_feasibility.py` had already superseded and which no code imported.
+> `scripts/dev/fast_grass_feasibility.py` had already superseded and which no code imported.
 > `ALLOWED_REMOVED_SH` gains one entry; the set stays exact.
+
+> **A9 (post-consolidation)** — three developer launchers moved to `scripts/dev/`
+> (`run_fast_grass_feasibility`, `run_fast_grass_timing`, `run_async_fast_grass_probe`).
+> A relocation is not exempt from review: `MOVED_SH` maps each old path to its new one **and**
+> pins the exact unified diff between them, so the only permitted change is the path rewrite.
+> Every pinned line is path-only. The timing launcher's A6 `tests/` lines moved into its
+> `MOVED_SH` pin, since one pin must cover the whole file.
 
 **Runnable after step:** 6
 
@@ -79,7 +86,7 @@ ALLOWED_NEW_SH = {
 # its history. Deleting it removes a dead file, not a capability. Recorded as D2 in
 # CONSOLIDATION_STATUS.md, which also preserves where the module actually lives.
 # Amendment A8. The negcache feasibility probe was superseded by
-# scripts/fast_grass_feasibility.py, which says so in its own docstring; the donor
+# scripts/dev/fast_grass_feasibility.py, which says so in its own docstring; the donor
 # was imported by no code, gated by no test, and reachable only from this launcher.
 ALLOWED_REMOVED_SH = {
     "scripts/run_twoset_feasibility_singularity.sh",
@@ -140,14 +147,46 @@ ALLOWED_CHANGED_SH = {
         "+            python -u tests/async_fast_grass_integration_smoke.py",
         "+            python -u tests/fast_grass_test.py",
     ],
-    "scripts/run_fast_grass_timing_singularity.sh": [
+}
+# Amendment A9. Three developer launchers moved to scripts/dev/. A move is not a
+# blank cheque: each is pinned to the EXACT unified diff between its OLD path at
+# BASE and its NEW path at HEAD, so the only permitted change is the path rewrite.
+# Every line below is path-only. run_fast_grass_timing_singularity.sh also carries
+# its A6 tests/ lines here, since one pin must cover the whole file.
+MOVED_SH = {
+    "scripts/run_fast_grass_feasibility_singularity.sh": (
+        "scripts/dev/run_fast_grass_feasibility_singularity.sh", [
+        "-    python -u scripts/fast_grass_feasibility.py \\",
+        "+    python -u scripts/dev/fast_grass_feasibility.py \\",
+    ]),
+    "scripts/run_fast_grass_timing_singularity.sh": (
+        "scripts/dev/run_fast_grass_timing_singularity.sh", [
         "-            python -u scripts/async_fast_grass_handoff_test.py",
         "-            python -u scripts/async_fast_grass_cache_semantics_test.py",
         "-            python -u scripts/fast_grass_test.py",
+        "-            python -u scripts/fast_grass_mine_timing.py --synthetic",
+        "-            python -u scripts/async_fast_grass_quality_probe.py --synthetic",
         "+            python -u tests/async_fast_grass_handoff_test.py",
         "+            python -u tests/async_fast_grass_cache_semantics_test.py",
         "+            python -u tests/fast_grass_test.py",
-    ],
+        "+            python -u scripts/dev/fast_grass_mine_timing.py --synthetic",
+        "+            python -u scripts/dev/async_fast_grass_quality_probe.py --synthetic",
+        "-        python -u scripts/fast_grass_train_timing.py \\",
+        "+        python -u scripts/dev/fast_grass_train_timing.py \\",
+        "-    python -u scripts/fast_grass_mine_timing.py \\",
+        "+    python -u scripts/dev/fast_grass_mine_timing.py \\",
+        "-    python -u scripts/async_fast_grass_speed_estimate.py \\",
+        "+    python -u scripts/dev/async_fast_grass_speed_estimate.py \\",
+        "-        python -u scripts/async_fast_grass_quality_probe.py --real \\",
+        "+        python -u scripts/dev/async_fast_grass_quality_probe.py --real \\",
+    ]),
+    "scripts/run_async_fast_grass_probe_singularity.sh": (
+        "scripts/dev/run_async_fast_grass_probe_singularity.sh", [
+        "-    python -u scripts/async_fast_grass_quality_probe.py --synthetic",
+        "+    python -u scripts/dev/async_fast_grass_quality_probe.py --synthetic",
+        "-    python -u scripts/async_fast_grass_quality_probe.py --real \\",
+        "+    python -u scripts/dev/async_fast_grass_quality_probe.py --real \\",
+    ]),
 }
 ENTRY_POINTS = [
     "scripts/train_inbatch.py",
@@ -167,10 +206,11 @@ def paths(rev, pattern):
 
 base_sh = paths(BASE, "scripts/*.sh")
 head_sh = paths(HEAD, "scripts/*.sh")
-if head_sh - base_sh != ALLOWED_NEW_SH:
-    raise AssertionError(f"unexpected added shell files: {sorted(head_sh - base_sh)}")
-if base_sh - head_sh != ALLOWED_REMOVED_SH:
-    raise AssertionError(f"unexpected removed shell files: {sorted(base_sh - head_sh)}")
+moved_new = {new for new, _ in MOVED_SH.values()}
+if head_sh - base_sh != ALLOWED_NEW_SH | moved_new:
+    raise AssertionError(f"unexpected added shell files: {sorted(head_sh - base_sh - ALLOWED_NEW_SH - moved_new)}")
+if base_sh - head_sh != ALLOWED_REMOVED_SH | set(MOVED_SH):
+    raise AssertionError(f"unexpected removed shell files: {sorted(base_sh - head_sh - ALLOWED_REMOVED_SH - set(MOVED_SH))}")
 import difflib
 
 def change_lines(before, after):
@@ -183,6 +223,16 @@ for path in sorted(base_sh):
     if path in ALLOWED_REMOVED_SH:
         continue  # deleted at HEAD; `git show HEAD:<path>` would fail
     before = git("show", f"{BASE}:{path}", text=True)
+    if path in MOVED_SH:
+        # relocated: compare against its NEW path and pin that diff exactly
+        new_path, expected = MOVED_SH[path]
+        after = git("show", f"{HEAD}:{new_path}", text=True)
+        actual = change_lines(before, after)
+        if actual != expected:
+            raise AssertionError(
+                f"relocated launcher diff is not the permitted one: {path} -> {new_path}\n"
+                f"  expected: {expected}\n  actual:   {actual}")
+        continue
     after = git("show", f"{HEAD}:{path}", text=True)
     if before == after:
         continue
@@ -603,10 +653,10 @@ cases = [
     ("fast_grass_smoke.py", [sys.executable, "tests/fast_grass_smoke.py"], "count", None),
     ("grass_test.py", [sys.executable, "tests/grass_test.py"], "count", None),
     ("grass_smoke.py", [sys.executable, "tests/grass_smoke.py"], "count", None),
-    ("fast_grass_mine_timing.py --synthetic", [sys.executable, "scripts/fast_grass_mine_timing.py", "--synthetic"], "marker", "PASS  miner-timing harness runs end to end"),
-    ("fast_grass_train_timing.py --synthetic", [sys.executable, "scripts/fast_grass_train_timing.py", "--synthetic"], "marker", "PASS  trainer-timing harness runs end to end"),
-    ("async_fast_grass_speed_estimate.py file-free smoke", [sys.executable, "scripts/async_fast_grass_speed_estimate.py", "--seconds_per_train_step", "1", "--t_mine_round", "10", "--total_queries", "100", "--batch_size", "10", "--num_epochs", "2", "--checkpoint_write_time", "1"], "marker", "ASYNC FAST-GRASS — EXPECTED SPEEDUP & CADENCE ESTIMATE"),
-    ("async_fast_grass_quality_probe.py --synthetic", [sys.executable, "scripts/async_fast_grass_quality_probe.py", "--synthetic"], "marker", "PASS  dosage-probe harness runs end to end"),
+    ("fast_grass_mine_timing.py --synthetic", [sys.executable, "scripts/dev/fast_grass_mine_timing.py", "--synthetic"], "marker", "PASS  miner-timing harness runs end to end"),
+    ("fast_grass_train_timing.py --synthetic", [sys.executable, "scripts/dev/fast_grass_train_timing.py", "--synthetic"], "marker", "PASS  trainer-timing harness runs end to end"),
+    ("async_fast_grass_speed_estimate.py file-free smoke", [sys.executable, "scripts/dev/async_fast_grass_speed_estimate.py", "--seconds_per_train_step", "1", "--t_mine_round", "10", "--total_queries", "100", "--batch_size", "10", "--num_epochs", "2", "--checkpoint_write_time", "1"], "marker", "ASYNC FAST-GRASS — EXPECTED SPEEDUP & CADENCE ESTIMATE"),
+    ("async_fast_grass_quality_probe.py --synthetic", [sys.executable, "scripts/dev/async_fast_grass_quality_probe.py", "--synthetic"], "marker", "PASS  dosage-probe harness runs end to end"),
 ]
 
 for name, command, kind, marker in cases:

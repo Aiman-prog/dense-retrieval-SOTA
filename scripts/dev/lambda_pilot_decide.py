@@ -23,7 +23,7 @@ Refuses to run on partial results: a missing domain file is an error, never a sm
 macro average.
 
 Usage:
-  python scripts/lambda_pilot_decide.py \\
+  python scripts/dev/lambda_pilot_decide.py \\
     --baseline async_fast_grass_pilot_bge_m3_pilot_lam0 \\
     --candidates async_fast_grass_pilot_bge_m3_pilot_lamLOW \\
                  async_fast_grass_pilot_bge_m3_pilot_lamMED \\
@@ -34,7 +34,7 @@ import json
 import sys
 from pathlib import Path
 
-project_root = Path(__file__).resolve().parent.parent
+project_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(project_root / 'src'))
 
 from utils.helpers import load_config, get_data_base_dir, get_path  # noqa: E402

@@ -22,7 +22,7 @@ Environment overrides:
   PREPROC_FIXTURE_ROOT    fixture DATA_BASE_DIR   (default: $TMPDIR/dense_retrieval_preproc_fixture)
   PREPROC_FIXTURE_SOURCE  mixture records source  (default: $DATA_BASE_DIR/data/processed/train_reasonir.jsonl)
 
-Usage:  python scripts/consolidation_preproc_check.py
+Usage:  python scripts/dev/consolidation_preproc_check.py
 """
 
 import hashlib
@@ -32,7 +32,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # The three fixture mixture files, in the layout run_setup()'s glob("*.jsonl")
 # walks. 200 records each, taken in file order -- no sampling, no RNG.

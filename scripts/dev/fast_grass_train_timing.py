@@ -29,10 +29,10 @@ Modes:
 
 Usage:
   # local/CPU smoke (correctness only)
-  python scripts/fast_grass_train_timing.py --synthetic
+  python scripts/dev/fast_grass_train_timing.py --synthetic
   # cluster/GPU (real numbers); tiny sanity first, then full
-  python scripts/fast_grass_train_timing.py --max_queries 128 --steps 50
-  python scripts/fast_grass_train_timing.py --steps 500
+  python scripts/dev/fast_grass_train_timing.py --max_queries 128 --steps 50
+  python scripts/dev/fast_grass_train_timing.py --steps 500
 """
 import argparse
 import gc
@@ -55,7 +55,7 @@ try:
 except ImportError:
     _BNB_AVAILABLE = False
 
-project_root = Path(__file__).resolve().parent.parent
+project_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(project_root / 'src'))
 sys.path.insert(0, str(project_root / 'scripts'))
 # the --synthetic path reuses mock fixtures that live with the suites in tests/

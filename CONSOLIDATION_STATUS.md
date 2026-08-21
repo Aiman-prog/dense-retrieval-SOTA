@@ -62,7 +62,7 @@ All pre-existing working-tree modifications and untracked files preserved.
 Run it after **every** later step. Any hash change ⇒ roll that step back and stop.
 
 ```bash
-KMP_DUPLICATE_LIB_OK=TRUE python scripts/consolidation_preproc_check.py
+KMP_DUPLICATE_LIB_OK=TRUE python scripts/dev/consolidation_preproc_check.py
 ```
 
 ### Baseline hashes (recorded pre-consolidation, on `fast-grass` @ `86c74f3`)
@@ -704,7 +704,7 @@ Its four functions (`load_train_queries`, `encode_queries`, `build_candidate_mat
 synthetic checks and a real 7/7 cluster run.
 
 **That host file was itself deleted later in the same cleanup pass** (amendment **A8**), because
-`scripts/fast_grass_feasibility.py` supersedes it and says so in its own docstring. The
+`scripts/dev/fast_grass_feasibility.py` supersedes it and says so in its own docstring. The
 recovered functions therefore no longer exist in the working tree. To read them again:
 
 ```bash

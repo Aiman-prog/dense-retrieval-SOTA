@@ -594,8 +594,8 @@ t_mine_round = miner wall time to produce one full round, including periodic in-
 Existing timing helpers:
 
 ```text
-scripts/fast_grass_train_timing.py
-scripts/fast_grass_mine_timing.py
+scripts/dev/fast_grass_train_timing.py
+scripts/dev/fast_grass_mine_timing.py
 scripts/run_fast_grass_timing_singularity.sh
 ```
 

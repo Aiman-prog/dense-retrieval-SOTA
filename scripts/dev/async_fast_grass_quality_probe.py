@@ -37,8 +37,8 @@ Modes:
   --real                : GPU; needs the stale index pickle + processed mixture.
 
 Usage:
-  python scripts/async_fast_grass_quality_probe.py --synthetic
-  python scripts/async_fast_grass_quality_probe.py --real \\
+  python scripts/dev/async_fast_grass_quality_probe.py --synthetic
+  python scripts/dev/async_fast_grass_quality_probe.py --real \\
       --recipe async_fast_grass_pilot --manifest <pilot10.jsonl> \\
       --lambda_grid 0,0.1,0.2,0.3,0.5,0.7,1.0 --seeds 3 \\
       --max_queries 2048 --B_doc 32000 --T 3 --query_batch_size 128
@@ -51,7 +51,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-project_root = Path(__file__).resolve().parent.parent
+project_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(project_root / 'src'))
 sys.path.insert(0, str(project_root / 'scripts'))
 # the --synthetic path reuses mock fixtures that live with the suites in tests/

@@ -60,7 +60,7 @@ singularity exec \
     --bind /scratch/${USER}:/scratch/${USER} \
     --bind /home/${USER}:/home/${USER} \
     ${CONTAINER} \
-    python -u scripts/async_fast_grass_quality_probe.py --synthetic
+    python -u scripts/dev/async_fast_grass_quality_probe.py --synthetic
 SMOKE_EXIT=$?
 if [ $SMOKE_EXIT -ne 0 ]; then
     echo "❌ probe CPU smoke failed with code $SMOKE_EXIT — aborting before GPU work"
@@ -71,7 +71,7 @@ singularity exec --nv \
     --bind /scratch/${USER}:/scratch/${USER} \
     --bind /home/${USER}:/home/${USER} \
     ${CONTAINER} \
-    python -u scripts/async_fast_grass_quality_probe.py --real \
+    python -u scripts/dev/async_fast_grass_quality_probe.py --real \
         --recipe "${ASYNC_FG_RECIPE}" \
         ${ASYNC_FG_MANIFEST:+--manifest $ASYNC_FG_MANIFEST} \
         --lambda_grid "${PROBE_LAMBDA_GRID}" \

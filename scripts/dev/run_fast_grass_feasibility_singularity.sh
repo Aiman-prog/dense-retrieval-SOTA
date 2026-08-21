@@ -53,7 +53,7 @@ singularity exec --nv \
     --bind /scratch/${USER}:/scratch/${USER} \
     --bind /home/${USER}:/home/${USER} \
     ${CONTAINER} \
-    python -u scripts/fast_grass_feasibility.py \
+    python -u scripts/dev/fast_grass_feasibility.py \
         --batches ${FG_FEAS_BATCHES:-10} \
         ${FG_FEAS_B_DOC:+--B_doc $FG_FEAS_B_DOC} \
         ${FG_FEAS_UNCERTAINTY:+--uncertainty $FG_FEAS_UNCERTAINTY} \
