@@ -45,6 +45,8 @@ if [ -f "${CONTAINER}" ]; then
 else
     echo "⚠️  Container not found at: ${CONTAINER}"
     echo ""
+    # NOTE: the live DelftBlue env does not run this container's torch — ~/.local
+    # provides torch 2.10.0+cu128 and shadows it. See P7 / env_delftblue_actual.txt.
     echo "📥 Attempting to pull PyTorch 2.1 container from Docker Hub..."
     echo "This may take 10-15 minutes..."
 
@@ -76,7 +78,9 @@ echo ""
 echo "📚 Installing Tevatron..."
 export PYTHONPATH="${HOME}/dense-retrieval-SOTA/src:${PYTHONPATH}"
 
-# Install dependencies from requirements-hpc.txt (pinned for container's PyTorch 2.1)
+# Install dependencies from requirements-hpc.txt.
+# The pins were chosen for the container's PyTorch 2.1, but the live environment runs
+# torch 2.10.0+cu128 from ~/.local. The pins still work; do not 'fix' them upward (P7).
 ${CONTAINER_CMD} exec "${CONTAINER}" \
     pip install --user -r requirements-hpc.txt
 

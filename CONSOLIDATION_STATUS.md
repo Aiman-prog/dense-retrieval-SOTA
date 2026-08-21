@@ -459,7 +459,8 @@ all. The tags are named in `CLAUDE.md`'s branch header and in this file.
 Recorded so they are not rediscovered from scratch. Each says what breaks and why. Fixing them
 is out of scope under rule 1; they need a separate, explicitly authorised task.
 
-**P1-P5 are FIXED.** **P6 and D1 are open.** P2-P6 were found while auditing `GPU_CHECKLIST.md`
+**P1-P5 are FIXED.** **P6, P7 and D1 are open** (P7 is docs-only and now recorded; no code
+change is wanted). P2-P6 were found while auditing `GPU_CHECKLIST.md`
 against the launcher bodies; each entry below records what it was and how it was resolved.
 
 ### P1 — `--recipe ance_msmarco` crashes at startup: `get_path("temp_ance_msmarco")` is `None`
@@ -609,6 +610,60 @@ offline exports are correct for the six BRIGHT experiments, whose data is alread
 
 **Consequence today.** Experiment 7 remains **blocked**, now on data rather than on P1.
 `GPU_CHECKLIST.md` §7 carries the login-node prep.
+
+### P7 — the real environment is unversioned `~/.local`, not the container
+
+**Symptom.** Nothing fails. Every doc in the repo describes an environment that does not
+exist, and the one that does exist is reconstructible only by hand.
+
+**Why.** `pytorch_2.1.sif` supplies CUDA and a torch 2.1.0 that **nothing imports**, and has
+**no `transformers` at all** — `PYTHONNOUSERSITE=1` inside the container gives
+`ModuleNotFoundError`. The entire ML stack resolves from
+`~/.local/lib/python3.10/site-packages`. Measured on the cluster 2026-08-20:
+
+| package | installed | repo claims |
+|---|---|---|
+| torch | **2.10.0+cu128** | 2.1.0 + CUDA 11.8 (`README.md`, `setup.sh`, `requirements-hpc.txt`) |
+| transformers | 4.40.2 | 4.36.0 (`DELFTBLUE_SETUP.md` §2 rationale) |
+| accelerate / peft / datasets / safetensors / faiss-gpu / numpy | exactly the `requirements-hpc.txt` pins | — |
+| torchvision / torchaudio | 0.16.0 / 2.1.0 — **2.1-era ABI, stale under torch 2.10** | — |
+
+`torch-2.10.0.dist-info` has no `REQUESTED` marker, so torch was upgraded **as a dependency
+of some other `pip install --user`**, not deliberately. Directory mtime: **2026-02-22 23:28**.
+
+**Scope.** Pre-existing and entirely outside consolidation — no launcher, entry point or
+config is involved. Affects all seven pipelines equally.
+
+**Assessed impact: low, and empirically closed.**
+- All six entry points import cleanly on this stack, `train_crossbatch` included — that is
+  the strict test, since it pulls transformers `Trainer` → `accelerate 0.30.1` → `GradCacheTrainer`
+  → `grad_cache`.
+- Every model under `models/` dates **2026-04-05 → 2026-08-20**, i.e. after the 02-22 upgrade.
+  The sole exception is `inbatch_mixed_bge_m3.OLD_baseline` (02-22 17:21, six hours before the
+  torch install), which was retired at the cutover. So ANCE 0.1683, the sequential λ ablation
+  and the λ pilot all ran on **one consistent stack** — there is no cross-torch comparability
+  caveat for the write-up.
+- torchvision/torchaudio are ABI-stale but **unimported** (grepped: zero references repo-wide).
+  Inert today; a confusing crash the moment anything imports them, including a transformers
+  vision code path.
+
+**Residual risk.** `accelerate==0.30.1` is pinned as "0.31+ uses PyTorch 2.2+ pytree APIs" and
+now runs under torch 2.10 — the opposite of the intended direction. It works; if the Tevatron
+pipelines ever misbehave around autocast, pytree or FSDP, look here first. GRASS/Fast-GRASS
+use raw `AutoModel` and are largely insulated.
+
+**Fix applied (docs only, no code):** `README.md`, `DELFTBLUE_SETUP.md`, `requirements.txt`,
+`requirements-hpc.txt` and `setup.sh` now state the actual versions and warn against
+"fixing" the pins upward. `env_delftblue_actual.txt` records the resolved environment.
+
+**Deliberately NOT done.** Not downgrading torch (would break a working stack to satisfy a
+comment). Not renaming `pytorch_2.1.sif` (17 launchers reference it; the file on disk really
+is called that). Not setting `PYTHONNOUSERSITE` anywhere — it breaks every pipeline.
+
+**Irreplaceable state.** The three Tevatron source patches in `DELFTBLUE_SETUP.md` §2 exist
+only in `~/.local` and in `/scratch/$USER/tevatron_patched_20260820.tgz` (93K, made
+2026-08-20). Re-verified as applied on that date; `from tevatron.retriever.modeling import
+DenseModel` is the check.
 
 ### D1 — `bug_fixes.md` is gitignored, so the MS MARCO runbook is not on `main`
 

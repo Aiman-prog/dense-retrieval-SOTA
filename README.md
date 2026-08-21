@@ -124,10 +124,16 @@ Edit `config/config.yaml` to adjust:
 
 ## Environment
 
-- **HPC**: Singularity containers (PyTorch 2.1, CUDA 11.8)
+- **HPC**: `pytorch_2.1.sif` Singularity container, but see below — the container name is
+  historical and does **not** describe the runtime
 - **GPUs**: NVIDIA A100 (80GB) or V100 (32GB)
 - **Tevatron**: Patched version from commit `8f31cd8`
 - **Data**: BRIGHT benchmark + ReasonIR training data
+- **Actual runtime**: torch **2.10.0+cu128**, transformers 4.40.2 — resolved from
+  `~/.local`, which shadows the container. The container supplies CUDA and a torch 2.1
+  that nothing uses; it has no `transformers` at all. Full resolved list:
+  [env_delftblue_actual.txt](env_delftblue_actual.txt). See defect **P7** in
+  `CONSOLIDATION_STATUS.md`.
 
 ## Clean Reset (DelftBlue)
 

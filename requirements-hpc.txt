@@ -2,7 +2,16 @@
 # Requirements for HPC (DelftBlue) Singularity Container
 # ============================================================================
 # These are installed INTO ~/.local via: pip install --user -r requirements-hpc.txt
-# The container already provides: torch==2.1.0, numpy, tqdm
+#
+# ⚠️ REALITY CHECK (verified 2026-08-20, defect P7):
+#   The container provides CUDA + a torch 2.1.0 that NOTHING imports, and no
+#   transformers at all. ~/.local also holds torch==2.10.0+cu128 (pulled in as a
+#   dependency on 2026-02-22, not requested), which shadows the container's torch
+#   for every job. torchvision 0.16.0 / torchaudio 2.1.0 remain at the 2.1-era ABI
+#   and would fail if imported — nothing in this repo imports them.
+#   The pins below are what actually works. Do NOT 'fix' them upward to match
+#   torch 2.10; every result in the repo was produced with exactly these versions.
+#   Resolved environment: env_delftblue_actual.txt
 # Tevatron & GradCache are installed separately (from tarballs, no git needed)
 #
 # IMPORTANT: All versions are pinned for PyTorch 2.1.0 compatibility.

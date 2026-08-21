@@ -27,7 +27,10 @@ pip install --user peft accelerate>=0.25.0
 
 ## 2. Tevatron Code Modifications (CRITICAL!)
 
-Tevatron's recent version added multimodal support requiring Qwen models not available in transformers 4.36.0. You MUST patch these files:
+Tevatron's recent version added multimodal support requiring Qwen models not available in
+the installed transformers (**4.40.2**, not the 4.36.0 this section originally assumed).
+The patches below are still required and were re-verified as applied on 2026-08-20.
+You MUST patch these files:
 
 ### 2.1 Remove Qwen Import
 
@@ -256,7 +259,13 @@ Before running training, verify:
 ---
 
 **Last Updated:** 2026-02-07
-**Tested On:** DelftBlue HPC, gpu-a100 partition, PyTorch 2.1 Singularity container
+**Tested On:** DelftBlue HPC, gpu-a100 partition, `pytorch_2.1.sif`
+
+⚠️ **The container name is historical.** Verified 2026-08-20: the container provides CUDA
+and a torch 2.1 that nothing imports, and **no `transformers` at all**. The entire ML stack
+resolves from `~/.local/lib/python3.10/site-packages` — torch **2.10.0+cu128**,
+transformers 4.40.2. Never set `PYTHONNOUSERSITE`; it breaks every pipeline.
+Resolved list: `env_delftblue_actual.txt`. Defect **P7** in `CONSOLIDATION_STATUS.md`.
 
 ## Temperature issue monkey patch fix
 ---                                                                                                                                                                 

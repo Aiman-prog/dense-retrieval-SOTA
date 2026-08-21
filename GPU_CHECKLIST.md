@@ -10,7 +10,7 @@ consolidation rules. Where a smoke mode is reachable, use it; where it is not, a
 
 ---
 
-## Before your first job — three things that will otherwise bite
+## Before your first job — four things that will otherwise bite
 
 ### 1. `logs/` — now tracked, but confirm it survived your checkout
 
@@ -68,6 +68,35 @@ unset, so `$DATA_BASE_DIR/...` silently collapses to `/...`. Use absolute paths 
 `train_async_fast_grass.py:280` raises `FileNotFoundError: stale index not found at …` and
 **never builds one itself**. Run experiment 5, or the refresh job (`gpu-a100`, 1 GPU, 4 h),
 first.
+
+### 4. The environment is `~/.local`, not the container (defect P7)
+
+Verified on the cluster 2026-08-20. `pytorch_2.1.sif` gives you CUDA and a torch 2.1 that
+**nothing imports**; it has **no `transformers` at all**. Everything resolves from
+`~/.local/lib/python3.10/site-packages`:
+
+| | |
+|---|---|
+| torch | **2.10.0+cu128** (not the 2.1.0/cu118 every doc used to claim) |
+| transformers | 4.40.2 |
+| accelerate, peft, datasets, safetensors, faiss-gpu, numpy | exactly the `requirements-hpc.txt` pins |
+
+🚫 **Never set `PYTHONNOUSERSITE`** — it breaks all seven pipelines instantly.
+
+This is benign: all six entry points import cleanly, and every model in `models/` postdates
+the 2026-02-22 torch upgrade, so your whole results table came off one stack. But `~/.local`
+is unversioned and holds three hand-applied Tevatron patches
+(`DELFTBLUE_SETUP.md` §2). Sanity-check it in ~1 min before a long run:
+
+```bash
+singularity exec /scratch/$USER/containers/pytorch_2.1.sif python -c "
+import torch, transformers
+from tevatron.retriever.modeling import DenseModel
+print(torch.__version__, transformers.__version__, 'tevatron OK')"
+```
+
+Backup of the patched package: `/scratch/$USER/tevatron_patched_20260820.tgz` (93K).
+Resolved package list: `env_delftblue_actual.txt`.
 
 ---
 
@@ -140,6 +169,12 @@ trustworthy again. (It previously ended in `echo`, reporting `COMPLETED` on a de
 
 The startup block reports **`per_device_batch_size`**, not `batch_size` — this recipe has no
 `batch_size` key. Expect `512` (× 2 GPUs = 1024 pool).
+
+⚠️ **This one has probably never succeeded.** As of 2026-08-20
+`$MODELS/crossbatch_mixed_bge_m3_epoch2/` is an **empty directory**, despite `save_steps=100`
+meaning a checkpoint should appear within minutes. P3 is why nobody noticed: the launcher
+reported `COMPLETED 0:0` no matter what `torchrun` did. Treat your next run as a first run,
+and read the `.err` file.
 
 **Success signal**
 ```bash
@@ -410,5 +445,5 @@ job plumbing.
 
 Defects **P1–P5 have since been fixed** in an authorised post-consolidation pass; the four
 launcher edits are pinned line-for-line by `AC-SURFACE-01` amendments A4/A5 and
-mutation-tested. **P6 (MS MARCO offline vs streaming) and D1 (`bug_fixes.md` gitignored)
-remain open** — see *Pre-existing defects* in `CONSOLIDATION_STATUS.md`.
+mutation-tested. **P6 (MS MARCO offline vs streaming), P7 (the `~/.local` environment) and
+D1 (`bug_fixes.md` gitignored) remain open** — see *Pre-existing defects* in `CONSOLIDATION_STATUS.md`.
