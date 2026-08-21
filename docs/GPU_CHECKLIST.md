@@ -96,7 +96,7 @@ print(torch.__version__, transformers.__version__, 'tevatron OK')"
 ```
 
 Backup of the patched package: `/scratch/$USER/tevatron_patched_20260820.tgz` (93K).
-Resolved package list: `env_delftblue_actual.txt`.
+Resolved environment: `docs/DELFTBLUE_ENVIRONMENT.md`.
 
 ---
 

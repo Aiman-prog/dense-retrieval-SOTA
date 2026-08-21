@@ -139,7 +139,7 @@ Edit `config/config.yaml` to adjust:
 - **Actual runtime**: torch **2.10.0+cu128**, transformers 4.40.2 — resolved from
   `~/.local`, which shadows the container. The container supplies CUDA and a torch 2.1
   that nothing uses; it has no `transformers` at all. Full resolved list:
-  [env_delftblue_actual.txt](env_delftblue_actual.txt). See defect **P7** in
+  [docs/DELFTBLUE_ENVIRONMENT.md](docs/DELFTBLUE_ENVIRONMENT.md). See defect **P7** in
   `CONSOLIDATION_STATUS.md`.
 
 ## Clean Reset (DelftBlue)

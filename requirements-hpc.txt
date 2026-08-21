@@ -11,7 +11,7 @@
 #   and would fail if imported — nothing in this repo imports them.
 #   The pins below are what actually works. Do NOT 'fix' them upward to match
 #   torch 2.10; every result in the repo was produced with exactly these versions.
-#   Resolved environment: env_delftblue_actual.txt
+#   Resolved environment: docs/DELFTBLUE_ENVIRONMENT.md
 # Tevatron & GradCache are installed separately (from tarballs, no git needed)
 #
 # IMPORTANT: All versions are pinned for PyTorch 2.1.0 compatibility.

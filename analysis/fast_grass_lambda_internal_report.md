@@ -56,7 +56,9 @@ Both runs selected the same number of negatives because they used the same batch
 
 ## Uncertainty Diagnostics
 
-These diagnostics come from the newer `logs_cluster` runs, which added selection-specific fields.
+These diagnostics come from the newer 32k rerun, which added selection-specific fields.
+Raw logs: `analysis/runs/sync_fast_grass_lambda_rerun_l0_32k_ema/` (λ=0) and
+`analysis/runs/sync_fast_grass_lambda_rerun_l1_32k_ema/` (λ=1).
 
 | Metric | `lambda=0` | `lambda=1` |
 |---|---:|---:|

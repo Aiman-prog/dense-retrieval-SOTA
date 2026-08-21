@@ -172,6 +172,15 @@ class, and `main` is permanent. Approved: docs only. The raw logs remain on disk
 Also still untracked: `CONSOLIDATION_PROMPT.md`, `ACCEPTANCE_CRITERIA.md` — see Step 3, where
 the A1/A2 amendment makes tracking them a live question.
 
+> **Superseded 2026-08-21 by the cleanup pass.** The list above is a record of what was true
+> at Step 2 and is left unedited. Since then those artifacts were committed and then
+> reorganised: the two `.html` files are `docs/assets/source/{fast-grass-miner,async-cached-mcdp-miner}.html`,
+> `new-grass-architecture.png` is `docs/assets/fast-grass-architecture.png`, and the raw run
+> logs are under `analysis/runs/`. `Fast-Grass Miner (standalone)-3.png` (a duplicate crop),
+> `fg_logs.tgz` and `fg_32k_logs.zip` (byte-identical duplicates of the unpacked logs) were
+> deleted, as was `logs_cluster/` once empty. `.claude/skills/` was deleted after salvaging
+> **D2**. Recover any of them from history; nothing was lost.
+
 Step 0 regression re-run: `STEP0_REGRESSION_OK`, all three hashes identical.
 
 Rollback:
@@ -654,7 +663,7 @@ use raw `AutoModel` and are largely insulated.
 
 **Fix applied (docs only, no code):** `README.md`, `DELFTBLUE_SETUP.md`, `requirements.txt`,
 `requirements-hpc.txt` and `setup.sh` now state the actual versions and warn against
-"fixing" the pins upward. `env_delftblue_actual.txt` records the resolved environment.
+"fixing" the pins upward. `docs/DELFTBLUE_ENVIRONMENT.md` records the resolved environment.
 
 **Deliberately NOT done.** Not downgrading torch (would break a working stack to satisfy a
 comment). Not renaming `pytorch_2.1.sif` (17 launchers reference it; the file on disk really
@@ -669,7 +678,7 @@ DenseModel` is the check.
 
 `bug_fixes.md` holds the `load_dataset` invocations, the `msmarco_dev_qrels.txt` `wget` and
 the `streaming=True` / `split='validation'` notes. It is **explicitly** ignored at
-`.gitignore:82`, alongside `CLAUDE.md` — a deliberate local-notes choice, not an oversight,
+`.gitignore:85`, alongside `CLAUDE.md` — a deliberate local-notes choice, not an oversight,
 so it was **not** committed during this pass. `main` is therefore not self-contained for
 experiment 7; `GPU_CHECKLIST.md` §7 inlines the essential steps to compensate.
 
@@ -678,6 +687,28 @@ either way.
 
 Note it also carries one stale claim: it says `per_device_eval_batch_size` "needs to be
 256" and is "NOT yet applied" — `config.yaml` already sets 256 for `ance_msmarco`.
+
+### D2 — `grass_twoset_feasibility.py` exists only on DelftBlue (salvaged from a deleted skill file)
+
+Recorded during the Aug 2026 cleanup, when `.claude/skills/*/SKILL.md` were deleted. This was
+the only place the fact was written down, and it cannot be discovered by reading `main`.
+
+`scripts/grass_twoset_feasibility.py` was **never committed to git**. It exists on DelftBlue at
+`~/dense-retrieval-SOTA/scripts/grass_twoset_feasibility.py` (~26 K). A local compiled copy
+survived at `scripts/__pycache__/grass_twoset_feasibility.cpython-313.pyc` until the same
+cleanup pass removed `__pycache__`.
+
+Its four functions (`load_train_queries`, `encode_queries`, `build_candidate_matrix`,
+`cached_grass_sampler`) plus a `_topk_neighbors` helper were recovered by disassembling that
+`.pyc` and **inlined into `scripts/grass_negcache_feasibility.py`**, which is committed and
+self-contained. The reconstruction passed synthetic checks and a real 7/7 cluster run.
+
+Its launcher, `scripts/run_twoset_feasibility_singularity.sh`, was deleted in the cleanup pass
+(amendment **A7**) because its target does not exist on `main` and the launcher could never run.
+
+**Open, low priority:** if byte-faithfulness of the inlined functions ever matters, diff them
+against the cluster original. The recovery already passes synthetic and real runs, so this is
+belt-and-braces only.
 
 ---
 

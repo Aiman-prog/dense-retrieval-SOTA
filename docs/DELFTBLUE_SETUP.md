@@ -265,7 +265,7 @@ Before running training, verify:
 and a torch 2.1 that nothing imports, and **no `transformers` at all**. The entire ML stack
 resolves from `~/.local/lib/python3.10/site-packages` — torch **2.10.0+cu128**,
 transformers 4.40.2. Never set `PYTHONNOUSERSITE`; it breaks every pipeline.
-Resolved list: `env_delftblue_actual.txt`. Defect **P7** in `CONSOLIDATION_STATUS.md`.
+Resolved environment: `docs/DELFTBLUE_ENVIRONMENT.md`. Defect **P7** in `CONSOLIDATION_STATUS.md`.
 
 ## Temperature issue monkey patch fix
 ---                                                                                                                                                                 

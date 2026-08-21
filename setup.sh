@@ -46,7 +46,7 @@ else
     echo "⚠️  Container not found at: ${CONTAINER}"
     echo ""
     # NOTE: the live DelftBlue env does not run this container's torch — ~/.local
-    # provides torch 2.10.0+cu128 and shadows it. See P7 / env_delftblue_actual.txt.
+    # provides torch 2.10.0+cu128 and shadows it. See P7 / docs/DELFTBLUE_ENVIRONMENT.md.
     echo "📥 Attempting to pull PyTorch 2.1 container from Docker Hub..."
     echo "This may take 10-15 minutes..."
 

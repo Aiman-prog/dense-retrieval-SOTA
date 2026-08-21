@@ -7,7 +7,7 @@
 
 # --- Core Deep Learning ---
 torch>=2.6.0  # Local dev (Mac/Python 3.13+). HPC actually runs torch 2.10.0+cu128 from
-              # ~/.local, NOT the container's 2.1.0 — see env_delftblue_actual.txt (P7).
+              # ~/.local, NOT the container's 2.1.0 — see docs/DELFTBLUE_ENVIRONMENT.md (P7).
 transformers>=4.36.0,<5  # REQUIRED: peft needs Cache class from 4.36.0+; <5 because v5 requires PyTorch>=2.4
 sentence-transformers>=2.2.0,<3.0.0
 datasets>=2.14.0,<3.0.0

@@ -41,6 +41,13 @@ The import harnesses set `CUDA_VISIBLE_DEVICES` empty and force Transformers/Hug
 > roster moved with them. The suites' own `Path(__file__).resolve().parent.parent` still
 > resolves to the repo root from `tests/`, so no `sys.path` bootstrapping changed.
 
+> **A7 (post-consolidation)** — `scripts/run_twoset_feasibility_singularity.sh` was deleted.
+> It invoked `scripts/grass_twoset_feasibility.py`, which was **never committed**, so the
+> launcher was unrunnable from a clone at every point in its history. This is the first
+> allowlisted *removal*, so the row gained `ALLOWED_REMOVED_SH` alongside `ALLOWED_NEW_SH`;
+> the set is exact, so deleting any other launcher still fails. Context: **D2** in
+> `CONSOLIDATION_STATUS.md`.
+
 **Runnable after step:** 6
 
 **Exact command:**
@@ -61,6 +68,13 @@ HEAD = "main"
 ALLOWED_NEW_SH = {
     "scripts/eval_msmarco_singularity.sh",
     "scripts/run_ance_msmarco_singularity.sh",
+}
+# Amendment A7. The launcher's only target, scripts/grass_twoset_feasibility.py, was
+# never committed, so this script could not run from a clone of `main` at any point in
+# its history. Deleting it removes a dead file, not a capability. Recorded as D2 in
+# CONSOLIDATION_STATUS.md, which also preserves where the module actually lives.
+ALLOWED_REMOVED_SH = {
+    "scripts/run_twoset_feasibility_singularity.sh",
 }
 # Amendments A4 + A5. Pre-existing launchers were edited AFTER consolidation, each
 # with explicit authorisation. Allowing them is not a loophole: every permitted
@@ -146,8 +160,8 @@ base_sh = paths(BASE, "scripts/*.sh")
 head_sh = paths(HEAD, "scripts/*.sh")
 if head_sh - base_sh != ALLOWED_NEW_SH:
     raise AssertionError(f"unexpected added shell files: {sorted(head_sh - base_sh)}")
-if base_sh - head_sh:
-    raise AssertionError(f"removed shell files: {sorted(base_sh - head_sh)}")
+if base_sh - head_sh != ALLOWED_REMOVED_SH:
+    raise AssertionError(f"unexpected removed shell files: {sorted(base_sh - head_sh)}")
 import difflib
 
 def change_lines(before, after):
@@ -157,6 +171,8 @@ def change_lines(before, after):
             if not line.startswith(("---", "+++", "@@"))]
 
 for path in sorted(base_sh):
+    if path in ALLOWED_REMOVED_SH:
+        continue  # deleted at HEAD; `git show HEAD:<path>` would fail
     before = git("show", f"{BASE}:{path}", text=True)
     after = git("show", f"{HEAD}:{path}", text=True)
     if before == after:
