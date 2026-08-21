@@ -51,7 +51,7 @@ is one atomic commit" are correctness properties of the real
 NegativeCache.maintain_cached_mcdp, which does not exist yet — asserting them
 against the Phase-0 reference stand-in would only test the stand-in.
 
-Run: python scripts/async_fast_grass_cache_semantics_test.py
+Run: python tests/async_fast_grass_cache_semantics_test.py
 """
 import sys
 from pathlib import Path

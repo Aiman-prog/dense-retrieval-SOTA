@@ -124,12 +124,12 @@ if [ -n "${ASYNC_FG_RUN_TESTS}" ]; then
         --bind /home/${USER}:/home/${USER} \
         ${CONTAINER} bash -c '
             set -e
-            python -u scripts/async_fast_grass_handoff_test.py
-            python -u scripts/async_fast_grass_cache_semantics_test.py
-            python -u scripts/async_fast_grass_persistence_test.py
-            python -u scripts/async_fast_grass_pilot_test.py
-            python -u scripts/async_fast_grass_integration_smoke.py
-            python -u scripts/fast_grass_test.py
+            python -u tests/async_fast_grass_handoff_test.py
+            python -u tests/async_fast_grass_cache_semantics_test.py
+            python -u tests/async_fast_grass_persistence_test.py
+            python -u tests/async_fast_grass_pilot_test.py
+            python -u tests/async_fast_grass_integration_smoke.py
+            python -u tests/fast_grass_test.py
         '
     TEST_EXIT=$?
     if [ $TEST_EXIT -ne 0 ]; then

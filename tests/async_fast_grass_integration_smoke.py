@@ -17,7 +17,7 @@ Checks:
   - the trainer's loss path never touches Z_mc/Z_mean.
   - checkpoints are only visible to the miner once optimizer.pt is written.
 
-Run: python scripts/async_fast_grass_integration_smoke.py
+Run: python tests/async_fast_grass_integration_smoke.py
 """
 import json
 import sys

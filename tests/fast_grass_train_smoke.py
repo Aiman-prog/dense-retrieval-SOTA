@@ -6,7 +6,7 @@ Builds a tiny synthetic setup (mock student/teacher, mock tokenizer, ~40-doc cor
 ~12 train items, B_doc=8, cache_update_interval=2, 1 epoch), runs the real Algorithm-1
 pipeline, and asserts the training/cache/logging contract holds.
 
-Run: python scripts/fast_grass_train_smoke.py
+Run: python tests/fast_grass_train_smoke.py
 """
 import json
 import sys

@@ -19,7 +19,7 @@ Covered:
   - R_doc is deferred: the state carries no registry entries, and a reloaded cache
     still admits nothing.
 
-Run: python scripts/async_fast_grass_persistence_test.py
+Run: python tests/async_fast_grass_persistence_test.py
 """
 import sys
 import tempfile

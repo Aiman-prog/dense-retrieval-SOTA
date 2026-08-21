@@ -33,7 +33,7 @@ Checkpoints and step arithmetic:
     (checkpoint saves).
   - async_gap_steps / data_age_steps / rounds_consumed / rounds_skipped.
 
-Run: python scripts/async_fast_grass_handoff_test.py
+Run: python tests/async_fast_grass_handoff_test.py
 """
 import sys
 import tempfile

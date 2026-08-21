@@ -3,7 +3,7 @@ Fast-GRASS smoke test — local CPU-only wiring checks:
 negative-cache public API, config.training.fast_grass keys, and one tiny
 synthetic init -> score -> mask -> select -> maintain cache cycle.
 
-Run: python scripts/fast_grass_smoke.py
+Run: python tests/fast_grass_smoke.py
 """
 import sys
 import numpy as np

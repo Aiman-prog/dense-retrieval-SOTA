@@ -402,7 +402,7 @@ def _print_report(r):
     print(f"    [soft] speedup >= threshold    : "
           f"{_mark(g['speedup_meets_threshold'])} ({r['expected_speedup']:.2f}x)")
     print("    (correctness gates — population std, lambda=0 ranking, qrel leakage —")
-    print("     are enforced by scripts/async_fast_grass_cache_semantics_test.py)")
+    print("     are enforced by tests/async_fast_grass_cache_semantics_test.py)")
     print("-" * 68)
     if r['warnings']:
         print("  WARNINGS:")

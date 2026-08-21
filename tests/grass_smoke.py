@@ -2,7 +2,7 @@
 GRASS smoke test — local CPU-only checks for shared wiring:
 mining-log shape, config keys, CandidateMemory, and run_grass.py imports.
 
-Run: python scripts/grass_smoke.py
+Run: python tests/grass_smoke.py
 """
 import json
 import sys

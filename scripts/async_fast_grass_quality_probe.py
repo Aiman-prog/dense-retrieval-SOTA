@@ -54,6 +54,8 @@ import torch
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root / 'src'))
 sys.path.insert(0, str(project_root / 'scripts'))
+# the --synthetic path reuses mock fixtures that live with the suites in tests/
+sys.path.insert(0, str(project_root / 'tests'))
 
 from utils.negative_cache import NegativeCache  # noqa: E402
 from async_fast_grass_cached_mcdp import (  # noqa: E402

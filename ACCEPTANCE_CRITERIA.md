@@ -33,6 +33,13 @@ The import harnesses set `CUDA_VISIBLE_DEVICES` empty and force Transformers/Hug
 > A4's one-line mechanism is replaced by an **exact unified-diff pin** per file, which is
 > strictly stronger: the permitted change is now the literal diff, so any extra, altered or
 > missing line fails, as does any edit to a launcher not listed.
+> **A6 (post-consolidation)** — the CPU test suites moved from `scripts/` to `tests/`, so the
+> two launchers that invoke them by path were edited: `run_async_fast_grass_singularity.sh`
+> (6 lines, the pre-GPU correctness gate) and `run_fast_grass_timing_singularity.sh`
+> (3 lines). Both diffs are **path-only** — `scripts/<suite>.py` → `tests/<suite>.py`, with no
+> other token changed — and are pinned line-for-line by the same A5 mechanism. `AC-TEST-01`'s
+> roster moved with them. The suites' own `Path(__file__).resolve().parent.parent` still
+> resolves to the repo root from `tests/`, so no `sys.path` bootstrapping changed.
 
 **Runnable after step:** 6
 
@@ -95,6 +102,28 @@ ALLOWED_CHANGED_SH = {
         "-        ${FAST_GRASS_NO_EVAL:+--no_eval}",
         "+        ${FAST_GRASS_NO_EVAL:+--no_eval} \\",
         "+        ${FAST_GRASS_DEBUG:+--debug}",
+    ],
+    "scripts/run_async_fast_grass_singularity.sh": [
+        "-            python -u scripts/async_fast_grass_handoff_test.py",
+        "-            python -u scripts/async_fast_grass_cache_semantics_test.py",
+        "-            python -u scripts/async_fast_grass_persistence_test.py",
+        "-            python -u scripts/async_fast_grass_pilot_test.py",
+        "-            python -u scripts/async_fast_grass_integration_smoke.py",
+        "-            python -u scripts/fast_grass_test.py",
+        "+            python -u tests/async_fast_grass_handoff_test.py",
+        "+            python -u tests/async_fast_grass_cache_semantics_test.py",
+        "+            python -u tests/async_fast_grass_persistence_test.py",
+        "+            python -u tests/async_fast_grass_pilot_test.py",
+        "+            python -u tests/async_fast_grass_integration_smoke.py",
+        "+            python -u tests/fast_grass_test.py",
+    ],
+    "scripts/run_fast_grass_timing_singularity.sh": [
+        "-            python -u scripts/async_fast_grass_handoff_test.py",
+        "-            python -u scripts/async_fast_grass_cache_semantics_test.py",
+        "-            python -u scripts/fast_grass_test.py",
+        "+            python -u tests/async_fast_grass_handoff_test.py",
+        "+            python -u tests/async_fast_grass_cache_semantics_test.py",
+        "+            python -u tests/fast_grass_test.py",
     ],
 }
 ENTRY_POINTS = [
@@ -540,15 +569,15 @@ import subprocess
 import sys
 
 cases = [
-    ("async_fast_grass_handoff_test.py", [sys.executable, "scripts/async_fast_grass_handoff_test.py"], "count", None),
-    ("async_fast_grass_cache_semantics_test.py", [sys.executable, "scripts/async_fast_grass_cache_semantics_test.py"], "count", None),
-    ("async_fast_grass_persistence_test.py", [sys.executable, "scripts/async_fast_grass_persistence_test.py"], "count", None),
-    ("async_fast_grass_pilot_test.py", [sys.executable, "scripts/async_fast_grass_pilot_test.py"], "count", None),
-    ("async_fast_grass_integration_smoke.py", [sys.executable, "scripts/async_fast_grass_integration_smoke.py"], "integration", "PASS  async handoff integration"),
-    ("fast_grass_test.py", [sys.executable, "scripts/fast_grass_test.py"], "count", None),
-    ("fast_grass_smoke.py", [sys.executable, "scripts/fast_grass_smoke.py"], "count", None),
-    ("grass_test.py", [sys.executable, "scripts/grass_test.py"], "count", None),
-    ("grass_smoke.py", [sys.executable, "scripts/grass_smoke.py"], "count", None),
+    ("async_fast_grass_handoff_test.py", [sys.executable, "tests/async_fast_grass_handoff_test.py"], "count", None),
+    ("async_fast_grass_cache_semantics_test.py", [sys.executable, "tests/async_fast_grass_cache_semantics_test.py"], "count", None),
+    ("async_fast_grass_persistence_test.py", [sys.executable, "tests/async_fast_grass_persistence_test.py"], "count", None),
+    ("async_fast_grass_pilot_test.py", [sys.executable, "tests/async_fast_grass_pilot_test.py"], "count", None),
+    ("async_fast_grass_integration_smoke.py", [sys.executable, "tests/async_fast_grass_integration_smoke.py"], "integration", "PASS  async handoff integration"),
+    ("fast_grass_test.py", [sys.executable, "tests/fast_grass_test.py"], "count", None),
+    ("fast_grass_smoke.py", [sys.executable, "tests/fast_grass_smoke.py"], "count", None),
+    ("grass_test.py", [sys.executable, "tests/grass_test.py"], "count", None),
+    ("grass_smoke.py", [sys.executable, "tests/grass_smoke.py"], "count", None),
     ("fast_grass_mine_timing.py --synthetic", [sys.executable, "scripts/fast_grass_mine_timing.py", "--synthetic"], "marker", "PASS  miner-timing harness runs end to end"),
     ("fast_grass_train_timing.py --synthetic", [sys.executable, "scripts/fast_grass_train_timing.py", "--synthetic"], "marker", "PASS  trainer-timing harness runs end to end"),
     ("async_fast_grass_speed_estimate.py file-free smoke", [sys.executable, "scripts/async_fast_grass_speed_estimate.py", "--seconds_per_train_step", "1", "--t_mine_round", "10", "--total_queries", "100", "--batch_size", "10", "--num_epochs", "2", "--checkpoint_write_time", "1"], "marker", "ASYNC FAST-GRASS — EXPECTED SPEEDUP & CADENCE ESTIMATE"),

@@ -22,7 +22,7 @@ machinery added for the lambda pilot:
   unchanged     the base recipe is identical to HEAD except the intentional
                 max_age_steps correction; --debug still yields 512 HQ-first items
 
-Run: python scripts/async_fast_grass_pilot_test.py
+Run: python tests/async_fast_grass_pilot_test.py
 """
 import json
 import subprocess

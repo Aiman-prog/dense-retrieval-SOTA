@@ -58,6 +58,8 @@ except ImportError:
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root / 'src'))
 sys.path.insert(0, str(project_root / 'scripts'))
+# the --synthetic path reuses mock fixtures that live with the suites in tests/
+sys.path.insert(0, str(project_root / 'tests'))
 
 from utils.helpers import (
     get_training_context, load_config, get_path,

@@ -115,9 +115,9 @@ if [ -n "${FG_RUN_TESTS}" ]; then
         --bind /home/${USER}:/home/${USER} \
         ${CONTAINER} bash -c '
             set -e
-            python -u scripts/async_fast_grass_handoff_test.py
-            python -u scripts/async_fast_grass_cache_semantics_test.py
-            python -u scripts/fast_grass_test.py
+            python -u tests/async_fast_grass_handoff_test.py
+            python -u tests/async_fast_grass_cache_semantics_test.py
+            python -u tests/fast_grass_test.py
             python -u scripts/fast_grass_mine_timing.py --synthetic
             python -u scripts/async_fast_grass_quality_probe.py --synthetic
         '

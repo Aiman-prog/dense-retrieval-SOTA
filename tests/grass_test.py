@@ -3,7 +3,7 @@ Unit tests for GRASS mining speedups and shared sequential components.
 Tests correctness using synthetic data only.
 No real model download, no GPU required — falls back to CPU.
 
-Run: python scripts/grass_test.py
+Run: python tests/grass_test.py
 """
 import sys
 import json

@@ -108,6 +108,7 @@ dense-retrieval-SOTA/
 │   ├── lambda_pilot*.md         # Stage 7 pilot and its verdict
 │   ├── *fast_grass*.md          # Architecture and implementation details
 │   └── assets/                  # Figures and reference PDFs
+├── tests/                       # CPU test suites and smokes (no GPU)
 ├── setup.sh                     # One-command setup for DelftBlue
 └── requirements.txt             # Local development (use setup.sh for HPC)
 ```

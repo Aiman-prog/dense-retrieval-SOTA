@@ -2,7 +2,7 @@
 Unit tests for the Fast-GRASS negative-cache core (NegativeCache + RetiredRegistry).
 CPU-only, deterministic, synthetic data — no model download, no GPU required.
 
-Run: python scripts/fast_grass_test.py
+Run: python tests/fast_grass_test.py
 """
 import sys
 import numpy as np
