@@ -239,7 +239,7 @@ singularity exec $BIND $CONTAINER python scripts/train_async_fast_grass.py --pre
 ```bash
 ASYNC_FG_RECIPE=async_fast_grass_smoke ASYNC_FG_MANIFEST=$SMOKE_MANIFEST \
 ASYNC_FG_SUFFIX=smoke ASYNC_FG_FRESH=1 ASYNC_FG_NO_EVAL=1 \
-sbatch --time=00:30:00 --job-name=fg_smoke scripts/run_async_fast_grass_singularity.sh
+sbatch --time=00:30:00 --job-name=fg_smoke scripts/launchers/run_async_fast_grass_singularity.sh
 ```
 
 **3. Lambda probe** (1×A100, 15–40 min)
@@ -254,7 +254,7 @@ sbatch --time=01:00:00 scripts/run_async_fast_grass_probe_singularity.sh
 ```bash
 ASYNC_FG_RECIPE=async_fast_grass_pilot ASYNC_FG_MANIFEST=$MANIFEST \
 ASYNC_FG_LAMBDA=0 ASYNC_FG_SUFFIX=pilot_lam0 ASYNC_FG_FRESH=1 ASYNC_FG_NO_EVAL=1 \
-sbatch --time=04:00:00 --job-name=fg_pilot_lam0 scripts/run_async_fast_grass_singularity.sh
+sbatch --time=04:00:00 --job-name=fg_pilot_lam0 scripts/launchers/run_async_fast_grass_singularity.sh
 ```
 
 **5. Nonzero arms** (concurrent; omit the second if the probe reported `n_arms: 1`)
@@ -265,7 +265,7 @@ for A in "lamLOW:$LOW" "lamMED:$MED"; do
   S=${A%%:*}; L=${A##*:}
   ASYNC_FG_RECIPE=async_fast_grass_pilot ASYNC_FG_MANIFEST=$MANIFEST \
   ASYNC_FG_LAMBDA=$L ASYNC_FG_SUFFIX=pilot_$S ASYNC_FG_FRESH=1 ASYNC_FG_NO_EVAL=1 \
-  sbatch --time=04:00:00 --job-name=fg_pilot_$S scripts/run_async_fast_grass_singularity.sh
+  sbatch --time=04:00:00 --job-name=fg_pilot_$S scripts/launchers/run_async_fast_grass_singularity.sh
 done
 ```
 
@@ -291,7 +291,7 @@ for S in pilot_lam0 pilot_lamLOW pilot_lamMED; do
   EVAL_MODEL_PATH=/scratch/$USER/dense-retrieval-SOTA/models/async_fast_grass_pilot_bge_m3_$S \
   EVAL_REQUIRE_EXISTING=1 \
   sbatch --partition=gpu-a100 --time=04:00:00 --job-name=eval_$S \
-         scripts/run_evaluate_singularity.sh
+         scripts/launchers/run_evaluate_singularity.sh
 done
 
 singularity exec $BIND $CONTAINER python scripts/dev/lambda_pilot_decide.py \

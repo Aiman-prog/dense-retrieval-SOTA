@@ -234,8 +234,8 @@ and file modes identical to `baseline` (`100644` for all three, which is already
 mode among `main`'s launchers):
 
 - `scripts/eval_msmarco.py`
-- `scripts/eval_msmarco_singularity.sh`
-- `scripts/run_ance_msmarco_singularity.sh`
+- `scripts/launchers/eval_msmarco_singularity.sh`
+- `scripts/launchers/run_ance_msmarco_singularity.sh`
 
 **Config** — `training.ance_msmarco` only (28 keys), inserted after the `ance` block.
 Per amendment A2, `data.msmarco` already existed and was **not** touched.
@@ -508,7 +508,7 @@ verified against. Pushed, so `AC-SURFACE-01` stays reproducible against
 | fix | file | why |
 |---|---|---|
 | **P1** — add `temp_ance_msmarco` to `path_map` | `src/utils/helpers.py` | `--recipe ance_msmarco` raised `TypeError` at `train_ance.py:161` seconds into the job. Verified fixed. |
-| restore in-batch wall clock `14:00:00` → `24:00:00` | `scripts/run_inbatch_singularity.sh` | the value was a temporary OOM-smoke setting; the file's own comment said to restore it |
+| restore in-batch wall clock `14:00:00` → `24:00:00` | `scripts/launchers/run_inbatch_singularity.sh` | the value was a temporary OOM-smoke setting; the file's own comment said to restore it |
 
 **Amendment A4 — `AC-SURFACE-01` passes again on `main`.** The row asserts that no pre-existing
 launcher changed by a byte, which the authorised in-batch edit broke. Reverting the edit was

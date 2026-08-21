@@ -86,8 +86,8 @@ ASYNC_FG_MANIFEST="${ASYNC_FG_MANIFEST:-}"      # pilot manifest JSONL
 # root, so they overwrite each other's checkpoints and mined rounds. The lambda is
 # read here at SUBMIT-EXPANSION time and pinned onto the command line, so editing
 # config.yaml while jobs sit in the queue cannot change what a queued arm runs.
-#   ASYNC_FG_LAMBDA=0   ASYNC_FG_SUFFIX=lam0   sbatch scripts/run_async_fast_grass_singularity.sh
-#   ASYNC_FG_LAMBDA=0.5 ASYNC_FG_SUFFIX=lam05  sbatch scripts/run_async_fast_grass_singularity.sh
+#   ASYNC_FG_LAMBDA=0   ASYNC_FG_SUFFIX=lam0   sbatch scripts/launchers/run_async_fast_grass_singularity.sh
+#   ASYNC_FG_LAMBDA=0.5 ASYNC_FG_SUFFIX=lam05  sbatch scripts/launchers/run_async_fast_grass_singularity.sh
 
 mkdir -p logs
 

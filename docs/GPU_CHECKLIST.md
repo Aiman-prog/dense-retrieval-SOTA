@@ -59,7 +59,7 @@ unset, so `$DATA_BASE_DIR/...` silently collapses to `/...`. Use absolute paths 
 1 in-batch ──► produces models/inbatch_mixed_bge_m3, the base_model for 3,4,5,6
                       │
 5 seq Fast-GRASS ─────┴──► builds temp_grass_workdir/stale_index/corpus.pkl
-                      │         (or: sbatch scripts/run_refresh_stale_index_singularity.sh)
+                      │         (or: sbatch scripts/launchers/run_refresh_stale_index_singularity.sh)
                       ▼
               6 async Fast-GRASS   ← HARD-FAILS without that pickle (defect B2)
 7 MS MARCO ──► blocked on a separate data-prep step; see §7
@@ -132,7 +132,7 @@ Empty output is what you want.
 ## 1. In-batch — `train_inbatch.py`
 
 ```bash
-sbatch scripts/run_inbatch_singularity.sh
+sbatch scripts/launchers/run_inbatch_singularity.sh
 ```
 
 | | |
@@ -155,7 +155,7 @@ This is the **prerequisite for experiments 3–7** — they all train from its o
 ## 2. Cross-batch — `train_crossbatch.py`
 
 ```bash
-sbatch scripts/run_crossbatch_singularity.sh
+sbatch scripts/launchers/run_crossbatch_singularity.sh
 ```
 
 | | |
@@ -188,7 +188,7 @@ ls $MODELS/crossbatch_mixed_bge_m3_epoch2/checkpoint-100/
 ## 3. ANCE (BRIGHT) — `train_ance.py`
 
 ```bash
-sbatch scripts/run_ance_singularity.sh
+sbatch scripts/launchers/run_ance_singularity.sh
 ```
 
 | | |
@@ -214,7 +214,7 @@ Prior run for reference: job 9566838 reached NDCG@10 = 0.1683 with 1 ANN refresh
 ## 4. Sync GRASS — `run_grass.py`
 
 ```bash
-GRASS_UNCERTAINTY=mc_dropout sbatch scripts/run_grass_singularity.sh   # or ema
+GRASS_UNCERTAINTY=mc_dropout sbatch scripts/launchers/run_grass_singularity.sh   # or ema
 ```
 
 | | |
@@ -226,7 +226,7 @@ GRASS_UNCERTAINTY=mc_dropout sbatch scripts/run_grass_singularity.sh   # or ema
 ✅ **Defect P5 is fixed** — `GRASS_DEBUG=1` now reaches `--debug` (512-item mixture):
 
 ```bash
-GRASS_DEBUG=1 GRASS_UNCERTAINTY=mc_dropout sbatch --time=01:00:00 scripts/run_grass_singularity.sh
+GRASS_DEBUG=1 GRASS_UNCERTAINTY=mc_dropout sbatch --time=01:00:00 scripts/launchers/run_grass_singularity.sh
 ```
 
 With the knob unset the command line is byte-identical to before. The interactive form still
@@ -258,7 +258,7 @@ ls $MODELS/grass_mixed_bge_m3_mc_dropout/checkpoint-1000/
 ## 5. Sequential Fast-GRASS — `run_fast_grass.py`
 
 ```bash
-FAST_GRASS_UNCERTAINTY=mcdp sbatch scripts/run_fast_grass_singularity.sh
+FAST_GRASS_UNCERTAINTY=mcdp sbatch scripts/launchers/run_fast_grass_singularity.sh
 ```
 
 | | |
@@ -270,7 +270,7 @@ FAST_GRASS_UNCERTAINTY=mcdp sbatch scripts/run_fast_grass_singularity.sh
 ✅ Defect P5 fixed here too — `FAST_GRASS_DEBUG=1` reaches `--debug`:
 
 ```bash
-FAST_GRASS_DEBUG=1 FAST_GRASS_UNCERTAINTY=mcdp sbatch --time=01:00:00 scripts/run_fast_grass_singularity.sh
+FAST_GRASS_DEBUG=1 FAST_GRASS_UNCERTAINTY=mcdp sbatch --time=01:00:00 scripts/launchers/run_fast_grass_singularity.sh
 ```
 
 **Success signal**
@@ -289,7 +289,7 @@ deliberately, so some values appear twice.
 ## 6. Async Fast-GRASS — `train_async_fast_grass.py`
 
 **Prerequisite: the stale-index pickle must already exist** (experiment 5, or
-`sbatch scripts/run_refresh_stale_index_singularity.sh`). Verify before submitting:
+`sbatch scripts/launchers/run_refresh_stale_index_singularity.sh`). Verify before submitting:
 
 ```bash
 ls -lh /scratch/$USER/dense-retrieval-SOTA/temp_grass_workdir/stale_index/corpus.pkl
@@ -298,8 +298,8 @@ ls -lh /scratch/$USER/dense-retrieval-SOTA/temp_grass_workdir/stale_index/corpus
 ```bash
 python scripts/train_async_fast_grass.py --preflight       # login node, no GPU
 ASYNC_FG_DEBUG=1 ASYNC_FG_MAX_ROUNDS=1 ASYNC_FG_FRESH=1 \
-    sbatch scripts/run_async_fast_grass_singularity.sh     # smoke
-sbatch scripts/run_async_fast_grass_singularity.sh         # real run
+    sbatch scripts/launchers/run_async_fast_grass_singularity.sh     # smoke
+sbatch scripts/launchers/run_async_fast_grass_singularity.sh         # real run
 ```
 
 | | |
@@ -379,7 +379,7 @@ checklist stands alone.
 Then:
 
 ```bash
-sbatch scripts/run_ance_msmarco_singularity.sh
+sbatch scripts/launchers/run_ance_msmarco_singularity.sh
 ```
 
 | | |
@@ -401,7 +401,7 @@ ls $MODELS/ance_msmarco_bge_m3/checkpoint-1250/
 ### MS MARCO evaluation
 
 ```bash
-sbatch scripts/eval_msmarco_singularity.sh          # gpu-a100, 1 GPU, 4 h, metric recip_rank (MRR)
+sbatch scripts/launchers/eval_msmarco_singularity.sh          # gpu-a100, 1 GPU, 4 h, metric recip_rank (MRR)
 ```
 
 ✅ **Defect P4 is fixed** — the launcher now propagates its exit code and **exits 2** with a
@@ -412,8 +412,8 @@ clear message when no checkpoint exists, instead of silently evaluating `--model
 ## BRIGHT evaluation
 
 ```bash
-sbatch scripts/run_evaluate_singularity.sh              # defaults to the 4 pilot domains
-EVAL_DOMAINS=all sbatch scripts/run_evaluate_singularity.sh
+sbatch scripts/launchers/run_evaluate_singularity.sh              # defaults to the 4 pilot domains
+EVAL_DOMAINS=all sbatch scripts/launchers/run_evaluate_singularity.sh
 ```
 
 | | |

@@ -31,11 +31,11 @@ Use two comparison tracks. Track 1 tests warmup/batch-size behavior from raw `BA
 ## Run Order
 
 1. **InBatch warmup**
-   - Run `scripts/run_inbatch_singularity.sh`.
+   - Run `scripts/launchers/run_inbatch_singularity.sh`.
    - Evaluate/save metrics for the warmup baseline.
 
 2. **CrossBatch large-batch baseline**
-   - Run `scripts/run_crossbatch_singularity.sh`.
+   - Run `scripts/launchers/run_crossbatch_singularity.sh`.
    - Treat this as "does much larger effective batch help from raw BGE-M3?", not as the Fast-GRASS base.
 
 3. **Prepare Fast-GRASS**

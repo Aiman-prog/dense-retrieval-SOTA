@@ -60,6 +60,15 @@ The import harnesses set `CUDA_VISIBLE_DEVICES` empty and force Transformers/Hug
 > Every pinned line is path-only. The timing launcher's A6 `tests/` lines moved into its
 > `MOVED_SH` pin, since one pin must cover the whole file.
 
+> **A10 (post-consolidation)** — every launcher moved to `scripts/launchers/`; `scripts/`
+> root is now Python only. Shell files are never imported and each hardcodes
+> `#SBATCH --chdir=<repo root>` with repo-relative paths, so a move needs no content edit.
+> `ALLOWED_CHANGED_SH` is consequently **empty**: a pre-existing launcher that changed
+> without moving now fails outright. `MOVED_SH` carries all 12 relocations, **4 of them
+> with an empty diff list** — the strongest pin available, asserting the bytes are
+> untouched. `scripts/run_eval_checkpoints_singularity.sh` joins `ALLOWED_REMOVED_SH`;
+> its target duplicated `run_all_evals.py` and swallowed per-domain failures.
+
 **Runnable after step:** 6
 
 **Exact command:**
@@ -78,8 +87,8 @@ import sys
 BASE = "archive/main-post-promotion"
 HEAD = "main"
 ALLOWED_NEW_SH = {
-    "scripts/eval_msmarco_singularity.sh",
-    "scripts/run_ance_msmarco_singularity.sh",
+    "scripts/launchers/eval_msmarco_singularity.sh",
+    "scripts/launchers/run_ance_msmarco_singularity.sh",
 }
 # Amendment A7. The launcher's only target, scripts/grass_twoset_feasibility.py, was
 # never committed, so this script could not run from a clone of `main` at any point in
@@ -91,6 +100,7 @@ ALLOWED_NEW_SH = {
 ALLOWED_REMOVED_SH = {
     "scripts/run_twoset_feasibility_singularity.sh",
     "scripts/run_negcache_feasibility_singularity.sh",
+    "scripts/run_eval_checkpoints_singularity.sh",
 }
 # Amendments A4 + A5. Pre-existing launchers were edited AFTER consolidation, each
 # with explicit authorisation. Allowing them is not a loophole: every permitted
@@ -104,36 +114,24 @@ ALLOWED_REMOVED_SH = {
 #                       points but no launcher passed it through, so there was no
 #                       smoke path. With the knob unset the expansion is empty and
 #                       the command line is byte-identical to before.
-ALLOWED_CHANGED_SH = {
-    "scripts/run_inbatch_singularity.sh": [
-        "-#SBATCH --time=14:00:00   # TEMP: OOM smoke test \u2014 passes step-1 mem peak then SLURM kills it. RESTORE to 24:00:00 for real run.",
-        "+#SBATCH --time=24:00:00",
-    ],
-    "scripts/run_crossbatch_singularity.sh": [
-        "+EXIT_CODE=$?",
-        "+",
-        "+if [ $EXIT_CODE -eq 0 ]; then",
-        "+    echo \"\u2705 Cross-batch training completed successfully\"",
-        "+else",
-        "+    echo \"\u274c Cross-batch training failed with code $EXIT_CODE\"",
-        "+fi",
-        "+",
-        "+",
-        "+exit $EXIT_CODE",
-    ],
-    "scripts/run_grass_singularity.sh": [
-        "+# GRASS_DEBUG=1           # 512-item mixture smoke run",
-        "-        ${GRASS_LAMBDA:+--lambda_val $GRASS_LAMBDA}",
-        "+        ${GRASS_LAMBDA:+--lambda_val $GRASS_LAMBDA} \\",
-        "+        ${GRASS_DEBUG:+--debug}",
-    ],
-    "scripts/run_fast_grass_singularity.sh": [
-        "+# FAST_GRASS_DEBUG=1      # 512-item mixture smoke run",
-        "-        ${FAST_GRASS_NO_EVAL:+--no_eval}",
-        "+        ${FAST_GRASS_NO_EVAL:+--no_eval} \\",
-        "+        ${FAST_GRASS_DEBUG:+--debug}",
-    ],
-    "scripts/run_async_fast_grass_singularity.sh": [
+# Amendment A10. Every pre-existing launcher moved to scripts/launchers/, so
+# ALLOWED_CHANGED_SH is now empty: a launcher that changed WITHOUT moving fails.
+ALLOWED_CHANGED_SH = {}
+MOVED_SH = {
+    "scripts/run_ance_singularity.sh": ("scripts/launchers/run_ance_singularity.sh", []),   # pure rename
+    "scripts/run_async_fast_grass_probe_singularity.sh": (
+        "scripts/dev/run_async_fast_grass_probe_singularity.sh", [
+        "-    python -u scripts/async_fast_grass_quality_probe.py --synthetic",
+        "+    python -u scripts/dev/async_fast_grass_quality_probe.py --synthetic",
+        "-    python -u scripts/async_fast_grass_quality_probe.py --real \\",
+        "+    python -u scripts/dev/async_fast_grass_quality_probe.py --real \\",
+    ]),
+    "scripts/run_async_fast_grass_singularity.sh": (
+        "scripts/launchers/run_async_fast_grass_singularity.sh", [
+        "-#   ASYNC_FG_LAMBDA=0   ASYNC_FG_SUFFIX=lam0   sbatch scripts/run_async_fast_grass_singularity.sh",
+        "-#   ASYNC_FG_LAMBDA=0.5 ASYNC_FG_SUFFIX=lam05  sbatch scripts/run_async_fast_grass_singularity.sh",
+        "+#   ASYNC_FG_LAMBDA=0   ASYNC_FG_SUFFIX=lam0   sbatch scripts/launchers/run_async_fast_grass_singularity.sh",
+        "+#   ASYNC_FG_LAMBDA=0.5 ASYNC_FG_SUFFIX=lam05  sbatch scripts/launchers/run_async_fast_grass_singularity.sh",
         "-            python -u scripts/async_fast_grass_handoff_test.py",
         "-            python -u scripts/async_fast_grass_cache_semantics_test.py",
         "-            python -u scripts/async_fast_grass_persistence_test.py",
@@ -146,18 +144,33 @@ ALLOWED_CHANGED_SH = {
         "+            python -u tests/async_fast_grass_pilot_test.py",
         "+            python -u tests/async_fast_grass_integration_smoke.py",
         "+            python -u tests/fast_grass_test.py",
-    ],
-}
-# Amendment A9. Three developer launchers moved to scripts/dev/. A move is not a
-# blank cheque: each is pinned to the EXACT unified diff between its OLD path at
-# BASE and its NEW path at HEAD, so the only permitted change is the path rewrite.
-# Every line below is path-only. run_fast_grass_timing_singularity.sh also carries
-# its A6 tests/ lines here, since one pin must cover the whole file.
-MOVED_SH = {
+    ]),
+    "scripts/run_bm25_singularity.sh": ("scripts/launchers/run_bm25_singularity.sh", []),   # pure rename
+    "scripts/run_crossbatch_singularity.sh": (
+        "scripts/launchers/run_crossbatch_singularity.sh", [
+        "+EXIT_CODE=$?",
+        "+",
+        "+if [ $EXIT_CODE -eq 0 ]; then",
+        "+    echo \"\u2705 Cross-batch training completed successfully\"",
+        "+else",
+        "+    echo \"\u274c Cross-batch training failed with code $EXIT_CODE\"",
+        "+fi",
+        "+",
+        "+",
+        "+exit $EXIT_CODE",
+    ]),
+    "scripts/run_evaluate_singularity.sh": ("scripts/launchers/run_evaluate_singularity.sh", []),   # pure rename
     "scripts/run_fast_grass_feasibility_singularity.sh": (
         "scripts/dev/run_fast_grass_feasibility_singularity.sh", [
         "-    python -u scripts/fast_grass_feasibility.py \\",
         "+    python -u scripts/dev/fast_grass_feasibility.py \\",
+    ]),
+    "scripts/run_fast_grass_singularity.sh": (
+        "scripts/launchers/run_fast_grass_singularity.sh", [
+        "+# FAST_GRASS_DEBUG=1      # 512-item mixture smoke run",
+        "-        ${FAST_GRASS_NO_EVAL:+--no_eval}",
+        "+        ${FAST_GRASS_NO_EVAL:+--no_eval} \\",
+        "+        ${FAST_GRASS_DEBUG:+--debug}",
     ]),
     "scripts/run_fast_grass_timing_singularity.sh": (
         "scripts/dev/run_fast_grass_timing_singularity.sh", [
@@ -180,13 +193,19 @@ MOVED_SH = {
         "-        python -u scripts/async_fast_grass_quality_probe.py --real \\",
         "+        python -u scripts/dev/async_fast_grass_quality_probe.py --real \\",
     ]),
-    "scripts/run_async_fast_grass_probe_singularity.sh": (
-        "scripts/dev/run_async_fast_grass_probe_singularity.sh", [
-        "-    python -u scripts/async_fast_grass_quality_probe.py --synthetic",
-        "+    python -u scripts/dev/async_fast_grass_quality_probe.py --synthetic",
-        "-    python -u scripts/async_fast_grass_quality_probe.py --real \\",
-        "+    python -u scripts/dev/async_fast_grass_quality_probe.py --real \\",
+    "scripts/run_grass_singularity.sh": (
+        "scripts/launchers/run_grass_singularity.sh", [
+        "+# GRASS_DEBUG=1           # 512-item mixture smoke run",
+        "-        ${GRASS_LAMBDA:+--lambda_val $GRASS_LAMBDA}",
+        "+        ${GRASS_LAMBDA:+--lambda_val $GRASS_LAMBDA} \\",
+        "+        ${GRASS_DEBUG:+--debug}",
     ]),
+    "scripts/run_inbatch_singularity.sh": (
+        "scripts/launchers/run_inbatch_singularity.sh", [
+        "-#SBATCH --time=14:00:00   # TEMP: OOM smoke test \u2014 passes step-1 mem peak then SLURM kills it. RESTORE to 24:00:00 for real run.",
+        "+#SBATCH --time=24:00:00",
+    ]),
+    "scripts/run_refresh_stale_index_singularity.sh": ("scripts/launchers/run_refresh_stale_index_singularity.sh", []),   # pure rename
 }
 ENTRY_POINTS = [
     "scripts/train_inbatch.py",
@@ -409,7 +428,7 @@ AC_TMP=$(mktemp -d)
 trap 'rm -rf "$AC_TMP"' EXIT
 git archive main | tar -x -C "$AC_TMP"
 cd "$AC_TMP"
-ENTRY=scripts/train_inbatch.py; LAUNCHER=scripts/run_inbatch_singularity.sh
+ENTRY=scripts/train_inbatch.py; LAUNCHER=scripts/launchers/run_inbatch_singularity.sh
 test -f "$ENTRY" -a -f "$LAUNCHER"; test "$ENTRY" != "$LAUNCHER"; rg '^[[:space:]]*(python|torchrun)[[:space:]].*scripts/train_inbatch\.py([[:space:]]|$)' "$LAUNCHER"
 CUDA_VISIBLE_DEVICES='' TRANSFORMERS_OFFLINE=1 HF_HUB_OFFLINE=1 python -c 'import importlib.util,sys,traceback; p=sys.argv[1]; spec=importlib.util.spec_from_file_location("acceptance_target",p); m=importlib.util.module_from_spec(spec); sys.path[:0]=["src","scripts","."];
 try: spec.loader.exec_module(m); print("IMPORT_OK",p)
@@ -433,7 +452,7 @@ AC_TMP=$(mktemp -d)
 trap 'rm -rf "$AC_TMP"' EXIT
 git archive main | tar -x -C "$AC_TMP"
 cd "$AC_TMP"
-ENTRY=scripts/train_crossbatch.py; LAUNCHER=scripts/run_crossbatch_singularity.sh
+ENTRY=scripts/train_crossbatch.py; LAUNCHER=scripts/launchers/run_crossbatch_singularity.sh
 test -f "$ENTRY" -a -f "$LAUNCHER"; test "$ENTRY" != "$LAUNCHER"; rg '^[[:space:]]*(python|torchrun)[[:space:]].*scripts/train_crossbatch\.py([[:space:]]|$)' "$LAUNCHER"
 CUDA_VISIBLE_DEVICES='' TRANSFORMERS_OFFLINE=1 HF_HUB_OFFLINE=1 python -c 'import importlib.util,sys,traceback; p=sys.argv[1]; spec=importlib.util.spec_from_file_location("acceptance_target",p); m=importlib.util.module_from_spec(spec); sys.path[:0]=["src","scripts","."];
 try: spec.loader.exec_module(m); print("IMPORT_OK",p)
@@ -457,7 +476,7 @@ AC_TMP=$(mktemp -d)
 trap 'rm -rf "$AC_TMP"' EXIT
 git archive main | tar -x -C "$AC_TMP"
 cd "$AC_TMP"
-ENTRY=scripts/train_ance.py; LAUNCHER=scripts/run_ance_singularity.sh
+ENTRY=scripts/train_ance.py; LAUNCHER=scripts/launchers/run_ance_singularity.sh
 test -f "$ENTRY" -a -f scripts/run_ance_train.py -a -f scripts/run_ance_data_gen.py -a -f "$LAUNCHER"; test "$ENTRY" != "$LAUNCHER"; rg '^[[:space:]]*(python|torchrun)[[:space:]].*scripts/train_ance\.py([[:space:]]|$)' "$LAUNCHER"
 for MODULE in scripts/train_ance.py scripts/run_ance_train.py scripts/run_ance_data_gen.py; do CUDA_VISIBLE_DEVICES='' TRANSFORMERS_OFFLINE=1 HF_HUB_OFFLINE=1 python -c 'import importlib.util,sys,traceback; p=sys.argv[1]; spec=importlib.util.spec_from_file_location("acceptance_target",p); m=importlib.util.module_from_spec(spec); sys.path[:0]=["src","scripts","."];
 try: spec.loader.exec_module(m); print("IMPORT_OK",p)
@@ -481,7 +500,7 @@ AC_TMP=$(mktemp -d)
 trap 'rm -rf "$AC_TMP"' EXIT
 git archive main | tar -x -C "$AC_TMP"
 cd "$AC_TMP"
-ENTRY=scripts/run_grass.py; LAUNCHER=scripts/run_grass_singularity.sh
+ENTRY=scripts/run_grass.py; LAUNCHER=scripts/launchers/run_grass_singularity.sh
 test -f "$ENTRY" -a -f "$LAUNCHER"; test "$ENTRY" != "$LAUNCHER"; rg '^[[:space:]]*(python|torchrun)[[:space:]].*scripts/run_grass\.py([[:space:]]|$)' "$LAUNCHER"
 CUDA_VISIBLE_DEVICES='' TRANSFORMERS_OFFLINE=1 HF_HUB_OFFLINE=1 python -c 'import importlib.util,sys,traceback; p=sys.argv[1]; spec=importlib.util.spec_from_file_location("acceptance_target",p); m=importlib.util.module_from_spec(spec); sys.path[:0]=["src","scripts","."];
 try: spec.loader.exec_module(m); print("IMPORT_OK",p)
@@ -505,7 +524,7 @@ AC_TMP=$(mktemp -d)
 trap 'rm -rf "$AC_TMP"' EXIT
 git archive main | tar -x -C "$AC_TMP"
 cd "$AC_TMP"
-ENTRY=scripts/train_async_fast_grass.py; LAUNCHER=scripts/run_async_fast_grass_singularity.sh
+ENTRY=scripts/train_async_fast_grass.py; LAUNCHER=scripts/launchers/run_async_fast_grass_singularity.sh
 test -f "$ENTRY" -a -f scripts/run_async_fast_grass_miner.py -a -f scripts/run_async_fast_grass_train.py -a -f "$LAUNCHER"; test "$ENTRY" != "$LAUNCHER"; rg '^[[:space:]]*(python|torchrun)[[:space:]].*scripts/train_async_fast_grass\.py([[:space:]]|$)' "$LAUNCHER"
 for MODULE in scripts/train_async_fast_grass.py scripts/run_async_fast_grass_miner.py scripts/run_async_fast_grass_train.py; do CUDA_VISIBLE_DEVICES='' TRANSFORMERS_OFFLINE=1 HF_HUB_OFFLINE=1 python -c 'import importlib.util,sys,traceback; p=sys.argv[1]; spec=importlib.util.spec_from_file_location("acceptance_target",p); m=importlib.util.module_from_spec(spec); sys.path[:0]=["src","scripts","."];
 try: spec.loader.exec_module(m); print("IMPORT_OK",p)
@@ -529,7 +548,7 @@ AC_TMP=$(mktemp -d)
 trap 'rm -rf "$AC_TMP"' EXIT
 git archive main | tar -x -C "$AC_TMP"
 cd "$AC_TMP"
-ENTRY=scripts/run_fast_grass.py; LAUNCHER=scripts/run_fast_grass_singularity.sh
+ENTRY=scripts/run_fast_grass.py; LAUNCHER=scripts/launchers/run_fast_grass_singularity.sh
 test -f "$ENTRY" -a -f "$LAUNCHER"; test "$ENTRY" != "$LAUNCHER"; rg '^[[:space:]]*(python|torchrun)[[:space:]].*scripts/run_fast_grass\.py([[:space:]]|$)' "$LAUNCHER"
 CUDA_VISIBLE_DEVICES='' TRANSFORMERS_OFFLINE=1 HF_HUB_OFFLINE=1 python -c 'import importlib.util,sys,traceback; p=sys.argv[1]; spec=importlib.util.spec_from_file_location("acceptance_target",p); m=importlib.util.module_from_spec(spec); sys.path[:0]=["src","scripts","."];
 try: spec.loader.exec_module(m); print("IMPORT_OK",p)
@@ -562,11 +581,11 @@ AC_TMP=$(mktemp -d)
 trap 'rm -rf "$AC_TMP"' EXIT
 git archive main | tar -x -C "$AC_TMP"
 cd "$AC_TMP"
-test -f scripts/eval_msmarco.py -a -f scripts/run_ance_msmarco_singularity.sh -a -f scripts/eval_msmarco_singularity.sh -a -f scripts/train_ance.py -a -f src/data/preprocessor.py
-test scripts/eval_msmarco.py != scripts/eval_msmarco_singularity.sh
-test scripts/train_ance.py != scripts/run_ance_msmarco_singularity.sh
-rg '^[[:space:]]*(python|torchrun)[[:space:]].*scripts/eval_msmarco\.py([[:space:]]|$)' scripts/eval_msmarco_singularity.sh
-rg '^[[:space:]]*(python|torchrun)[[:space:]].*scripts/train_ance\.py[[:space:]]+--recipe[[:space:]]+ance_msmarco([[:space:]]|$)' scripts/run_ance_msmarco_singularity.sh
+test -f scripts/eval_msmarco.py -a -f scripts/launchers/run_ance_msmarco_singularity.sh -a -f scripts/launchers/eval_msmarco_singularity.sh -a -f scripts/train_ance.py -a -f src/data/preprocessor.py
+test scripts/eval_msmarco.py != scripts/launchers/eval_msmarco_singularity.sh
+test scripts/train_ance.py != scripts/launchers/run_ance_msmarco_singularity.sh
+rg '^[[:space:]]*(python|torchrun)[[:space:]].*scripts/eval_msmarco\.py([[:space:]]|$)' scripts/launchers/eval_msmarco_singularity.sh
+rg '^[[:space:]]*(python|torchrun)[[:space:]].*scripts/train_ance\.py[[:space:]]+--recipe[[:space:]]+ance_msmarco([[:space:]]|$)' scripts/launchers/run_ance_msmarco_singularity.sh
 CUDA_VISIBLE_DEVICES='' TRANSFORMERS_OFFLINE=1 HF_HUB_OFFLINE=1 python -c 'import importlib.util,sys,traceback; p=sys.argv[1]; spec=importlib.util.spec_from_file_location("acceptance_target",p); m=importlib.util.module_from_spec(spec); sys.path[:0]=["src","scripts","."];
 try: spec.loader.exec_module(m); assert callable(getattr(m,"main")); print("IMPORT_OK",p,"main callable")
 except Exception:

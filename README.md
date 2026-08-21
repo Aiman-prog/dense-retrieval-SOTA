@@ -26,34 +26,30 @@ singularity exec --nv \
     /scratch/${USER}/containers/pytorch_2.1.sif \
     python src/data/preprocessor.py
 
-# 4. Submit training jobs
-sbatch scripts/run_inbatch_singularity.sh      # In-batch baseline
-sbatch scripts/run_crossbatch_singularity.sh   # Cross-batch (2048)
-sbatch scripts/run_ance_singularity.sh         # ANCE iterative
+# 4. Submit training jobs (see scripts/README.md for the full ladder)
+sbatch scripts/launchers/run_inbatch_singularity.sh        # In-batch baseline
+sbatch scripts/launchers/run_crossbatch_singularity.sh     # Cross-batch (2048)
+sbatch scripts/launchers/run_ance_singularity.sh           # ANCE iterative
+sbatch scripts/launchers/run_grass_singularity.sh          # naive GRASS
+sbatch scripts/launchers/run_fast_grass_singularity.sh     # sequential Fast-GRASS
+sbatch scripts/launchers/run_async_fast_grass_singularity.sh   # async Fast-GRASS (2 GPUs)
 
-# 5. Evaluate trained models
-sbatch scripts/run_evaluate_singularity.sh
+# 5. Evaluate any trained model — ONE evaluator; EVAL_MODEL_PATH selects the model.
+#    EVAL_MODEL_PATH is REQUIRED; EVAL_DOMAINS defaults to the four pilot domains.
+MODELS=/scratch/$USER/dense-retrieval-SOTA/models
+EVAL_MODEL_PATH=$MODELS/<name> sbatch scripts/launchers/run_evaluate_singularity.sh
+EVAL_MODEL_PATH=$MODELS/<name> EVAL_DOMAINS=all \
+    sbatch scripts/launchers/run_evaluate_singularity.sh          # all twelve
+EVAL_MODEL_PATH=$MODELS/<name> EVAL_DOMAINS=biology,economics \
+    sbatch scripts/launchers/run_evaluate_singularity.sh          # a subset
 
-# 6. Evaluate all checkpoints (0%-100% training progress)
-sbatch scripts/run_eval_checkpoints_singularity.sh
+# To sweep checkpoints, loop the same launcher over them:
+#   for c in $MODELS/<name>/checkpoint-*; do
+#       EVAL_MODEL_PATH=$c sbatch scripts/launchers/run_evaluate_singularity.sh
+#   done
 
-# 7. BM25 baseline — CPU-only, no GPU (see BM25 Setup section below first)
-sbatch scripts/run_bm25_singularity.sh
-
-# 7. Plot Recall@1000 curve (no GPU needed)
-singularity exec \
-    --bind /scratch/${USER}:/scratch/${USER} \
-    /scratch/${USER}/containers/pytorch_2.1.sif \
-    python scripts/plot_recall_curve.py \
-        --results_file /scratch/${USER}/dense-retrieval-SOTA/results/bright_benchmark/inbatch_reasonir_neg/checkpoint_results.json
-
-# Plot all 3 metrics (MRR, NDCG@10, Recall@1000)
-singularity exec \
-    --bind /scratch/${USER}:/scratch/${USER} \
-    /scratch/${USER}/containers/pytorch_2.1.sif \
-    python scripts/plot_recall_curve.py \
-        --results_file /scratch/${USER}/dense-retrieval-SOTA/results/bright_benchmark/inbatch_reasonir_neg/checkpoint_results.json \
-        --metrics recall_1000 ndcg_cut_10 recip_rank
+# 6. BM25 baseline — CPU-only, no GPU (see BM25 Setup section below first)
+sbatch scripts/launchers/run_bm25_singularity.sh
 ```
 
 ## BM25 Setup (Pyserini)
@@ -78,7 +74,7 @@ singularity exec \
     pip install --user --quiet pyserini
 ```
 
-Then submit: `sbatch scripts/run_bm25_singularity.sh`
+Then submit: `sbatch scripts/launchers/run_bm25_singularity.sh`
 
 Results land in `/scratch/${USER}/dense-retrieval-SOTA/results/bright_benchmark/{domain}_results_bm25.json`.
 
