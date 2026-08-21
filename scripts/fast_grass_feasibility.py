@@ -19,8 +19,9 @@ wall-time, and the SPEEDUP RATIO. --synthetic runs ONLY the Fast-GRASS path on C
 (random embeddings) for correctness/throughput sanity and prints NO speedup ratio
 (the baseline needs the full FAISS index + corpus + rerank model).
 
-Replaces the broken donor grass_negcache_feasibility.py (which imported the
-never-committed grass_twoset_feasibility.py); the donor is kept only as reference.
+Supersedes the earlier donor grass_negcache_feasibility.py, which imported the
+never-committed grass_twoset_feasibility.py. That donor was deleted in the Aug 2026
+cleanup; see D2 in CONSOLIDATION_STATUS.md for where its code ended up.
 """
 import argparse
 import sys

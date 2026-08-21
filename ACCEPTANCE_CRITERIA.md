@@ -47,6 +47,11 @@ The import harnesses set `CUDA_VISIBLE_DEVICES` empty and force Transformers/Hug
 > allowlisted *removal*, so the row gained `ALLOWED_REMOVED_SH` alongside `ALLOWED_NEW_SH`;
 > the set is exact, so deleting any other launcher still fails. Context: **D2** in
 > `CONSOLIDATION_STATUS.md`.
+>
+> **A8 (post-consolidation)** — `scripts/run_negcache_feasibility_singularity.sh` was deleted
+> alongside its only target, `scripts/grass_negcache_feasibility.py` (901 lines), which
+> `scripts/fast_grass_feasibility.py` had already superseded and which no code imported.
+> `ALLOWED_REMOVED_SH` gains one entry; the set stays exact.
 
 **Runnable after step:** 6
 
@@ -73,8 +78,12 @@ ALLOWED_NEW_SH = {
 # never committed, so this script could not run from a clone of `main` at any point in
 # its history. Deleting it removes a dead file, not a capability. Recorded as D2 in
 # CONSOLIDATION_STATUS.md, which also preserves where the module actually lives.
+# Amendment A8. The negcache feasibility probe was superseded by
+# scripts/fast_grass_feasibility.py, which says so in its own docstring; the donor
+# was imported by no code, gated by no test, and reachable only from this launcher.
 ALLOWED_REMOVED_SH = {
     "scripts/run_twoset_feasibility_singularity.sh",
+    "scripts/run_negcache_feasibility_singularity.sh",
 }
 # Amendments A4 + A5. Pre-existing launchers were edited AFTER consolidation, each
 # with explicit authorisation. Allowing them is not a loophole: every permitted

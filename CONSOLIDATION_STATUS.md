@@ -700,15 +700,23 @@ cleanup pass removed `__pycache__`.
 
 Its four functions (`load_train_queries`, `encode_queries`, `build_candidate_matrix`,
 `cached_grass_sampler`) plus a `_topk_neighbors` helper were recovered by disassembling that
-`.pyc` and **inlined into `scripts/grass_negcache_feasibility.py`**, which is committed and
-self-contained. The reconstruction passed synthetic checks and a real 7/7 cluster run.
+`.pyc` and inlined into `scripts/grass_negcache_feasibility.py`. The reconstruction passed
+synthetic checks and a real 7/7 cluster run.
 
-Its launcher, `scripts/run_twoset_feasibility_singularity.sh`, was deleted in the cleanup pass
-(amendment **A7**) because its target does not exist on `main` and the launcher could never run.
+**That host file was itself deleted later in the same cleanup pass** (amendment **A8**), because
+`scripts/fast_grass_feasibility.py` supersedes it and says so in its own docstring. The
+recovered functions therefore no longer exist in the working tree. To read them again:
 
-**Open, low priority:** if byte-faithfulness of the inlined functions ever matters, diff them
-against the cluster original. The recovery already passes synthetic and real runs, so this is
-belt-and-braces only.
+```bash
+git show 75226fb^:scripts/grass_negcache_feasibility.py   # or any commit before the deletion
+```
+
+Two launchers went with these files: `run_twoset_feasibility_singularity.sh` (**A7**, target
+never existed) and `run_negcache_feasibility_singularity.sh` (**A8**).
+
+**Open, low priority:** if the recovered functions are ever needed again, restore them from
+history rather than re-disassembling; and if byte-faithfulness matters, diff against the
+cluster original. The recovery already passed synthetic and real runs.
 
 ---
 
