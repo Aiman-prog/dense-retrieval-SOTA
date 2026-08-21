@@ -102,8 +102,13 @@ dense-retrieval-SOTA/
 │   ├── run_*_singularity.sh     # SLURM job scripts
 │   ├── prepare_models.py        # Download models for offline mode
 │   └── preprocessor.py          # Preprocess BRIGHT data
+├── docs/                        # All topic documentation
+│   ├── DELFTBLUE_SETUP.md       # Detailed HPC setup guide
+│   ├── GPU_CHECKLIST.md         # Per-experiment submit + success signals
+│   ├── lambda_pilot*.md         # Stage 7 pilot and its verdict
+│   ├── *fast_grass*.md          # Architecture and implementation details
+│   └── assets/                  # Figures and reference PDFs
 ├── setup.sh                     # One-command setup for DelftBlue
-├── DELFTBLUE_SETUP.md          # Detailed HPC setup guide
 └── requirements.txt             # Local development (use setup.sh for HPC)
 ```
 
@@ -119,7 +124,8 @@ Edit `config/config.yaml` to adjust:
 
 - **[setup.sh](setup.sh)**: Automated setup (container + Tevatron patches)
 - **[config/config.yaml](config/config.yaml)**: All hyperparameters and paths
-- **[DELFTBLUE_SETUP.md](DELFTBLUE_SETUP.md)**: Troubleshooting and detailed setup
+- **[docs/DELFTBLUE_SETUP.md](docs/DELFTBLUE_SETUP.md)**: Troubleshooting and detailed setup
+- **[docs/GPU_CHECKLIST.md](docs/GPU_CHECKLIST.md)**: What to submit, and how to tell it worked
 - **[src/utils/helpers.py](src/utils/helpers.py)**: Centralized path management
 
 ## Environment
@@ -162,5 +168,5 @@ rm -rf ~/.local/lib/python3.10/site-packages/*
 ## Notes
 
 - All scratch paths resolve via `DATA_BASE_DIR` environment variable
-- Tevatron patches remove Qwen multimodal dependencies (see DELFTBLUE_SETUP.md)
+- Tevatron patches remove Qwen multimodal dependencies (see docs/DELFTBLUE_SETUP.md)
 - Cross-batch training achieves 2048 virtual batch: 64/device × 2 GPUs × 16 accumulation steps
