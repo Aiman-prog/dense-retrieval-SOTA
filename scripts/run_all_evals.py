@@ -35,6 +35,7 @@ def domain_files(domain):
         processed_dir / f"{domain}_corpus.jsonl",
         processed_dir / f"{domain}_queries.jsonl",
         processed_dir / f"{domain}_qrels.txt",
+        processed_dir / f"{domain}_excluded.json",
     ]
 
 
@@ -69,6 +70,8 @@ def check_and_prepare_data(domains, config, require_existing=False):
             preprocessor.prepare_tevatron_corpus(domain_data['corpus'], f"{domain}_corpus.jsonl")
             preprocessor.prepare_tevatron_queries(domain_data['queries'], f"{domain}_queries.jsonl")
             preprocessor.prepare_trec_qrels(domain_data['qrels'], f"{domain}_qrels.txt")
+            preprocessor.prepare_bright_excluded(domain_data['excluded'],
+                                                 f"{domain}_excluded.json")
         else:
             print(f"✅ Data for '{domain}' verified.")
     return missing_domains

@@ -58,7 +58,7 @@ from async_fast_grass_handoff import (  # noqa: E402
 )
 from async_fast_grass_pilot import (  # noqa: E402
     maybe_apply_manifest, manifest_source_counts, load_manifest, ManifestError,
-    evaluate_pilot_gate, format_gate_report,
+    evaluate_pilot_gate, format_gate_report, SOURCE_FILES,
 )
 
 
@@ -93,10 +93,9 @@ def check_manifest_required(ctx, manifest, recipe):
 def _preflight_paths():
     """Resolve the processed inputs WITHOUT running ``run_setup``.
 
-    ``run_setup`` regenerates missing derived files. Preflight must be a pure
-    inspection: it runs before a long job to confirm what is already on disk, and a
-    validator that silently builds its own input validates nothing. Missing files are
-    reported, not created.
+    Preflight must be a pure inspection: it runs before a long job to confirm what is
+    already on disk. Missing files are reported, never created -- building the derived
+    set is `python src/data/preprocessor.py`, not a side effect of training.
 
     Returns ``(corpus_file, qrels_file, missing)``.
     """
@@ -104,7 +103,9 @@ def _preflight_paths():
     corpus_file = processed / "reasonir_corpus.jsonl"
     qrels_file = processed / "train_qrels.txt"
     mixture_dir = processed / "training_mixture"
-    missing = [str(p) for p in (corpus_file, qrels_file, mixture_dir)
+    required = (corpus_file, qrels_file, mixture_dir,
+                *(mixture_dir / name for name in SOURCE_FILES.values()))
+    missing = [str(p) for p in required
                if not p.exists()]
     return corpus_file, qrels_file, missing
 
@@ -484,8 +485,8 @@ def main():
     # the preflight branch so both the validator and the training path print it
     log_startup_config(args.recipe, ctx)
 
-    # PREFLIGHT FIRST, deliberately ahead of run_setup(): run_setup regenerates missing
-    # derived files, and a validator that builds its own input validates nothing.
+    # PREFLIGHT FIRST: it must report what is on disk, not resolve paths through the
+    # preprocessor -- a validator that leans on the resolver validates nothing.
     manifest_error = check_manifest_required(ctx, args.manifest, args.recipe)
 
     if args.preflight:
@@ -505,8 +506,10 @@ def main():
     if manifest_error:
         raise RuntimeError(manifest_error)
 
-    from data.preprocessor import run_setup
-    corpus_file, _query_file, qrels_file = run_setup()
+    from data.preprocessor import require_derived_artifacts
+    from data.preprocessor import MIXTURE_FILES, require_mixture_files
+    corpus_file, _query_file, qrels_file = require_derived_artifacts()
+    require_mixture_files(get_path("processed") / "training_mixture", MIXTURE_FILES)
 
     # Detect GPUs BEFORE restricting visibility; subprocesses get their own pin.
     n_gpus = torch.cuda.device_count()

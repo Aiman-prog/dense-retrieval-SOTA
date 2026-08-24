@@ -7,16 +7,16 @@ drop_duplicates, insertion order, no timestamps, no RNG), so byte-identical
 output is a fair before/after criterion for it. This script pins that:
 
   1. rebuild a fixed 600-record fixture mixture (deterministic, no network),
-  2. WIPE run_setup()'s three outputs -- it short-circuits when they already
-     exist, which would make the diff vacuously clean,
-  3. run run_setup() against the fixture,
+  2. WIPE run_setup()'s three outputs,
+  3. run run_setup() against the fixture -- it refuses to overwrite, so the wipe
+     above is what makes the rebuild possible,
   4. print the sha256 of each output.
 
 Run it before consolidation to record the baseline, then after every step.
 Any hash difference means the step changed preprocessor behaviour.
 
-Scope: run_setup() only. prepare_msmarco_train_data() calls random.shuffle()
-unseeded and is deliberately NOT covered.
+Scope: run_setup() only. The generators that build training_mixture/ are covered
+by tests/preprocessor_test.py instead, which drives them from injected records.
 
 Environment overrides:
   PREPROC_FIXTURE_ROOT    fixture DATA_BASE_DIR   (default: $TMPDIR/dense_retrieval_preproc_fixture)
@@ -42,11 +42,12 @@ FIXTURE_SPLITS = [("train_msmarco.jsonl", 0, 200),
 
 # Real records alone do not exercise run_setup()'s duplicate-text branch: in the
 # first 600 there is no text that appears under two different docids (the first
-# is at record ~14474, far outside any workable fixture). This fourth file
-# re-emits texts already present in the window under fresh docids, so both
+# is at record ~14474, far outside any workable fixture). These extra records
+# re-emit texts already present in the window under fresh docids, so both
 # `docid_remap` and the qrels canonicalization that consumes it actually run.
-# Derived from the same 600 records -- no extra source data, no RNG.
-DUPE_FILE = "train_zz_dupes.jsonl"
+# Appended to the LAST component file so they are read last, exactly as the old
+# separate train_zz_dupes.jsonl was under the previous sorted glob.
+DUPE_TARGET = "train_vl.jsonl"   # read last, as train_zz_dupes.jsonl used to be
 DUPE_COUNT = 5
 
 OUTPUTS = ["reasonir_corpus.jsonl", "train_queries.jsonl", "train_qrels.txt"]
@@ -78,7 +79,7 @@ def build_fixture(source: Path, mixture_dir: Path) -> None:
             handle.writelines(records[start:end])
 
     parsed = [json.loads(line) for line in records[:DUPE_COUNT + 1]]
-    with open(mixture_dir / DUPE_FILE, "w", encoding="utf-8") as handle:
+    with open(mixture_dir / DUPE_TARGET, "a", encoding="utf-8") as handle:
         for i in range(DUPE_COUNT):
             handle.write(json.dumps({
                 "query_id": f"fixture_dupe_{i}",
@@ -106,7 +107,7 @@ def main() -> int:
     processed = root / "data" / "processed"
     build_fixture(source, processed / "training_mixture")
 
-    # run_setup() returns early if all three outputs exist and are non-empty.
+    # run_setup() reuses existing outputs; wipe them so the rebuild really runs.
     for name in OUTPUTS:
         (processed / name).unlink(missing_ok=True)
 

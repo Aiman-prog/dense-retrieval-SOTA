@@ -8,6 +8,7 @@ import math
 import yaml
 import os
 import contextlib
+import tempfile
 import numpy as np
 import faiss
 import torch
@@ -348,6 +349,69 @@ def count_jsonl_examples(pattern: str) -> int:
     return total
 
 
+@contextlib.contextmanager
+def atomic_write(path):
+    """Write to a unique temp file beside the destination, then `os.replace`.
+
+    Unique per invocation: a shared `<name>.tmp` meant two writers to the same
+    destination shared one scratch file and truncated each other mid-write.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            yield handle
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+
+
+# ── BRIGHT excluded_ids: one filter shared by every evaluation path ──────────
+
+def load_excluded_ids(domain: str, processed_dir=None) -> Dict[str, frozenset]:
+    """Per-query excluded doc ids, as written next to the other eval files.
+
+    A missing file raises: treating it as "no exclusions" would silently reproduce
+    the pre-filter numbers.
+    """
+    path = Path(processed_dir or get_path("processed")) / f"{domain}_excluded.json"
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"{path} is missing. Regenerate the BRIGHT evaluation files with "
+            f"`python src/data/preprocessor.py`.")
+    with open(path) as f:
+        return {str(q): frozenset(map(str, ids)) for q, ids in json.load(f).items()}
+
+
+def search_depth(base_k: int, excluded: Dict[str, frozenset], qid=None) -> int:
+    """Retrieve this deep so `base_k` results survive filtering.
+
+    BRIGHT excludes up to 11,224 documents for a single aops query, so retrieving
+    exactly base_k and then filtering would return a short list.
+    """
+    if qid is not None:
+        return base_k + len(excluded.get(str(qid), ()))
+    return base_k + max((len(v) for v in excluded.values()), default=0)
+
+
+def apply_exclusions(run_results: dict, excluded: Dict[str, frozenset],
+                     top_k: int) -> dict:
+    """Drop each query's excluded documents, then keep its top_k by score.
+
+    Filtering precedes truncation, so eligible lower-ranked documents refill the
+    slots the exclusions freed.
+    """
+    out = {}
+    for qid, hits in run_results.items():
+        drop = excluded.get(str(qid), ())
+        kept = sorted(((d, s) for d, s in hits.items() if d not in drop),
+                      key=lambda ds: -ds[1])
+        out[str(qid)] = dict(kept[:top_k])
+    return out
+
+
 # ── Shared IPC / IO utilities (used by ANCE) ────────────────────────────────
 
 def is_valid_checkpoint(ckpt_path: str) -> bool:
@@ -531,12 +595,16 @@ def evaluate_bright(ctx, config, model_path, temp_workdir_key=None):
             idx_e = faiss.IndexFlatIP(dc[0].shape[1])
             idx_e.add(dc[0].astype(np.float32))
             eval_top_k = args.get('eval_top_k', 10)
-            s_e, i_e = idx_e.search(dq[0].astype(np.float32), eval_top_k)
+            # Filter BRIGHT exclusions before the top-k cut, as evaluate.py does.
+            excluded = load_excluded_ids(domain)
+            depth = min(search_depth(eval_top_k, excluded), len(dc[1]))
+            s_e, i_e = idx_e.search(dq[0].astype(np.float32), depth)
             results = {
                 str(dq[1][j]): {str(dc[1][i_e[j][k]]): float(s_e[j][k])
                                  for k in range(len(i_e[j])) if i_e[j][k] >= 0}
                 for j in range(len(dq[1]))
             }
+            results = apply_exclusions(results, excluded, eval_top_k)
             eval_qrels_data = []
             with open(d_qrels) as f:
                 for line in f:

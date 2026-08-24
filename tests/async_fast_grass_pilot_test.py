@@ -181,16 +181,13 @@ def test_source_files_match_what_preprocessor_writes():
     Pins ``SOURCE_FILES`` to ``src/data/preprocessor.py`` rather than to a guess: if
     the writer's filenames ever change, this fails here instead of on the cluster.
 
-    The mixture is written by the module's ``__main__`` block (``run_setup`` only
-    builds the derived corpus/queries/qrels from an already-present mixture), so this
-    checks the module source and the ``prepare_*_train_data`` defaults.
+    The preprocessor now declares them as ``MIXTURE_FILES`` -- the same list it reads
+    back in ``run_setup`` -- so pin against that constant rather than grepping source.
     """
     import inspect
     from data import preprocessor
-    src = Path(inspect.getfile(preprocessor)).read_text()
-    for name in SOURCE_FILES_EXPECTED:
-        assert f'"training_mixture/{name}"' in src, \
-            f"preprocessor no longer writes {name}; update pilot.SOURCE_FILES"
+    assert set(preprocessor.MIXTURE_FILES) == set(SOURCE_FILES_EXPECTED), \
+        f"preprocessor writes {preprocessor.MIXTURE_FILES}; update pilot.SOURCE_FILES"
     for fn in (preprocessor.BRIGHTPreprocessor.prepare_msmarco_train_data,
                preprocessor.BRIGHTPreprocessor.prepare_vl_train_data,
                preprocessor.BRIGHTPreprocessor.prepare_hq_train_data):
@@ -818,12 +815,12 @@ def test_preflight_does_not_regenerate_data():
     import train_async_fast_grass as orch
     src = inspect.getsource(orch.main)
     pre = src.index("if args.preflight:")
-    setup = src.index("from data.preprocessor import run_setup")
+    setup = src.index("from data.preprocessor import require_derived_artifacts")
     assert pre < setup, \
-        "the preflight branch must return BEFORE run_setup is even imported"
+        "the preflight branch must return BEFORE the artifact resolver is imported"
     paths_src = inspect.getsource(orch._preflight_paths)
-    # the docstring names run_setup; what matters is that it never CALLS it
-    assert 'run_setup(' not in paths_src, "_preflight_paths must not invoke run_setup"
+    assert 'require_derived_artifacts(' not in paths_src and 'run_setup(' not in paths_src, \
+        "_preflight_paths must inspect the filesystem itself, not resolve via preprocessor"
     for name in ('reasonir_corpus.jsonl', 'train_qrels.txt', 'training_mixture'):
         assert name in paths_src, name
     # and it reports missing inputs rather than creating them
@@ -836,6 +833,9 @@ def test_preflight_reports_missing_inputs():
     # no processed data in the test environment -> everything is reported missing
     assert isinstance(missing, list)
     assert corpus.name == 'reasonir_corpus.jsonl' and qrels.name == 'train_qrels.txt'
+    for name in SOURCE_FILES_EXPECTED:
+        assert any(name in item for item in missing), \
+            f"preflight did not report missing mixture component {name}"
 
 
 # ---- eval routing + decision ------------------------------------------------
@@ -997,8 +997,8 @@ def test_debug_mode_unchanged():
     assert 'train_items[:512]' in src
     import run_fast_grass
     loader = inspect.getsource(run_fast_grass._load_train_items)
-    assert 'sorted(mix_dir.glob' in loader, \
-        "the alphabetical glob is what makes --debug HQ-only; it stays as-is"
+    assert 'sorted(require_mixture_files' in loader, \
+        "the validated mixture must remain alphabetically HQ-first in debug mode"
 
 
 def test_base_recipe_only_differs_by_max_age_steps():

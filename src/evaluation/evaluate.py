@@ -23,7 +23,8 @@ os.environ["TRANSFORMERS_ATTENTION_IMPLEMENTATION"] = "eager"
 project_root = Path(__file__).resolve().parent.parent.parent
 sys.path.append(str(project_root / 'src'))
 
-from utils.helpers import load_config, get_data_base_dir
+from utils.helpers import (load_config, get_data_base_dir, load_excluded_ids,
+                           search_depth, apply_exclusions)
 from evaluation.trec_eval_wrapper import TrecEvalWrapper
 
 def main():
@@ -132,10 +133,18 @@ def main():
 
     # --- STEP 3: FAISS SEARCH (Standard CPU) ---
     
-    print(f"🔍 Step 3: Running FAISS IndexFlatIP (CPU)...", flush=True)
+    # TODO(evaluation review): verify this exclusion path against the official
+    # BRIGHT protocol before approving or reporting evaluation results.
+    # BRIGHT removes each query's excluded documents before scoring, so retrieve
+    # deeper than k and filter afterwards -- otherwise excluded hits consume result
+    # slots and nothing refills them (aops excludes up to 11,224 docs for one query).
+    excluded = load_excluded_ids(args.domain, processed_dir)
+    depth = min(search_depth(args.k, excluded), len(corpus_ids))
+    print(f"🔍 Step 3: Running FAISS IndexFlatIP (CPU), depth={depth} for top-{args.k}...",
+          flush=True)
     index = faiss.IndexFlatIP(corpus_embs.shape[1])
     index.add(corpus_embs)
-    scores_mat, indices_mat = index.search(query_embs, args.k)
+    scores_mat, indices_mat = index.search(query_embs, depth)
 
     # --- STEP 4: VIGILANTE CHECK ---
     qrels_df = pd.read_csv(qrels_file, sep=' ', names=['qid', 'ignore', 'docid', 'rel'], dtype=str)
@@ -151,8 +160,9 @@ def main():
     run_results = {}
     for i in range(len(query_ids)):
         qid_str = str(query_ids[i])
-        run_results[qid_str] = {str(corpus_ids[indices_mat[i][j]]): float(scores_mat[i][j]) 
-                               for j in range(args.k) if indices_mat[i][j] >= 0}
+        run_results[qid_str] = {str(corpus_ids[indices_mat[i][j]]): float(scores_mat[i][j])
+                               for j in range(depth) if indices_mat[i][j] >= 0}
+    run_results = apply_exclusions(run_results, excluded, args.k)
 
     eval_qrels = pd.read_csv(qrels_file, sep=' ', names=['query_id', 'ignore', 'doc_id', 'relevance'], dtype=str)
     evaluator = TrecEvalWrapper(eval_qrels)

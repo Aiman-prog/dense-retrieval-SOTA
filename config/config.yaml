@@ -22,17 +22,17 @@ paths:
 data:
   bright:
     name: "xlangai/BRIGHT"
-    examples_config: "Gemini-1.0_reason"
+    examples_config: "examples"
     cache_dir: "data/bright"
   reasonir:
     name: "reasonir/reasonir-data"
-    subset: "hq"
-    train_file: "train_reasonir.jsonl"
   mixed_training:
-    msmarco_samples: 83030   # 23.7% - Public data bridge + calibration (prevent forgetting)
-    vl_samples: 149970       # 42.8% - ALL available clean VL (length generalization)
-    hq_samples: 97000        # 27.7% - Nearly all HQ (reasoning-intensive queries)
-    # Total: ~350k samples | Note: VL corrupted before index 95k, only 150k clean samples available
+    msmarco_samples: 83030   # 25.2% - Public data bridge + calibration (prevent forgetting)
+    vl_samples: 149970       # 45.4% - ALL available clean VL (length generalization)
+    hq_samples: 97000        # 29.4% - Nearly all HQ (reasoning-intensive queries)
+    vl_skip_first_n: 95000   # VL rows before this index are corrupted; skipped at generation
+    # Requested total: 330,000. VL writes 149,964 (6 rows past the cutoff have a blank
+    # passage), so the actual total is 329,994 -- the generators print requested vs written.
   msmarco:
     name: "sentence-transformers/msmarco-distilbert-margin-mse-mean-dot-v1"
     subset: "triplet"

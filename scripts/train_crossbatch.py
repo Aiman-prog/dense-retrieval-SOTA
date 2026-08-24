@@ -8,6 +8,7 @@ project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root / 'src'))
 from utils.helpers import get_training_context, patch_tevatron_loss, load_config, set_seed, \
                           log_startup_config
+from data.preprocessor import MIXTURE_FILES, require_mixture_files
 
 def main():
     # 1. Configuration & Paths via Centralized Context
@@ -22,9 +23,7 @@ def main():
     mixture_dir = processed_dir / "training_mixture"
     training_data_path = str(mixture_dir / "*.jsonl")
 
-    if not mixture_dir.exists():
-        print(f"❌ ERROR: Training mixture directory not found: {mixture_dir}")
-        sys.exit(1)
+    require_mixture_files(mixture_dir, MIXTURE_FILES)
 
     # 2. Argument Construction
     # RocketQA uses massive batch sizes (up to 4096).

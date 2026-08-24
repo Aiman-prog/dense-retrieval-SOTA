@@ -469,7 +469,7 @@ def run_real(args):
     from transformers import AutoTokenizer, AutoModel
     from utils.helpers import (get_training_context, load_config, get_path,
                                _load_corpus_lookup, _load_qrels, set_seed)
-    from data.preprocessor import run_setup
+    from data.preprocessor import require_derived_artifacts
     import run_fast_grass
     from async_fast_grass_cached_mcdp import canonicalize_positives
     from async_fast_grass_pilot import maybe_apply_manifest
@@ -486,7 +486,7 @@ def run_real(args):
         print("[dosage-probe] WARNING: no CUDA — use --synthetic for the CPU smoke.",
               flush=True)
 
-    corpus_file, _q, qrels_file = run_setup()
+    corpus_file, _q, qrels_file = require_derived_artifacts()
     stale_pkl = get_path("temp_grass") / "stale_index" / "corpus.pkl"
     if not stale_pkl.exists():
         print(f"[dosage-probe] ERROR: stale index not found at {stale_pkl}. Build it "

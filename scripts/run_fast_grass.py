@@ -605,11 +605,10 @@ def run_fast_grass_pipeline(cache, c_ids, corpus_lookup, qrels_dict, qid_to_text
 
 def _load_train_items(debug=False):
     """Load the GRASS training mixture (positive_passages schema)."""
+    from data.preprocessor import MIXTURE_FILES, require_mixture_files
     mix_dir = get_path("processed") / "training_mixture"
     train_items = []
-    for f_path in sorted(mix_dir.glob("*.jsonl")):
-        if f_path.name.startswith('.'):
-            continue
+    for f_path in sorted(require_mixture_files(mix_dir, MIXTURE_FILES)):
         with open(f_path) as f:
             for line in f:
                 d = json.loads(line)
@@ -668,8 +667,8 @@ def main():
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    from data.preprocessor import run_setup
-    corpus_file, _query_file, qrels_file = run_setup()
+    from data.preprocessor import require_derived_artifacts
+    corpus_file, _query_file, qrels_file = require_derived_artifacts()
 
     # stale index: reuse if present; build ONCE if missing; never rebuild here.
     workdir   = get_path("temp_grass")

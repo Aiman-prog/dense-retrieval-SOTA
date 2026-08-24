@@ -8,7 +8,6 @@ import sys
 import os
 import logging
 import math
-import glob as glob_module
 from pathlib import Path
 
 # Add src to path so we can import project utils
@@ -17,6 +16,7 @@ sys.path.append(str(project_root / 'src'))
 
 from utils.helpers import get_training_context, patch_tevatron_loss, load_config, set_seed, \
                           log_startup_config
+from data.preprocessor import MIXTURE_FILES, require_mixture_files
 from tevatron.retriever.modeling import DenseModel
 from tevatron.retriever.driver.train import main as tevatron_train_main
 
@@ -47,17 +47,15 @@ def main():
     processed_dir = Path(ctx['processed_dir'])
     mixture_dir = processed_dir / "training_mixture"
     
-    # Glob pattern to load all HQ and VL files
+    # Tevatron accepts one glob; strict validation below guarantees it contains only
+    # the three declared mixed-training components.
     training_data_path = str(mixture_dir / "*.jsonl")
 
-    if not mixture_dir.exists():
-        print(f"❌ ERROR: Training mixture directory not found: {mixture_dir}")
-        sys.exit(1)
+    mixture_files = require_mixture_files(mixture_dir, MIXTURE_FILES)
 
     # --- Count training examples and calculate checkpoint intervals ---
-    jsonl_files = glob_module.glob(training_data_path)
     num_examples = 0
-    for f in jsonl_files:
+    for f in mixture_files:
         with open(f) as fh:
             num_examples += sum(1 for _ in fh)
 

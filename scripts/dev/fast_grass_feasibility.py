@@ -163,8 +163,8 @@ def run_real(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # --- shared setup (mirror run_grass.main) ---
-    from data.preprocessor import run_setup
-    corpus_file, _query_file, qrels_file = run_setup()
+    from data.preprocessor import require_derived_artifacts
+    corpus_file, _query_file, qrels_file = require_derived_artifacts()
     workdir = get_path("temp_grass")
     stale_pkl = workdir / "stale_index" / "corpus.pkl"
     if not stale_pkl.exists():

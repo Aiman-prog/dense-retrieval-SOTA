@@ -229,9 +229,9 @@ def run_real(args):
               "representative. Use --synthetic for a CPU correctness smoke.",
               flush=True)
 
-    from data.preprocessor import run_setup
+    from data.preprocessor import require_derived_artifacts
     from models.temperature_scaled_loss import TemperatureScaledContrastiveLoss
-    corpus_file, _query_file, _qrels_file = run_setup()
+    corpus_file, _query_file, _qrels_file = require_derived_artifacts()
     corpus_lookup = _load_corpus_lookup(corpus_file)
     c_ids = list(corpus_lookup.keys())
 

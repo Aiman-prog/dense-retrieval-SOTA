@@ -8,7 +8,6 @@ import subprocess
 import pickle
 import shutil
 import numpy as np
-import pandas as pd
 import faiss
 from pathlib import Path
 from tevatron.retriever.modeling import DenseModel
@@ -21,7 +20,9 @@ sys.path.append(str(project_root / 'src'))
 from utils.helpers import get_path, get_training_context, load_config, \
                           encode_to_pickle, build_faiss_index, count_jsonl_examples, \
                           _load_qrels, evaluate_bright, log_startup_config
-from data.preprocessor import BRIGHTPreprocessor
+from data.preprocessor import (BRIGHTPreprocessor, MIXTURE_FILES,
+                               MSMARCO_ONLY_FILES, require_derived_artifacts,
+                               require_mixture_files)
 
 # 🩹 Tevatron Bug Patch
 if not hasattr(DenseModel, "_keys_to_ignore_on_save"):
@@ -29,66 +30,52 @@ if not hasattr(DenseModel, "_keys_to_ignore_on_save"):
 
 
 def run_setup(recipe_args):
-    """Build corpus/queries/qrels. Skips if the 3 core files already exist."""
-    p            = get_path("processed")
-    corpus_path  = p / recipe_args['corpus_file']
-    queries_path = p / recipe_args['train_queries_file']
-    qrels_path   = p / recipe_args['train_qrels_file']
+    """Resolve corpus/queries/qrels for the recipe.
 
-    if all(x.exists() and x.stat().st_size > 0 for x in [corpus_path, queries_path, qrels_path]):
-        print("⏩ Skipping setup: files already exist.", flush=True)
-        return corpus_path, queries_path, qrels_path
-
-    preprocessor = BRIGHTPreprocessor()
+    The reasonir_mixture path only *verifies* -- those files are built by
+    `python src/data/preprocessor.py`, so training never regenerates its own inputs.
+    """
+    p = get_path("processed")
 
     if recipe_args['setup_mode'] == 'tevatron_msmarco':
+        corpus_path  = p / recipe_args['corpus_file']
+        queries_path = p / recipe_args['train_queries_file']
+        qrels_path   = p / recipe_args['train_qrels_file']
+        mixture_path = p / recipe_args['mixture_dir'] / MSMARCO_ONLY_FILES[0]
+        train_set = (mixture_path, queries_path, qrels_path)
+        if all(x.exists() and x.stat().st_size > 0 for x in train_set) and \
+                corpus_path.exists() and corpus_path.stat().st_size > 0:
+            print("⏩ Skipping setup: files already exist.", flush=True)
+            require_mixture_files(mixture_path.parent, MSMARCO_ONLY_FILES)
+            return corpus_path, queries_path, qrels_path
+
+        preprocessor = BRIGHTPreprocessor(output_dir=p)
         cache = str(get_path("bright"))
         if not corpus_path.exists() or corpus_path.stat().st_size == 0:
             preprocessor.prepare_msmarco_full_corpus(cache_dir=cache)
-        mixture_path = p / recipe_args['mixture_dir'] / 'train_msmarco.jsonl'
-        if not mixture_path.exists() or mixture_path.stat().st_size == 0:
-            preprocessor.prepare_msmarco_tevatron_train(cache_dir=cache)
+        if not all(x.exists() and x.stat().st_size > 0 for x in train_set):
+            preprocessor.prepare_msmarco_tevatron_train(
+                cache_dir=cache,
+                mixture_filename=f"{recipe_args['mixture_dir']}/{MSMARCO_ONLY_FILES[0]}",
+                queries_filename=recipe_args['train_queries_file'],
+                qrels_filename=recipe_args['train_qrels_file'])
         if recipe_args.get('eval_queries_file'):
             eval_q = p / recipe_args['eval_queries_file']
             if not eval_q.exists() or eval_q.stat().st_size == 0:
                 preprocessor.prepare_msmarco_dev(cache_dir=cache)
+        require_mixture_files(mixture_path.parent, MSMARCO_ONLY_FILES)
+        return require_derived_artifacts(
+            output_dir=p, corpus_file=recipe_args['corpus_file'],
+            queries_file=recipe_args['train_queries_file'],
+            qrels_file=recipe_args['train_qrels_file'])
 
-    else:  # reasonir_mixture: build from local training_mixture/ JSONL files
-        mixture_dir = p / recipe_args['mixture_dir']
-        mix_files = [f for f in mixture_dir.glob("*.jsonl") if not f.name.startswith('.')]
-
-        mix_dfs = []
-        for f in mix_files:
-            df = pd.read_json(f, lines=True)
-            if 'query_text' in df.columns:
-                df = df.rename(columns={'query_text': 'query'})
-            mix_dfs.append(df)
-        mix_df = pd.concat(mix_dfs, ignore_index=True)
-
-        # Corpus
-        all_passages = []
-        for col in ['positive_passages', 'negative_passages']:
-            for record_list in mix_df[col]:
-                all_passages.extend(record_list)
-        corpus_df = (pd.DataFrame(all_passages)
-                       .rename(columns={'docid': 'doc_id'})[['doc_id', 'text']]
-                       .drop_duplicates(subset=['doc_id']))
-        preprocessor.prepare_tevatron_corpus(corpus_df, filename=recipe_args['corpus_file'])
-        print(f"Corpus: {len(corpus_df)} passages", flush=True)
-
-        # Queries
-        queries_df = mix_df[['query_id', 'query']].drop_duplicates(subset=['query_id'])
-        preprocessor.prepare_tevatron_queries(queries_df, filename=recipe_args['train_queries_file'])
-
-        # Qrels
-        pos_pairs = []
-        for _, row in mix_df.iterrows():
-            for pos in row['positive_passages']:
-                pos_pairs.append({'query_id': str(row['query_id']), 'doc_id': str(pos['docid']), 'relevance': 1})
-        preprocessor.prepare_trec_qrels(pd.DataFrame(pos_pairs).drop_duplicates(),
-                                        filename=recipe_args['train_qrels_file'])
-
-    return corpus_path, queries_path, qrels_path
+    require_mixture_files(p / recipe_args['mixture_dir'], MIXTURE_FILES)
+    return require_derived_artifacts(
+        output_dir=p,
+        corpus_file=recipe_args['corpus_file'],
+        queries_file=recipe_args['train_queries_file'],
+        qrels_file=recipe_args['train_qrels_file'],
+    )
 
 
 def _encode_and_mine_initial(ctx, config, corpus_file, query_file, corpus_lookup,

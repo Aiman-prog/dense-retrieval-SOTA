@@ -157,8 +157,8 @@ def run_real(args):
               "representative. Use --synthetic for a CPU correctness smoke.",
               flush=True)
 
-    from data.preprocessor import run_setup
-    corpus_file, _query_file, qrels_file = run_setup()
+    from data.preprocessor import require_derived_artifacts
+    corpus_file, _query_file, qrels_file = require_derived_artifacts()
 
     # stale pickle is the ONLY cache-init source. Do NOT rebuild the full-corpus
     # ANN index during timing — require it to already exist and fail clearly.

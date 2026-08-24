@@ -242,11 +242,10 @@ def run_grass_pipeline(stale_idx, c_ids, corpus_lookup, qrels_dict,
                        cfg, config, ctx, uncertainty, debug=False):
     """Algorithm 1 outer loop: per-minibatch mine → train → step. Returns output dir."""
     # Load training mixture
+    from data.preprocessor import MIXTURE_FILES, require_mixture_files
     mix_dir     = get_path("processed") / "training_mixture"
     train_items = []
-    for f_path in sorted(mix_dir.glob("*.jsonl")):
-        if f_path.name.startswith('.'):
-            continue
+    for f_path in require_mixture_files(mix_dir, MIXTURE_FILES):
         with open(f_path) as f:
             for line in f:
                 d   = json.loads(line)
@@ -474,8 +473,8 @@ def main():
     # after the CLI overrides, so the block reports what will actually run
     log_startup_config(args.recipe, ctx, cfg)
 
-    from data.preprocessor import run_setup
-    corpus_file, query_file, qrels_file = run_setup()
+    from data.preprocessor import require_derived_artifacts
+    corpus_file, query_file, qrels_file = require_derived_artifacts()
 
     workdir   = get_path("temp_grass")
     workdir.mkdir(exist_ok=True, parents=True)

@@ -38,8 +38,8 @@ def main():
     model_path = args.model or ctx['base_model']
 
     # Same corpus the trainer encodes (init source only).
-    from data.preprocessor import run_setup
-    corpus_file, _query_file, _qrels_file = run_setup()
+    from data.preprocessor import require_derived_artifacts
+    corpus_file, _query_file, _qrels_file = require_derived_artifacts()
 
     stale_pkl = get_path("temp_grass") / "stale_index" / "corpus.pkl"
     stale_pkl.parent.mkdir(parents=True, exist_ok=True)
