@@ -32,7 +32,7 @@ from data.preprocessor import (  # noqa: E402
     require_mixture_files,
     run_setup,
 )
-from utils.helpers import atomic_write  # noqa: E402
+from utils.helpers import atomic_write, _load_qrels  # noqa: E402
 from data.bright_loader import BRIGHTLoader  # noqa: E402
 
 
@@ -509,6 +509,31 @@ def test_run_setup_qrels_remapped_to_canonical():
     assert 'DUPE' not in docids, docids
 
 
+def test_run_setup_whitespace_docid_is_trec_safe():
+    """A valid BRIGHT id containing spaces must not corrupt TREC qrels."""
+    root = _tmp()
+    processed = root / "data" / "processed"
+    raw_id = "pytorch_torch_tensor_functions/Memory Management_4_0.txt"
+    _write_mixture(processed / "training_mixture", _fill_components({
+        "train_hq.jsonl": [_mix_record("q1", "one", [(raw_id, "shared text")],
+                                           [("n1", "negative")])],
+    }))
+
+    corpus_path, _, qrels_path = _setup(root)
+    corpus_ids = {row['docid'] for row in _read_jsonl(corpus_path)}
+    qid, marker, qrel_docid, relevance = qrels_path.read_text().strip().splitlines()[0].split()
+
+    assert (qid, marker, relevance) == ("q1", "Q0", "1")
+    assert qrel_docid in corpus_ids
+    assert qrel_docid != raw_id and not any(c.isspace() for c in qrel_docid)
+
+
+def test_qrels_loader_rejects_extra_columns():
+    path = _tmp() / "bad_qrels.txt"
+    path.write_text("q1 Q0 doc id 1\n")
+    _assert_raises(ValueError, lambda: _load_qrels(path), contains='four columns')
+
+
 def test_run_setup_uses_declared_file_order():
     """Components are read in MIXTURE_FILES order, not readdir order, so the docid
     that wins a duplicated text is deterministic."""
@@ -979,6 +1004,8 @@ TESTS = [
 
     ("run_setup: positive-first canonical id", test_run_setup_positive_first_canonical),
     ("run_setup: qrels remapped to canonical", test_run_setup_qrels_remapped_to_canonical),
+    ("run_setup: whitespace docid is TREC-safe", test_run_setup_whitespace_docid_is_trec_safe),
+    ("consume: malformed qrels rejected", test_qrels_loader_rejects_extra_columns),
     ("run_setup: declared file order", test_run_setup_uses_declared_file_order),
     ("run_setup: stray jsonl ignored, kept", test_stray_jsonl_is_ignored_and_kept),
     ("run_setup: corpus/query coverage complete", test_run_setup_full_coverage),
