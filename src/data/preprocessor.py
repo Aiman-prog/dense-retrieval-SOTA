@@ -14,6 +14,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Dict, Iterable, Optional
+from urllib.parse import quote
 
 import pandas as pd
 from datasets import load_dataset
@@ -85,6 +86,12 @@ def _is_valid(query, positives, negatives) -> bool:
     return not ({t.strip() for t in positives} & {t.strip() for t in negatives})
 
 
+def _trec_safe_docid(value) -> str:
+    """Escape a document ID only when whitespace would break TREC columns."""
+    docid = _text(value)
+    return f"trec:{quote(docid, safe='')}" if any(c.isspace() for c in docid) else docid
+
+
 class BRIGHTPreprocessor:
     """Write BRIGHT / ReasonIR data in the formats Tevatron and Pyserini read."""
 
@@ -136,7 +143,13 @@ class BRIGHTPreprocessor:
         output_path = self.output_dir / filename
         with atomic_write(output_path) as f:
             for _, row in qrels.iterrows():
-                f.write(f"{row['query_id']} Q0 {row['doc_id']} "
+                qid, docid = str(row['query_id']), str(row['doc_id'])
+                if (not qid or not docid or any(c.isspace() for c in qid) or
+                        any(c.isspace() for c in docid)):
+                    raise PreprocessingError(
+                        f"TREC qrels identifiers must be nonblank single tokens: "
+                        f"query_id={qid!r}, doc_id={docid!r}")
+                f.write(f"{qid} Q0 {docid} "
                         f"{int(row.get('relevance', 1))}\n")
         print(f"Saved TREC qrels to {output_path}", flush=True)
         return output_path
@@ -623,23 +636,37 @@ def _derive(records, preprocessor, corpus_file, queries_file, qrels_file) -> Non
     # retrieved under a second docid and selected as a hard negative.
     canonical = {}
     docid_remap = {}
+    emitted_docids = {}
+    escaped_docids = set()
+    duplicate_docids = set()
     corpus_rows = []
     for column in ('positive_passages', 'negative_passages'):
         for _, record in records:
             for passage in record[column]:
-                docid = str(passage['docid'])
+                raw_docid = str(passage['docid'])
+                docid = _trec_safe_docid(raw_docid)
                 text = _text(passage['text'])
                 digest = hashlib.md5(text.strip().encode()).hexdigest()
                 owner = canonical.get(digest)
                 if owner is None:
+                    previous = emitted_docids.get(docid)
+                    if previous is not None and previous != digest:
+                        raise PreprocessingError(
+                            f"TREC-safe document ID collision for {raw_docid!r}")
                     canonical[digest] = docid
+                    emitted_docids[docid] = digest
                     corpus_rows.append({'doc_id': docid, 'text': text})
-                elif owner != docid:
-                    docid_remap[docid] = owner
+                    if docid != raw_docid:
+                        docid_remap[raw_docid] = docid
+                        escaped_docids.add(raw_docid)
+                elif owner != raw_docid:
+                    docid_remap[raw_docid] = owner
+                    duplicate_docids.add(raw_docid)
 
     preprocessor.prepare_tevatron_corpus(pd.DataFrame(corpus_rows), filename=corpus_file)
     print(f"  Corpus: {len(corpus_rows):,} unique passages "
-          f"(collapsed {len(docid_remap):,} duplicate-text docids)", flush=True)
+          f"(collapsed {len(duplicate_docids):,} duplicate-text docids; "
+          f"escaped {len(escaped_docids):,} whitespace docids)", flush=True)
 
     # --- Queries ---
     queries_df = pd.DataFrame([{'query_id': qid, 'query': _text(record['query'])}

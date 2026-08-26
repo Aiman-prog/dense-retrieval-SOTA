@@ -431,10 +431,15 @@ def _load_qrels(qrels_file) -> dict:
     import pandas as pd
     data = []
     with open(qrels_file) as f:
-        for line in f:
+        for line_no, line in enumerate(f, 1):
             parts = line.strip().split()
-            if len(parts) >= 4:
-                data.append({'qid': parts[0], 'did': parts[2]})
+            if not parts:
+                continue
+            if len(parts) != 4:
+                raise ValueError(
+                    f"{qrels_file}:{line_no}: expected four columns, found "
+                    f"{len(parts)}")
+            data.append({'qid': parts[0], 'did': parts[2]})
     return pd.DataFrame(data).groupby('qid')['did'].apply(set).to_dict() if data else {}
 
 
