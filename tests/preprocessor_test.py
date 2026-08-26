@@ -528,10 +528,15 @@ def test_run_setup_whitespace_docid_is_trec_safe():
     assert qrel_docid != raw_id and not any(c.isspace() for c in qrel_docid)
 
 
-def test_qrels_loader_rejects_extra_columns():
+def test_qrels_loader_rejects_extra_columns_and_empty_file():
     path = _tmp() / "bad_qrels.txt"
     path.write_text("q1 Q0 doc id 1\n")
     _assert_raises(ValueError, lambda: _load_qrels(path), contains='four columns')
+    # evaluation shares this reader: an empty qrels file judges nothing, which would
+    # score every query zero instead of failing.
+    empty = _tmp() / "empty_qrels.txt"
+    empty.write_text("")
+    _assert_raises(ValueError, lambda: _load_qrels(empty), contains='no qrels rows')
 
 
 def test_run_setup_uses_declared_file_order():
@@ -1005,7 +1010,7 @@ TESTS = [
     ("run_setup: positive-first canonical id", test_run_setup_positive_first_canonical),
     ("run_setup: qrels remapped to canonical", test_run_setup_qrels_remapped_to_canonical),
     ("run_setup: whitespace docid is TREC-safe", test_run_setup_whitespace_docid_is_trec_safe),
-    ("consume: malformed qrels rejected", test_qrels_loader_rejects_extra_columns),
+    ("consume: malformed and empty qrels rejected", test_qrels_loader_rejects_extra_columns_and_empty_file),
     ("run_setup: declared file order", test_run_setup_uses_declared_file_order),
     ("run_setup: stray jsonl ignored, kept", test_stray_jsonl_is_ignored_and_kept),
     ("run_setup: corpus/query coverage complete", test_run_setup_full_coverage),

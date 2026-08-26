@@ -37,7 +37,8 @@ from pathlib import Path
 project_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(project_root / 'src'))
 
-from utils.helpers import load_config, get_data_base_dir, get_path  # noqa: E402
+from utils.helpers import (load_config, get_data_base_dir, get_path,  # noqa: E402
+                           model_run_tag)
 
 PROMOTE_DELTA = 0.005
 INCONCLUSIVE_DELTA = 0.002
@@ -61,7 +62,10 @@ class MissingResults(RuntimeError):
 
 
 def results_dir(model_name, config):
-    return (Path(get_data_base_dir()) / config['paths']['results_dir'] / model_name)
+    """The CLI takes a bare model name; the results live under the hashed run tag,
+    so resolve the name to its model path the way the eval job did."""
+    return (Path(get_data_base_dir()) / config['paths']['results_dir']
+            / model_run_tag(get_path("models") / model_name))
 
 
 def load_model_results(model_name, domains, config):

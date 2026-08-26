@@ -15,6 +15,7 @@ processed data mid-experiment, so the flag makes it an error instead.
 import os
 import sys
 import json
+import math
 import subprocess
 import argparse
 from pathlib import Path
@@ -24,7 +25,8 @@ project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root / 'src'))
 
 # Import your helpers and classes
-from utils.helpers import load_config, get_data_base_dir, get_path
+from utils.helpers import (load_config, get_data_base_dir, get_path,
+                           model_run_tag)
 from data.preprocessor import BRIGHTPreprocessor
 from data.bright_loader import BRIGHTLoader
 
@@ -87,23 +89,48 @@ def _num_queries(domain):
 
 
 def collect_results(model_path, domains, config):
-    """Read back the per-domain JSONs `evaluate.py` wrote; returns (rows, missing)."""
-    base = Path(get_data_base_dir()) / config['paths']['results_dir'] / Path(model_path).name
-    rows, missing = [], []
+    """Read back the per-domain JSONs `evaluate.py` wrote; returns (rows, invalid).
+
+    A result file is only this run's if it says so. The directory is keyed by the
+    hashed absolute model path, but a leftover file from a model of the same
+    basename, from another domain, or one carrying a null/NaN metric would still be
+    read back and folded into the macro average. Each of those is reported as
+    invalid instead, which the caller already turns into a nonzero exit.
+    """
+    base = (Path(get_data_base_dir()) / config['paths']['results_dir']
+            / model_run_tag(model_path))
+    wanted = Path(model_path).resolve()
+    rows, invalid = [], []
     for domain in domains:
         f = base / f"{domain}_results.json"
         if not f.exists():
-            missing.append(domain)
+            invalid.append(domain)
             continue
         d = json.loads(f.read_text())
-        rows.append({
-            'domain': domain,
-            'ndcg_cut_10': d.get('metrics', {}).get('ndcg_cut_10'),
-            'recip_rank': d.get('metrics', {}).get('recip_rank'),
-            'recall_1000': d.get('metrics', {}).get('recall_1000'),
-            'num_queries': _num_queries(domain),
-        })
-    return rows, missing
+
+        recorded = d.get('model_path')
+        if recorded is None or Path(recorded).resolve() != wanted:
+            print(f"❌ {f.name}: written for {recorded}, not {wanted}")
+            invalid.append(domain)
+            continue
+        if d.get('domain') != domain:
+            print(f"❌ {f.name}: records domain {d.get('domain')!r}, not {domain!r}")
+            invalid.append(domain)
+            continue
+
+        # Every metric is a float from the aggregation; None, a string or a NaN
+        # means the file is not a usable result.
+        metrics = {m: d.get('metrics', {}).get(m)
+                   for m in ('ndcg_cut_10', 'recip_rank', 'recall_1000')}
+        bad = [m for m, v in metrics.items()
+               if not isinstance(v, float) or not math.isfinite(v)]
+        if bad:
+            print(f"❌ {f.name}: non-finite metric(s) {bad}")
+            invalid.append(domain)
+            continue
+
+        rows.append({'domain': domain, 'num_queries': _num_queries(domain), **metrics})
+    return rows, invalid
 
 
 def main():
@@ -114,7 +141,8 @@ def main():
     parser.add_argument("--domains", type=str, default=None,
                         help="comma-separated subset (default: evaluation.eval_domains)")
     parser.add_argument("--results_json", type=str, default=None,
-                        help="write a per-domain + macro NDCG@10 summary here")
+                        help="summary destination (default: <results_dir>/<run tag>/"
+                             "summary.json)")
     parser.add_argument("--require_existing", action="store_true",
                         help="fail instead of preparing missing BRIGHT domain files")
     args = parser.parse_args()
@@ -151,6 +179,11 @@ def main():
             sys.exit(1)
     else:
         domains = all_domains
+    if not domains:
+        # `--domains ,` and an empty evaluation.eval_domains both landed here and
+        # then reported "All evaluations complete" having evaluated nothing.
+        print("❌ ERROR: no domains selected; nothing to evaluate")
+        sys.exit(1)
     print(f"🌐 Domains ({len(domains)}): {', '.join(domains)}\n")
 
     # Check/Prepare data before loop
@@ -179,37 +212,40 @@ def main():
 
     rows, absent = collect_results(model_path, [d for d in domains if d not in failed],
                                    config)
-    scored = [r for r in rows if r['ndcg_cut_10'] is not None]
-    macro = (sum(r['ndcg_cut_10'] for r in scored) / len(scored)) if scored else None
+    run_tag = model_run_tag(model_path)
 
+    # Fail BEFORE anything is computed, printed or written: a failed retry must not
+    # overwrite a valid complete summary.json with a partial one.
+    if failed or absent:
+        print(f"\n❌ Evaluation INCOMPLETE — failed: {failed}, "
+              f"missing or invalid results: {absent}")
+        sys.exit(1)
+
+    macro = sum(r['ndcg_cut_10'] for r in rows) / len(rows)
     print("\n" + "=" * 60)
-    print(f"  {Path(model_path).name}")
+    print(f"  {run_tag}")
     print("=" * 60)
     for r in rows:
         print(f"  {r['domain']:<22} NDCG@10={r['ndcg_cut_10']:.4f}  "
               f"({r['num_queries']} queries)")
-    if macro is not None:
-        print(f"  {'MACRO NDCG@10':<22} {macro:.4f}  over {len(scored)} domains")
+    print(f"  {'MACRO NDCG@10':<22} {macro:.4f}  over {len(rows)} domains")
     print("=" * 60)
 
-    if args.results_json:
-        out = Path(args.results_json)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps({
-            'model': str(model_path),
-            'model_name': Path(model_path).name,
-            'domains': domains,
-            'per_domain': rows,
-            'macro_ndcg_cut_10': macro,
-            'failed_domains': failed,
-            'missing_result_files': absent,
-        }, indent=2))
-        print(f"📄 Summary written to {out}")
-
-    if failed or absent:
-        print(f"\n❌ Evaluation INCOMPLETE — failed: {failed}, "
-              f"missing results: {absent}")
-        sys.exit(1)
+    # Default under the run tag, so two models of the same basename cannot
+    # overwrite each other's summary. Only ever written for a complete run.
+    out = Path(args.results_json) if args.results_json else (
+        Path(get_data_base_dir()) / config['paths']['results_dir'] / run_tag
+        / "summary.json")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({
+        'model': str(Path(model_path).resolve()),
+        'model_name': Path(model_path).name,
+        'run_tag': run_tag,
+        'domains': domains,
+        'per_domain': rows,
+        'macro_ndcg_cut_10': macro,
+    }, indent=2))
+    print(f"📄 Summary written to {out}")
 
     print("\n🏁 All evaluations complete.")
 

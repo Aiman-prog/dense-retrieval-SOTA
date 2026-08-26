@@ -10,7 +10,6 @@ import pickle
 import argparse
 import subprocess
 import numpy as np 
-import pandas as pd
 from pathlib import Path
 import json
 import faiss
@@ -24,7 +23,8 @@ project_root = Path(__file__).resolve().parent.parent.parent
 sys.path.append(str(project_root / 'src'))
 
 from utils.helpers import (load_config, get_data_base_dir, load_excluded_ids,
-                           search_depth, apply_exclusions)
+                           search_depth, apply_exclusions, model_run_tag,
+                           _load_qrels, require_eval_files, check_eval_artifacts)
 from evaluation.trec_eval_wrapper import TrecEvalWrapper
 
 def main():
@@ -60,13 +60,21 @@ def main():
     processed_dir = base_dir / config['paths']['processed_dir']
     # Key the embedding cache by model AND domain so concurrent evals of different
     # models can't clobber each other's corpus.pkl/query.pkl (domain-only paths race).
-    model_tag = Path(args.model_path).name
+    # The tag hashes the ABSOLUTE model path: two runs can both end in
+    # `checkpoint-500`, and a basename-only tag let them share this directory.
+    model_tag = model_run_tag(args.model_path)
     eval_dir = base_dir / 'data' / 'evaluation' / model_tag / args.domain
     eval_dir.mkdir(parents=True, exist_ok=True)
 
     corpus_file = processed_dir / f"{args.domain}_corpus.jsonl"
     queries_file = processed_dir / f"{args.domain}_queries.jsonl"
     qrels_file = processed_dir / f"{args.domain}_qrels.txt"
+
+    # Preflight before any encoding: a missing corpus otherwise surfaces as an opaque
+    # Tevatron subprocess failure, an hour of GPU time later.
+    require_eval_files(args.domain, [
+        corpus_file, queries_file, qrels_file,
+        processed_dir / f"{args.domain}_excluded.json"])
     
     corpus_pkl = eval_dir / 'corpus_emb' / 'corpus.pkl'
     query_pkl = eval_dir / 'query_emb' / 'query.pkl'
@@ -139,6 +147,12 @@ def main():
     # deeper than k and filter afterwards -- otherwise excluded hits consume result
     # slots and nothing refills them (aops excludes up to 11,224 docs for one query).
     excluded = load_excluded_ids(args.domain, processed_dir)
+    qrels = _load_qrels(qrels_file)
+    # Query ids == exclusion keys, qrels covered by the query set, and the encoder
+    # neither dropped nor invented a query. Any of those would move the metric
+    # without moving anything visible.
+    check_eval_artifacts(args.domain, qrels, excluded, queries_file=queries_file,
+                         encoded_query_ids=query_ids)
     depth = min(search_depth(args.k, excluded), len(corpus_ids))
     print(f"🔍 Step 3: Running FAISS IndexFlatIP (CPU), depth={depth} for top-{args.k}...",
           flush=True)
@@ -147,13 +161,14 @@ def main():
     scores_mat, indices_mat = index.search(query_embs, depth)
 
     # --- STEP 4: VIGILANTE CHECK ---
-    qrels_df = pd.read_csv(qrels_file, sep=' ', names=['qid', 'ignore', 'docid', 'rel'], dtype=str)
-    print("\n" + "="*60 + "\n🕵️  VIGILANTE CHECK: QUERY 0\n" + "="*60, flush=True)
-    q0_id = str(query_ids[0])
-    top_doc_id = str(corpus_ids[indices_mat[0][0]])
-    truth_docs = qrels_df[qrels_df['qid'] == q0_id]['docid'].values
-    print(f"Query ID: {q0_id} | Top Result: {top_doc_id} | Match: {top_doc_id in truth_docs}", flush=True)
-    print("="*60 + "\n", flush=True)
+    # Guarded: an empty query set or zero depth used to raise IndexError here.
+    if query_ids and depth:
+        print("\n" + "="*60 + "\n🕵️  VIGILANTE CHECK: QUERY 0\n" + "="*60, flush=True)
+        q0_id = str(query_ids[0])
+        top_doc_id = str(corpus_ids[indices_mat[0][0]])
+        truth_docs = qrels.get(q0_id, set())
+        print(f"Query ID: {q0_id} | Top Result: {top_doc_id} | Match: {top_doc_id in truth_docs}", flush=True)
+        print("="*60 + "\n", flush=True)
 
     # --- STEP 5: EVALUATION ---
     print("📊 Step 5: Running Evaluation Wrapper...", flush=True)
@@ -164,8 +179,7 @@ def main():
                                for j in range(depth) if indices_mat[i][j] >= 0}
     run_results = apply_exclusions(run_results, excluded, args.k)
 
-    eval_qrels = pd.read_csv(qrels_file, sep=' ', names=['query_id', 'ignore', 'doc_id', 'relevance'], dtype=str)
-    evaluator = TrecEvalWrapper(eval_qrels)
+    evaluator = TrecEvalWrapper(qrels)
     metrics = evaluator.evaluate(run_results, {'recip_rank', 'ndcg_cut_10', 'recall_1000'})
 
     print(f"\nFINAL RESULTS: {args.domain}\n" + "*"*40, flush=True)
@@ -174,14 +188,15 @@ def main():
     print(f"Recall@1000: {metrics.get('recall_1000', 0):.4f}\n" + "*"*40, flush=True)
 
     # Save results to JSON for downstream aggregation
-    results_base = base_dir / config['paths']['results_dir']
-    model_name = Path(args.model_path).name
-    results_base = results_base / model_name
+    results_base = base_dir / config['paths']['results_dir'] / model_tag
     results_base.mkdir(parents=True, exist_ok=True)
     result_file = results_base / f"{args.domain}_results.json"
+    # model_path is resolved and run_tag recorded so a collector can prove this file
+    # belongs to the run it asked for, not to another model of the same basename.
     result_data = {
         "domain": args.domain,
-        "model_path": args.model_path,
+        "model_path": str(Path(args.model_path).resolve()),
+        "run_tag": model_tag,
         "metrics": metrics
     }
     with open(result_file, 'w') as f:

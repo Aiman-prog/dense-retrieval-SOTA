@@ -3,7 +3,6 @@
 import sys
 import json
 import subprocess
-import pandas as pd
 from pathlib import Path
 
 # Resolve project root and add src to path
@@ -11,7 +10,8 @@ project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root / 'src'))
 
 from utils.helpers import (load_config, get_path, get_data_base_dir,
-                           load_excluded_ids, search_depth, apply_exclusions)
+                           load_excluded_ids, search_depth, apply_exclusions,
+                           _load_qrels, check_eval_artifacts)
 from data.preprocessor import BRIGHTPreprocessor
 from data.bright_loader import BRIGHTLoader
 from evaluation.trec_eval_wrapper import TrecEvalWrapper
@@ -68,21 +68,6 @@ def load_queries(queries_file: Path):
             qtext = d.get('query') or d.get('text', '')
             queries.append((qid, qtext))
     return queries
-
-
-def load_qrels(qrels_file: Path) -> pd.DataFrame:
-    """Parse TREC-format qrels into a DataFrame for TrecEvalWrapper."""
-    rows = []
-    with open(qrels_file, encoding='utf-8') as f:
-        for line in f:
-            parts = line.strip().split()
-            if len(parts) >= 4:
-                rows.append({
-                    'query_id': parts[0],
-                    'doc_id': parts[2],
-                    'relevance': int(parts[3]),
-                })
-    return pd.DataFrame(rows)
 
 
 def main():
@@ -154,6 +139,11 @@ def main():
             # Same exclusion rule as the dense path: over-retrieve per query, then
             # filter, so the excluded documents do not eat top_k slots.
             excluded = load_excluded_ids(domain, processed_dir)
+            qrels = _load_qrels(qrels_file)
+            # BM25 encodes nothing, so no encoded ids to check -- but the query,
+            # qrel and exclusion sets must still agree or the metric moves silently.
+            check_eval_artifacts(domain, qrels, excluded,
+                                 query_ids=[qid for qid, _ in queries])
             run_results = {}
             for qid, qtext in queries:
                 hits = searcher.search(qtext, k=search_depth(top_k, excluded, qid))
@@ -162,8 +152,7 @@ def main():
             print(f"  Searched {len(queries)} queries.")
 
             # Evaluate
-            qrels_df = load_qrels(qrels_file)
-            evaluator = TrecEvalWrapper(qrels_df)
+            evaluator = TrecEvalWrapper(qrels)
             metrics = evaluator.evaluate(run_results, {'recip_rank', 'ndcg_cut_10', 'recall_1000'})
 
             # Save (same schema as dense eval results)

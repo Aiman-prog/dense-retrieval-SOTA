@@ -57,10 +57,14 @@ class TrecEvalWrapper:
             
         Returns:
             Dictionary with average scores (e.g., {'ndcg_cut_10': 0.45})
-        """
-        if not run_results:
-            return {m: 0.0 for m in metrics}
 
+        The average is taken over the JUDGED queries -- every query in the qrels --
+        not over the rows pytrec_eval returned. pytrec_eval emits a zero row for a
+        query whose ranking is empty, but emits nothing at all for a judged query
+        missing from the run, so averaging over its output silently shrinks the
+        denominator and inflates every metric. A judged query the run never reached
+        scores 0 here, by construction.
+        """
         # --- NEW FIX: Sanitize Run Results ---
         # Ensure all IDs are strict Python strings before passing to pytrec_eval.
         # This solves the "0 vs '0'" mismatch permanently.
@@ -78,10 +82,11 @@ class TrecEvalWrapper:
         # Compute metrics per query using CLEAN results
         results_per_query = evaluator.evaluate(clean_results)
 
-        # Aggregate (Average) results
+        # Aggregate (Average) over the judged queries, NOT over what came back.
         final_metrics = {}
         for metric in metrics:
-            values = [query_scores[metric] for query_scores in results_per_query.values()]
+            values = [results_per_query.get(qid, {}).get(metric, 0.0)
+                      for qid in self.qrels]
             final_metrics[metric] = sum(values) / len(values) if values else 0.0
 
         return final_metrics

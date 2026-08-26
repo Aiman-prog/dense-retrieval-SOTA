@@ -8,6 +8,7 @@ import math
 import yaml
 import os
 import contextlib
+import hashlib
 import tempfile
 import numpy as np
 import faiss
@@ -412,6 +413,96 @@ def apply_exclusions(run_results: dict, excluded: Dict[str, frozenset],
     return out
 
 
+# ── Evaluation boundary: run identity, strict qrels, artifact consistency ────
+
+def model_run_tag(model_path) -> str:
+    """Directory tag that is unique per model PATH, not per basename.
+
+    Two runs can both end in `checkpoint-500`; keying embeddings, results and
+    summaries by the basename alone let them share -- and clobber -- directories.
+    """
+    resolved = Path(model_path).resolve()
+    digest = hashlib.sha1(str(resolved).encode('utf-8')).hexdigest()[:8]
+    return f"{resolved.name}__{digest}"
+
+
+def require_eval_files(label, files) -> None:
+    """Every path must exist and be non-empty, or raise naming every offender.
+
+    Cheap, and it runs before any encoding: discovering a missing corpus through a
+    Tevatron subprocess failure costs a GPU hour and names nothing useful.
+    """
+    bad = []
+    for f in files:
+        f = Path(f)
+        if not f.is_file():
+            bad.append(f"{f} (missing)")
+        elif f.stat().st_size == 0:
+            bad.append(f"{f} (empty)")
+    if bad:
+        raise FileNotFoundError(
+            f"[{label}] required evaluation file(s) unusable: " + "; ".join(bad))
+
+
+def _read_query_ids(queries_file) -> list:
+    """Query ids in file order, from a Tevatron-format queries JSONL."""
+    ids = []
+    with open(queries_file) as f:
+        for line in f:
+            if line.strip():
+                ids.append(str(json.loads(line)['query_id']))
+    return ids
+
+
+def _id_sample(ids, n=5) -> str:
+    ordered = sorted(ids)
+    return (", ".join(ordered[:n]) + (" ..." if len(ordered) > n else "")) or "none"
+
+
+def check_eval_artifacts(domain, qrels, excluded, *, query_ids=None,
+                         queries_file=None, encoded_query_ids=None) -> None:
+    """Cross-artifact consistency at the evaluation boundary.
+
+    * query ids == exclusion-map keys -- a query missing from the map is scored with
+      no exclusions at all, silently reproducing pre-filter numbers;
+    * qrels query ids are covered by the query set -- a judged query that is never
+      retrieved would otherwise contribute an invisible zero;
+    * encoded ids == source ids, AS SETS -- the encoder may reorder, but a query it
+      dropped or invented breaks the correspondence between run and qrels.
+
+    Source ids come from `query_ids` when the caller already has them, otherwise
+    from `queries_file`. `encoded_query_ids=None` skips the last check, so BM25 --
+    which never encodes -- can call this without inventing ids.
+    """
+    if query_ids is None:
+        if queries_file is None:
+            raise ValueError("check_eval_artifacts needs query_ids or queries_file")
+        query_ids = _read_query_ids(queries_file)
+    source = {str(q) for q in query_ids}
+
+    keys = {str(q) for q in excluded}
+    if keys != source:
+        raise ValueError(
+            f"[{domain}] query set and excluded_ids keys disagree: {len(source)} "
+            f"queries, {len(keys)} exclusion entries; queries with no entry: "
+            f"{_id_sample(source - keys)}; entries with no query: "
+            f"{_id_sample(keys - source)}")
+
+    judged = {str(q) for q in qrels}
+    if not judged <= source:
+        raise ValueError(
+            f"[{domain}] {len(judged - source)} judged query id(s) absent from the "
+            f"query set: {_id_sample(judged - source)}")
+
+    if encoded_query_ids is not None:
+        enc = {str(q) for q in encoded_query_ids}
+        if enc != source:
+            raise ValueError(
+                f"[{domain}] encoded query ids do not match {len(source)} source "
+                f"queries; not encoded: {_id_sample(source - enc)}; encoded but not "
+                f"in the query file: {_id_sample(enc - source)}")
+
+
 # ── Shared IPC / IO utilities (used by ANCE) ────────────────────────────────
 
 def is_valid_checkpoint(ckpt_path: str) -> bool:
@@ -427,20 +518,27 @@ def get_latest_marker_no(directory: Path, prefix: str = "ready_") -> int:
 
 
 def _load_qrels(qrels_file) -> dict:
-    """Load TREC qrels file. Returns {qid: set(docids)}."""
-    import pandas as pd
-    data = []
+    """Load TREC qrels file. Returns {qid: set(docids)}.
+
+    The one strict reader for mining AND evaluation: a line that is not four columns
+    raises, and an empty file raises rather than judging nothing and scoring every
+    query zero. `TrecEvalWrapper` takes this mapping directly; BRIGHT and MS MARCO
+    qrels are binary, so the relevance column carries no extra information.
+    """
+    qrels = {}
     with open(qrels_file) as f:
         for line_no, line in enumerate(f, 1):
-            parts = line.strip().split()
+            parts = line.split()
             if not parts:
                 continue
             if len(parts) != 4:
                 raise ValueError(
                     f"{qrels_file}:{line_no}: expected four columns, found "
                     f"{len(parts)}")
-            data.append({'qid': parts[0], 'did': parts[2]})
-    return pd.DataFrame(data).groupby('qid')['did'].apply(set).to_dict() if data else {}
+            qrels.setdefault(parts[0], set()).add(parts[2])
+    if not qrels:
+        raise ValueError(f"{qrels_file}: no qrels rows; nothing to evaluate")
+    return qrels
 
 
 def _load_corpus_lookup(corpus_file) -> dict:
@@ -539,25 +637,31 @@ def _pool_and_fresh_rerank(model, tokenizer, batch_qids, batch_q_embs_det,
 
 
 def evaluate_bright(ctx, config, model_path, temp_workdir_key=None):
-    """Multi-domain BRIGHT evaluation (or single-set if eval_corpus_file set in ctx.args)."""
+    """Multi-domain BRIGHT evaluation (or single-set if eval_corpus_file set in ctx.args).
+
+    Every requested domain is preflighted -- files present, and query/qrel/exclusion
+    ids mutually consistent -- BEFORE the first encode. An incomplete domain set
+    fails there, costing no GPU time; it never prints a mean over the domains that
+    happened to have files.
+    """
     import pickle
-    import pandas as pd
     from evaluation.trec_eval_wrapper import TrecEvalWrapper
 
     args = ctx['args']
     if temp_workdir_key is None:
         temp_workdir_key = args.get('temp_workdir', 'temp_grass')
     temp_dir = get_path(temp_workdir_key)
+    # Run-tagged so two recipes sharing one temp workdir cannot swap c.pkl/q.pkl.
+    run_tag = model_run_tag(model_path)
 
     if args.get('eval_corpus_file'):
         p         = get_path("processed")
         d_corpus  = p / args['eval_corpus_file']
         d_queries = p / args['eval_queries_file']
         d_qrels   = p / args['eval_qrels_file']
-        if not all(x.exists() for x in [d_corpus, d_queries, d_qrels]):
-            print("[Eval] Skipping: eval files not found", flush=True)
-            return
-        eval_dir = temp_dir / "final_eval"
+        # Not BRIGHT: three artifacts, no exclusion file, no exclusions applied.
+        require_eval_files(args['eval_corpus_file'], [d_corpus, d_queries, d_qrels])
+        eval_dir = temp_dir / "final_eval" / run_tag
         eval_dir.mkdir(parents=True, exist_ok=True)
         encode_to_pickle(str(model_path), d_corpus,  eval_dir / "c.pkl", False, ctx, config)
         encode_to_pickle(str(model_path), d_queries, eval_dir / "q.pkl", True,  ctx, config)
@@ -571,56 +675,60 @@ def evaluate_bright(ctx, config, model_path, temp_workdir_key=None):
                              for k in range(len(i_e[j])) if i_e[j][k] >= 0}
             for j in range(len(dq[1]))
         }
-        eval_qrels_data = []
-        with open(d_qrels) as f:
-            for line in f:
-                parts = line.strip().split()
-                if len(parts) >= 4:
-                    eval_qrels_data.append({'query_id': parts[0], 'doc_id': parts[2],
-                                            'relevance': parts[3]})
         metric = args.get('eval_metric', 'ndcg_cut_10')
-        evaluator = TrecEvalWrapper(pd.DataFrame(eval_qrels_data))
+        evaluator = TrecEvalWrapper(_load_qrels(d_qrels))
         metrics = evaluator.evaluate(results, {metric})
         print(f"\n📈 Eval — {metric}={metrics.get(metric, 0):.4f}", flush=True)
-    else:
-        eval_summary = []
-        for domain in config['evaluation'].get('eval_domains', []):
-            d_corpus  = get_path("processed") / f"{domain}_corpus.jsonl"
-            d_queries = get_path("processed") / f"{domain}_queries.jsonl"
-            d_qrels   = get_path("processed") / f"{domain}_qrels.txt"
-            if not all(p.exists() for p in [d_corpus, d_queries, d_qrels]):
-                print(f"[Eval] Skipping {domain}: files not found", flush=True)
-                continue
-            eval_dir = temp_dir / "final_eval" / domain
-            eval_dir.mkdir(parents=True, exist_ok=True)
-            encode_to_pickle(str(model_path), d_corpus,  eval_dir / "c.pkl", False, ctx, config)
-            encode_to_pickle(str(model_path), d_queries, eval_dir / "q.pkl", True,  ctx, config)
-            with open(eval_dir / "c.pkl", 'rb') as f: dc = pickle.load(f)
-            with open(eval_dir / "q.pkl", 'rb') as f: dq = pickle.load(f)
-            idx_e = faiss.IndexFlatIP(dc[0].shape[1])
-            idx_e.add(dc[0].astype(np.float32))
-            eval_top_k = args.get('eval_top_k', 10)
-            # Filter BRIGHT exclusions before the top-k cut, as evaluate.py does.
-            excluded = load_excluded_ids(domain)
-            depth = min(search_depth(eval_top_k, excluded), len(dc[1]))
-            s_e, i_e = idx_e.search(dq[0].astype(np.float32), depth)
-            results = {
-                str(dq[1][j]): {str(dc[1][i_e[j][k]]): float(s_e[j][k])
-                                 for k in range(len(i_e[j])) if i_e[j][k] >= 0}
-                for j in range(len(dq[1]))
-            }
-            results = apply_exclusions(results, excluded, eval_top_k)
-            eval_qrels_data = []
-            with open(d_qrels) as f:
-                for line in f:
-                    parts = line.strip().split()
-                    if len(parts) >= 4:
-                        eval_qrels_data.append({'query_id': parts[0], 'doc_id': parts[2],
-                                                'relevance': parts[3]})
-            evaluator = TrecEvalWrapper(pd.DataFrame(eval_qrels_data))
-            metrics = evaluator.evaluate(results, {'recip_rank', 'ndcg_cut_10'})
-            eval_summary.append({'domain': domain, 'ndcg10': metrics.get('ndcg_cut_10', 0)})
-            print(f"[Eval] {domain}: NDCG@10={metrics.get('ndcg_cut_10', 0):.4f}", flush=True)
-        if eval_summary:
-            mean_ndcg = pd.DataFrame(eval_summary)['ndcg10'].mean()
-            print(f"\n📈 Final Mean NDCG@10: {mean_ndcg:.4f}", flush=True)
+        return
+
+    domains = config['evaluation'].get('eval_domains', [])
+    if not domains:
+        raise ValueError(
+            "evaluation.eval_domains is empty; there is nothing to evaluate")
+
+    # ── Preflight EVERY domain before encoding the first one ─────────────────
+    prepared = {}
+    for domain in domains:
+        d_corpus  = get_path("processed") / f"{domain}_corpus.jsonl"
+        d_queries = get_path("processed") / f"{domain}_queries.jsonl"
+        d_qrels   = get_path("processed") / f"{domain}_qrels.txt"
+        require_eval_files(domain, [
+            d_corpus, d_queries, d_qrels,
+            get_path("processed") / f"{domain}_excluded.json"])
+        qrels = _load_qrels(d_qrels)
+        excluded = load_excluded_ids(domain)
+        check_eval_artifacts(domain, qrels, excluded, queries_file=d_queries)
+        prepared[domain] = (d_corpus, d_queries, qrels, excluded)
+
+    eval_summary = []
+    for domain in domains:
+        d_corpus, d_queries, qrels, excluded = prepared[domain]
+        eval_dir = temp_dir / "final_eval" / run_tag / domain
+        eval_dir.mkdir(parents=True, exist_ok=True)
+        encode_to_pickle(str(model_path), d_corpus,  eval_dir / "c.pkl", False, ctx, config)
+        encode_to_pickle(str(model_path), d_queries, eval_dir / "q.pkl", True,  ctx, config)
+        with open(eval_dir / "c.pkl", 'rb') as f: dc = pickle.load(f)
+        with open(eval_dir / "q.pkl", 'rb') as f: dq = pickle.load(f)
+        q_ids = [str(x) for x in dq[1]]
+        check_eval_artifacts(domain, qrels, excluded, queries_file=d_queries,
+                             encoded_query_ids=q_ids)
+        idx_e = faiss.IndexFlatIP(dc[0].shape[1])
+        idx_e.add(dc[0].astype(np.float32))
+        eval_top_k = args.get('eval_top_k', 10)
+        # Filter BRIGHT exclusions before the top-k cut, as evaluate.py does.
+        depth = min(search_depth(eval_top_k, excluded), len(dc[1]))
+        s_e, i_e = idx_e.search(dq[0].astype(np.float32), depth)
+        results = {
+            q_ids[j]: {str(dc[1][i_e[j][k]]): float(s_e[j][k])
+                        for k in range(len(i_e[j])) if i_e[j][k] >= 0}
+            for j in range(len(q_ids))
+        }
+        results = apply_exclusions(results, excluded, eval_top_k)
+        evaluator = TrecEvalWrapper(qrels)
+        metrics = evaluator.evaluate(results, {'recip_rank', 'ndcg_cut_10'})
+        eval_summary.append(metrics.get('ndcg_cut_10', 0))
+        print(f"[Eval] {domain}: NDCG@10={metrics.get('ndcg_cut_10', 0):.4f}", flush=True)
+
+    mean_ndcg = sum(eval_summary) / len(eval_summary)
+    print(f"\n📈 Final Mean NDCG@10: {mean_ndcg:.4f} over {len(eval_summary)} domains",
+          flush=True)

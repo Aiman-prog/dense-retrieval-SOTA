@@ -840,8 +840,7 @@ def test_preflight_reports_missing_inputs():
 
 # ---- eval routing + decision ------------------------------------------------
 
-def _fake_results(base, model, domains, scores):
-    d = base / model
+def _fake_results(d, domains, scores):
     d.mkdir(parents=True, exist_ok=True)
     for dom in domains:
         (d / f"{dom}_results.json").write_text(json.dumps({
@@ -883,6 +882,10 @@ def test_eval_exits_nonzero_when_a_domain_fails():
         "a recorded failure must still gate the exit code"
     tail = src[src.index('if failed or absent:'):]
     assert 'sys.exit(1)' in tail
+    # ...and it must gate PUBLICATION too: a failed retry that still wrote
+    # summary.json would overwrite a valid complete summary with a partial one.
+    assert src.index('if failed or absent:') < src.index('out.write_text'), \
+        "summary.json is written before the completeness gate"
 
 
 def test_require_existing_does_not_prepare():
@@ -959,20 +962,26 @@ def test_decision_tie_prefers_smaller_lambda():
 
 
 def test_decision_refuses_partial_results():
+    """Also pins the lookup path: the CLI takes a bare model name, but the results
+    now live under the hashed run tag, so a bare-name directory finds nothing."""
     import lambda_pilot_decide as dec
+    from utils.helpers import model_run_tag
     config = load_config()
     with tempfile.TemporaryDirectory() as td:
         base = Path(td)
-        _fake_results(base, 'm0', DOMAINS4[:2], {d: 0.2 for d in DOMAINS4})
-        orig = dec.results_dir
-        dec.results_dir = lambda name, cfg: base / name
+        orig = dec.get_data_base_dir, dec.get_path
+        dec.get_data_base_dir = lambda: base
+        dec.get_path = lambda key, *a, **k: base / key
         try:
+            d = dec.results_dir('m0', config)
+            assert d.name == model_run_tag(base / 'models' / 'm0'), d
+            _fake_results(d, DOMAINS4[:2], {x: 0.2 for x in DOMAINS4})
             dec.load_model_results('m0', DOMAINS4, config)
         except dec.MissingResults as e:
             assert 'Refusing to decide' in str(e)
             return
         finally:
-            dec.results_dir = orig
+            dec.get_data_base_dir, dec.get_path = orig
     raise AssertionError("a missing domain result must raise, not shrink the macro")
 
 

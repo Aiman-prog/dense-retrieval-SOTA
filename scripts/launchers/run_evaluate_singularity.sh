@@ -52,15 +52,15 @@ echo "🔍 Starting evaluation for model: ${MODEL_PATH}"
 echo "📊 Domains: ${EVAL_DOMAINS:-all (config.yaml evaluation.eval_domains)}"
 echo "📊 require_existing: ${EVAL_REQUIRE_EXISTING:-off}"
 
-RESULTS_JSON="${DATA_BASE_DIR}/results/bright_benchmark/$(basename ${MODEL_PATH})/summary.json"
-
+# The summary path is NOT computed here: two models can share a basename, and this
+# line used to point both of them at the same summary.json. run_all_evals.py writes
+# it under the hashed run tag and prints the path.
 singularity exec --nv \
     --bind /scratch/${USER}:/scratch/${USER} \
     --bind /home/${USER}:/home/${USER} \
     ${CONTAINER} \
     python -u scripts/run_all_evals.py \
         --model_path "${MODEL_PATH}" \
-        --results_json "${RESULTS_JSON}" \
         ${EVAL_DOMAINS:+--domains $EVAL_DOMAINS} \
         ${EVAL_REQUIRE_EXISTING:+--require_existing}
 
