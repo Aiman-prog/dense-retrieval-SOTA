@@ -28,15 +28,16 @@ export OMP_NUM_THREADS=16
 
 # Container path
 CONTAINER="/scratch/${USER}/containers/pytorch_2.1.sif"
+ANCE_RECIPE="${ANCE_RECIPE:-ance_msmarco}"
 
 # --- Run ANCE MS MARCO Pipeline ---
-echo "🚀 Starting ANCE MS MARCO Validation..."
+echo "🚀 Starting ANCE MS MARCO recipe: ${ANCE_RECIPE}"
 
 singularity exec --nv \
     --bind /scratch/${USER}:/scratch/${USER} \
     --bind /home/${USER}:/home/${USER} \
     ${CONTAINER} \
-    python -u scripts/train_ance.py --recipe ance_msmarco
+    python -u scripts/train_ance.py --recipe "${ANCE_RECIPE}"
 
 EXIT_CODE=$?
 

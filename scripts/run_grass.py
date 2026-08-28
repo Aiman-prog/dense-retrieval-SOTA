@@ -32,20 +32,14 @@ import argparse
 import numpy as np
 import torch
 from pathlib import Path
-from torch.optim import AdamW
 from torch.nn.utils import clip_grad_norm_
 from transformers import AutoTokenizer, AutoModel, get_linear_schedule_with_warmup
-
-try:
-    import bitsandbytes as bnb
-    _BNB_AVAILABLE = True
-except ImportError:
-    _BNB_AVAILABLE = False
 
 project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root / 'src'))
 
 from utils.helpers import (
+    build_adamw,
     get_path, get_training_context, load_config, log_startup_config,
     encode_batch, encode_batch_tensor, encode_to_pickle, build_faiss_index,
     _load_qrels, _load_corpus_lookup,
@@ -311,13 +305,19 @@ def run_grass_pipeline(stale_idx, c_ids, corpus_lookup, qrels_dict,
                 module.p = mc_dropout_p
         print(f"[GRASS] MC-dropout p={mc_dropout_p} on {n_layers} layers", flush=True)
 
-    if _BNB_AVAILABLE:
-        optimizer = bnb.optim.AdamW8bit(student.parameters(), lr=lr, weight_decay=weight_decay)
-        print("[GRASS] AdamW8bit enabled", flush=True)
-    else:
-        student.gradient_checkpointing_enable()
-        optimizer = AdamW(student.parameters(), lr=lr, weight_decay=weight_decay)
-        print("[GRASS] AdamW + gradient checkpointing", flush=True)
+    # gradient checkpointing is UNCONDITIONAL. It used to sit in the else-arm of a
+    # bitsandbytes branch, so removing that branch without this line would silently
+    # strip GRASS's memory fix and OOM it at query_max_len 1024.
+    student.gradient_checkpointing_enable()
+    # The SAME explicit optimizer ANCE builds. This used to be
+    # `if _BNB_AVAILABLE: AdamW8bit else: AdamW`, so installing bitsandbytes as a
+    # transitive dependency would have switched GRASS to a quantized optimizer while
+    # ANCE stayed fp32 -- forking the one comparison this repo exists to make, with
+    # no visible signal. An 8-bit optimizer is a different optimizer; if it is ever
+    # wanted it has to be adopted by BOTH arms, deliberately.
+    optimizer, _optimizer_spec = build_adamw(student.parameters(), lr=lr,
+                                             weight_decay=weight_decay, label='grass')
+    print("[GRASS] AdamW + gradient checkpointing", flush=True)
     student.train()
 
     loss_fn      = TemperatureScaledContrastiveLoss(temperature=temperature)

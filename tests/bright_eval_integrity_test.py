@@ -144,6 +144,70 @@ def test_encoded_query_ids_must_match_source():
     check_eval_artifacts('biology', qrels, excluded, queries_file=qfile)
 
 
+def test_excluded_none_is_for_benchmarks_with_no_exclusion_map():
+    """MS MARCO has no `{domain}_excluded.json`, so it cannot satisfy the
+    key-set check. `excluded=None` skips ONLY that check; the two that catch a
+    mismatched run still apply."""
+    d = Path(tempfile.mkdtemp())
+    qfile = d / "msmarco_dev_queries.jsonl"
+    _write_queries(qfile, ['q1', 'q2', 'q3'])
+    qrels = _qrels([('q1', 'dA'), ('q2', 'dB')])
+
+    # encoded == source, qrels subset of source: the MS MARCO contract
+    check_eval_artifacts('msmarco_dev', qrels, None, queries_file=qfile,
+                         encoded_query_ids=['q2', 'q1', 'q3'])
+    # a query judged but absent from the query file still raises
+    _assert_raises(ValueError,
+                   lambda: check_eval_artifacts('msmarco_dev',
+                                                _qrels([('q9', 'dA')]), None,
+                                                queries_file=qfile,
+                                                encoded_query_ids=['q1', 'q2', 'q3']),
+                   'q9')
+    # the encoder dropped a query
+    _assert_raises(ValueError,
+                   lambda: check_eval_artifacts('msmarco_dev', qrels, None,
+                                                queries_file=qfile,
+                                                encoded_query_ids=['q1', 'q2']),
+                   'q3')
+    # the encoder invented one
+    _assert_raises(ValueError,
+                   lambda: check_eval_artifacts('msmarco_dev', qrels, None,
+                                                queries_file=qfile,
+                                                encoded_query_ids=['q1', 'q2', 'q3', 'q4']),
+                   'q4')
+
+
+def test_excluded_none_does_not_weaken_bright():
+    """BRIGHT can never reach the None path: load_excluded_ids raises on a missing
+    file, so a domain cannot opt out of exclusion filtering this way."""
+    src = (project_root / 'src' / 'utils' / 'helpers.py').read_text()
+    body = src[src.index('def load_excluded_ids('):src.index('def search_depth(')]
+    assert 'raise' in body, "a missing exclusion file no longer raises"
+    for caller in ('src/utils/helpers.py', 'src/evaluation/evaluate.py',
+                   'scripts/run_bm25_evals.py'):
+        text = (project_root / caller).read_text()
+        for line in text.splitlines():
+            if 'check_eval_artifacts(' in line and 'def ' not in line:
+                assert 'None' not in line, f"{caller} passes excluded=None: {line!r}"
+
+
+def test_msmarco_evaluator_checks_ids_before_searching():
+    """The check has to run before the FAISS search, or a wrong run is built first."""
+    src = (project_root / 'scripts' / 'eval_msmarco.py').read_text()
+    assert 'check_eval_artifacts(' in src, "eval_msmarco does not verify query ids"
+    assert src.index('check_eval_artifacts(') < src.index('idx.search('),         "ids are verified after the search"
+
+
+def test_msmarco_paper_comparison_requires_official_query_count():
+    from eval_msmarco import msmarco_paper_comparable
+    assert msmarco_paper_comparable(6980) is True
+    for count in (0, 1, 6979, 6981, 101093):
+        assert msmarco_paper_comparable(count) is False
+    src = (project_root / 'scripts' / 'eval_msmarco.py').read_text()
+    assert 'if paper_comparable else ""' in src
+    assert "'paper_comparable': paper_comparable" in src
+
+
 # ---- run identity ----------------------------------------------------------
 
 def test_run_tag_isolates_same_basename():
@@ -357,6 +421,10 @@ TESTS = [
     ("preflight: missing or empty artifact raises", test_preflight_rejects_missing_and_empty_files),
     ("consistency: query ids == exclusion keys, qrels covered", test_query_and_exclusion_key_sets_must_agree),
     ("consistency: encoded ids match source as sets", test_encoded_query_ids_must_match_source),
+    ("artifacts: excluded=None for MS MARCO", test_excluded_none_is_for_benchmarks_with_no_exclusion_map),
+    ("artifacts: excluded=None cannot weaken BRIGHT", test_excluded_none_does_not_weaken_bright),
+    ("artifacts: MS MARCO checks ids before searching", test_msmarco_evaluator_checks_ids_before_searching),
+    ("artifacts: paper comparison requires 6,980", test_msmarco_paper_comparison_requires_official_query_count),
     ("identity: run tag isolates same basename", test_run_tag_isolates_same_basename),
     ("identity: collect_results rejects foreign/non-finite", test_collect_results_rejects_foreign_or_nonfinite),
     ("orchestration: empty domain selection exits nonzero", test_empty_domain_selection_exits_nonzero),

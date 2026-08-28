@@ -1070,6 +1070,79 @@ in every domain, so qrels denominators are unaffected.
 conclusions included — was computed without exclusion filtering and must be re-run before
 it is comparable to published BRIGHT results.**
 
+### P-ANCE-01 — job 9566838 / 0.1683 is QUARANTINED, non-reportable
+
+Not a result. Do not cite it, compare against it, or use it as a "prior run for
+reference". Six independent grounds, any one of which is disqualifying:
+
+1. **Pre-exclusion.** Computed before BRIGHT `excluded_ids` filtering existed
+   (`P-PRE-01`). Not comparable to any published BRIGHT number.
+2. **Unknown data provenance.** Mined against derived artifacts that predate the code
+   that reads them (`P-PRE-02`); what corpus/queries/qrels produced it cannot be
+   reconstructed.
+3. **Unproven refresh.** "1 ANN refresh" rests on a log line, not an artifact. The
+   inferencer was an unsupervised `Popen` and nothing counted consumed rounds, so a
+   run that trained entirely on base-model negatives was indistinguishable from ANCE.
+4. **No run manifest.** Nothing binds the number to a checkpoint, a base model, a
+   step count or a code revision.
+5. **Possible label corruption.** The miner promoted positives to negatives when a
+   query's top-200 was all-positive, and the loader padded a short group with the
+   positive itself.
+6. **Unseeded.** Neither the orchestrator nor the trainer applied `config.seed`, so the
+   run is not reproducible even in principle.
+
+It is also filed inconsistently: `CLAUDE.md`, `AGENTS.md` and `docs/GPU_CHECKLIST.md`
+record it as **BRIGHT NDCG@10**, while `bug_fixes.md` records it as **MS MARCO
+MRR@10** in a table whose target is the paper's 0.330. The same number cannot be both.
+
+**Replacement requirement.** An ANCE number is reportable only when all of:
+`fresh_rounds_consumed >= 1` in the run manifest; `[run] validated:` printed by
+`assert_training_succeeded`; and a summary written by `scripts/run_all_evals.py` over
+all twelve domains carrying `eval_artifact_sha256` and `training_manifest`:
+
+```bash
+EVAL_REQUIRE_EXISTING=1 EVAL_DOMAINS=all EVAL_MODEL_PATH=<checkpoint> \
+  sbatch scripts/launchers/run_evaluate_singularity.sh
+```
+
+---
+
+### P-ANCE-02 — GRASS has no run manifest, no training log and no success gate
+
+Found while pinning optimizer parity between the BRIGHT ANCE and naive GRASS arms.
+**Recorded, deliberately not fixed** — larger than the ANCE repair it surfaced in.
+
+**Symptom.** `scripts/run_grass.py` calls `log_startup_config` and nothing else: no
+`build_run_manifest`, no `prepare_output_dir`, no `training_log.jsonl`, no
+`assert_training_succeeded`. So a GRASS run leaves no fingerprint, no data hashes, no
+step trajectory and no ranking probe, and a run that took zero useful steps is
+indistinguishable from one that trained.
+
+**Why it matters.** ANCE now proves it refreshed and trained; the arm it is compared
+against proves nothing. `run_all_evals.py` records `training_manifest: null` for a
+GRASS checkpoint, so a GRASS number cannot be bound to the configuration that
+produced it the way an ANCE number now can. The comparison is only as strong as its
+weaker arm.
+
+**Consequence carried today.** Optimizer parity between ANCE and naive GRASS is enforced by a
+CPU test (`tests/ance_optimizer_parity_test.py`) rather than by two manifests
+agreeing at runtime, because GRASS has no manifest to record its spec in. The spec is
+printed by `helpers.build_adamw` on both sides, so a log comparison is possible, but
+nothing durable is written on the GRASS side.
+
+**Also unfixed.** `run_grass.py:392` discards `clip_grad_norm_`'s return, so GRASS
+logs no pre-clipping gradient norm at all — the diagnostic ANCE now hard-fails on.
+`run_fast_grass.py:377` and `run_async_fast_grass_train.py:281` keep the ambient
+bitsandbytes branch that was removed from `run_grass.py`, so any future comparison
+involving those arms can still fork on package availability.
+
+**Later fix.** Give `run_grass.py` the same treatment the baselines received at P12:
+manifest, fresh-start gate, diagnostics callback, success assertion. Note that adding
+a manifest forks the GRASS fingerprint, so it must land before a GRASS run is used
+for a reported number, not after.
+
+---
+
 ### P-PRE-02 — the derived artifacts on disk predate the current code
 
 **Symptom.** `$DATA_BASE_DIR/data/processed/train_queries.jsonl` (Jan 30) holds 244,970 VL +

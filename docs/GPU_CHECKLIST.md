@@ -195,19 +195,42 @@ sbatch scripts/launchers/run_ance_singularity.sh
 |---|---|
 | allocation | `gpu-a100`, **2 GPUs** (Trainer GPU 0 / Inferencer GPU 1), `--time=10:00:00` |
 | smoke flag | none |
-| checkpoint cadence | `save_steps: 500` |
+| checkpoint cadence | `save_steps: 1000` (= the ANN refresh interval *m*) |
 
 The startup block reports **`total_epochs`**, not `num_epochs` — the ANCE recipes have no
-`num_epochs` key.
+`num_epochs` key. Startup now fails before encoding unless PyTorch sees at least two GPUs.
 
-**Success signal**
+**Success signal.** Exit 0 is not success: the run must prove it refreshed and that
+it trained.
+
 ```bash
-grep 'GPU(s) detected' logs/ance_<jobid>.out          # must say 2 GPU(s)
-grep 'Initial data written to' logs/ance_<jobid>.out  # initial mine completed
-ls $MODELS/ance_mixed_bge_m3/checkpoint-500/
+grep 'GPU(s) detected' logs/ance_<jobid>.out            # must say 2 GPU(s)
+grep 'Initial round committed' logs/ance_<jobid>.out    # base-model round 0
+grep 'round .* — swapping' logs/ance_<jobid>.out        # a refresh was CONSUMED
+grep 'checkpoint-derived round(s) consumed' logs/ance_<jobid>.out
+grep '\[run\] validated:' logs/ance_<jobid>.out         # assert_training_succeeded
 ```
 
-Prior run for reference: job 9566838 reached NDCG@10 = 0.1683 with 1 ANN refresh.
+Any of these is a hard failure, and the job exits nonzero:
+
+| log line | meaning |
+|---|---|
+| `inferencer exited with code N` | no refresh; the run degenerated to static negatives |
+| `REFUSED round N` | a round could not prove it belongs to this run |
+| `never fabricates a negative` | a query could not supply an ANN negative; round discarded |
+| `non-finite loss` | diverged; no checkpoint written |
+| `non-finite gradient norm` | backward overflowed; no optimizer step or checkpoint written |
+
+⚠️ **Job 9566838 / 0.1683 is quarantined and must not be used as a reference point.**
+See `P-ANCE-01` in `CONSOLIDATION_STATUS.md`.
+
+**Reporting.** `train_ance.py` runs no in-job BRIGHT evaluation. The only reportable
+path is:
+
+```bash
+EVAL_REQUIRE_EXISTING=1 EVAL_DOMAINS=all EVAL_MODEL_PATH=$MODELS/ance_mixed_bge_m3 \
+  sbatch scripts/launchers/run_evaluate_singularity.sh
+```
 
 ---
 
@@ -345,8 +368,7 @@ blocker is data, and the job **cannot fetch it itself**:
 
 - `run_ance_msmarco_singularity.sh` exports `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1`;
 - `prepare_msmarco_full_corpus` / `_tevatron_train` / `_dev` call `load_dataset()` on
-  `Tevatron/msmarco-passage-corpus` and `Tevatron/msmarco-passage`, **two of them with
-  `streaming=True`**, which cannot work offline under any circumstances;
+  two separately pinned Tevatron repositories, **two of them with `streaming=True`**;
 - `msmarco_dev_qrels.txt` is not in either dataset at all — the `validation` split has no
   `positive_passages`.
 
@@ -357,17 +379,25 @@ blocker is data, and the job **cannot fetch it itself**:
 wget https://raw.githubusercontent.com/castorini/anserini-tools/master/topics-and-qrels/qrels.msmarco-passage.dev-subset.txt \
      -O /scratch/$USER/dense-retrieval-SOTA/data/processed/msmarco_dev_qrels.txt
 
-# 2. warm the HF cache so the offline job can read it
-export HF_HOME=/scratch/$USER/dense-retrieval-SOTA/data/bright
-python -c "
-from datasets import load_dataset
-load_dataset('Tevatron/msmarco-passage-corpus', split='train', trust_remote_code=True)
-load_dataset('Tevatron/msmarco-passage', split='train')
-load_dataset('Tevatron/msmarco-passage', split='validation')"
+# 2. build the four derived files while network access is available. The Python
+#    snippet reads both immutable revisions from config/config.yaml.
+export DATA_BASE_DIR=/scratch/$USER/dense-retrieval-SOTA
+export PYTHONPATH=$PWD/src
+python - <<'PY'
+from data.preprocessor import BRIGHTPreprocessor, set_msmarco_revisions
+from utils.helpers import load_config
+
+cfg = load_config()['data']['msmarco_reproduction']
+set_msmarco_revisions(passage=cfg['passage_revision'],
+                      corpus=cfg['corpus_revision'])
+p = BRIGHTPreprocessor()
+p.prepare_msmarco_full_corpus()
+p.prepare_msmarco_tevatron_train()
+p.prepare_msmarco_dev()
+PY
 ```
 
-The streaming calls will still not work from a cold cache inside the offline job. If they
-fail, generate the four processed files on a login node instead and let the job find them:
+The offline GPU job consumes the generated artifacts and does not contact Hugging Face:
 `msmarco_corpus.jsonl`, `msmarco_train_queries.jsonl`, `msmarco_train_qrels.txt`,
 `msmarco_dev_queries.jsonl` under `$PROC`. `run_setup` skips whatever already exists.
 
@@ -424,6 +454,44 @@ EVAL_DOMAINS=all sbatch scripts/launchers/run_evaluate_singularity.sh
 Use **`gpu-a100`, not `gpu-a100-small`** — the small partition ran 2.11 s/it and could not fit
 four domains inside its 4 h cap. Per-domain `{domain}_results.json` is written as each domain
 finishes, so a timeout is resumable by passing only the gaps via `EVAL_DOMAINS`.
+
+---
+
+## Paper-fidelity ANCE — two expanded-triplet epoch equivalents
+
+Not a rung of the BRIGHT ladder. This runs our ANCE code from Microsoft's 60K warm-up
+for the optimizer-step budget of two epochs over 20 pairwise triplets/query (~250K
+steps on the expected 400,782 records). A fresh ANN round may restart the shuffled
+loader partway through; the claim is total exposure, not two fixed-pool passes. It is
+an explicitly hardware-constrained validation, not a 600K claim.
+
+```bash
+ANCE_RECIPE=ance_paper sbatch scripts/launchers/run_ance_msmarco_singularity.sh
+
+EVAL_RECIPE=ance_paper EVAL_MODEL_PATH=<released-ANCE-600K> \
+  sbatch scripts/launchers/eval_msmarco_singularity.sh
+EVAL_RECIPE=ance_paper EVAL_MODEL_PATH=<released-BM25-warm-up-60K> \
+  sbatch scripts/launchers/eval_msmarco_singularity.sh
+EVAL_RECIPE=ance_paper EVAL_MODEL_PATH=$MODELS/ance_paper_roberta \
+  sbatch scripts/launchers/eval_msmarco_singularity.sh
+```
+
+Prerequisites: MS MARCO built on the cluster (`P-PRE-03` blocks it locally), and
+both `data.msmarco_reproduction.{passage,corpus}_revision` values pinned in
+`config/config.yaml`. No checkpoint conversion is needed.
+
+**Success signals:** the released 600K evaluator preflight has `reproduction_pass: true`;
+our trained checkpoint beats the locally evaluated warm-up MRR@10, retains Recall@1000
+>= 0.949, consumes at least one checkpoint-derived ANN round, and prints
+`[run] validated:` after the full runtime-derived budget.
+
+A miss by the **released 600K checkpoint preflight** means the evaluator or artifact
+setup is wrong, and the same fault would corrupt `ance_msmarco`. A local checkpoint
+that passes that preflight but misses the local acceptance criteria is a training result,
+not an evaluator failure.
+
+See `docs/ance_implementation_details.md` for the exact Microsoft/local configuration
+table, expected 250,488-step calculation, and required hardware-limitation wording.
 
 ---
 

@@ -64,6 +64,7 @@ def get_path(key: str, model_name: str = None) -> Path:
         # get_path returned None and train_ance.py:161 raised TypeError on
         # `None / "ann_data"` seconds into the job.
         "temp_ance_msmarco": base / "temp_ance_msmarco_workdir",
+        "temp_ance_paper": base / "temp_ance_paper_workdir",
         "temp_grass": base / "temp_grass_workdir",
         # async Fast-GRASS handoff root: temp_fast_grass_workdir/async_mining/
         "temp_fast_grass": base / "temp_fast_grass_workdir",
@@ -96,14 +97,22 @@ def get_training_context(training_type: str = "inbatch") -> Dict[str, Any]:
             if cfg.exists() or cfg.is_symlink():
                 final_base_model = str(chosen_snapshot)
 
+    model_cfg = effective_model_config(config, recipe)
     return {
         "args": recipe,
         "base_model": final_base_model,
-        "max_q": config['model']['query_max_len'],
-        "max_p": config['model']['passage_max_len'],
-        "pooling": config['model'].get('pooling', 'cls'),
-        "normalize": config['model'].get('normalize', False),
-        "temperature": config['model'].get('temperature', 0.02),
+        # Per-recipe when declared, global otherwise. Read through ctx, never from
+        # config['model'] directly, or a recipe override would apply in training and
+        # silently not in encoding.
+        "max_q": model_cfg['query_max_len'],
+        "max_p": model_cfg['passage_max_len'],
+        "model_cfg": model_cfg,
+        # From the EFFECTIVE config, not the global block: a recipe that overrides the
+        # objective's geometry would otherwise apply it in training and silently not in
+        # encoding. No existing recipe declares these, so this is a no-op for them.
+        "pooling": model_cfg.get('pooling', 'cls'),
+        "normalize": model_cfg.get('normalize', False),
+        "temperature": model_cfg.get('temperature', 0.02),
         "processed_dir": get_path("processed"),
         "output_dir": get_path("models", recipe['model_name']),
         "cache_dir": str(get_path("bright").resolve())
@@ -172,7 +181,24 @@ def log_startup_config(recipe_name: str, ctx: Dict[str, Any], recipe: Dict[str, 
 
 
 def encode_to_pickle(model_path, input_file, output_pkl, is_query, ctx, config):
-    """Run Tevatron encode subprocess and save embeddings to a pickle file."""
+    """Run Tevatron encode subprocess and save embeddings to a pickle file.
+
+    The paper-fidelity ANCE arm branches here and nowhere else. Its encoder carries a
+    projection head that Tevatron's encode driver cannot load -- the driver rebuilds a
+    stock DenseModel, so the head would be silently dropped and every embedding would
+    be a bare CLS. Because BOTH sides emit the same ``(embeddings, ids)`` pickle, this
+    single branch serves every consumer: the ANCE miner, the MS MARCO evaluator and the
+    BRIGHT evaluators all call this function and none of them needs a paper branch.
+    """
+    if (ctx.get('args') or {}).get('paper_fidelity'):
+        sys.path.append(str(Path(__file__).resolve().parent.parent.parent / 'scripts'))
+        from ance_paper import encode_jsonl_to_pickle
+        encode_jsonl_to_pickle(
+            model_path, input_file, output_pkl, is_query=is_query,
+            max_len=ctx['max_q'] if is_query else ctx['max_p'],
+            batch_size=ctx['args']['per_device_eval_batch_size'])
+        return
+
     cmd = [
         sys.executable, '-m', 'tevatron.retriever.driver.encode',
         '--output_dir', str(output_pkl.parent),
@@ -186,14 +212,18 @@ def encode_to_pickle(model_path, input_file, output_pkl, is_query, ctx, config):
         '--pooling', ctx['pooling'],
         '--normalize', str(ctx['normalize']),
     ]
+    # Lengths come from ctx, which has already applied any recipe override. Reading
+    # config['model'] here again would encode at the global cap while training used
+    # the recipe's, and nothing downstream would notice.
     if is_query:
-        q_len = str(config['model'].get('query_max_len', 128))
+        q_len = str(ctx.get('max_q') or config['model'].get('query_max_len', 128))
         try:
             subprocess.run(cmd + ['--encode_is_query', '--query_max_len', q_len], check=True)
         except subprocess.CalledProcessError:
             subprocess.run(cmd + ['--encode_is_qry', '--q_max_len', q_len], check=True)
     else:
-        subprocess.run(cmd + ['--passage_max_len', str(config['model'].get('passage_max_len', 512))], check=True)
+        p_len = str(ctx.get('max_p') or config['model'].get('passage_max_len', 512))
+        subprocess.run(cmd + ['--passage_max_len', p_len], check=True)
 
 
 def build_faiss_index(corpus_pkl_path):
@@ -238,8 +268,49 @@ def set_seed(seed: int):
         _torch.cuda.manual_seed_all(seed)
 
 
+# ── The optimizer both compared arms must share ──────────────────────────────
+#
+# BRIGHT ANCE and GRASS are compared to isolate NEGATIVE SELECTION, so every other
+# moving part has to be pinned. The optimizer was not: run_grass.py chose between
+# `bnb.optim.AdamW8bit` and `torch.optim.AdamW` on whether bitsandbytes happened to
+# import, so installing it as a transitive dependency would have switched one arm to
+# a quantized optimizer with no visible signal. Betas and eps were also left implicit
+# on both sides, which matches only for as long as torch's defaults do not move.
+
+ADAMW_BETAS = (0.9, 0.999)
+ADAMW_EPS = 1e-8
+
+
+def build_adamw(params, *, lr, weight_decay, label):
+    """The one optimizer for the compared arms. Returns ``(optimizer, spec)``.
+
+    Every hyperparameter is explicit, including the two that are usually left to
+    torch's defaults, so a future change to those defaults cannot silently move one
+    arm. ``spec`` is what the caller prints and records; comparing two specs is how
+    the arms are shown to agree.
+
+    Deliberately NOT configurable. A different optimizer class is a different
+    experiment, and a knob here is exactly how the arms would drift apart again.
+    """
+    lr, weight_decay = float(lr), float(weight_decay)
+    optimizer = torch.optim.AdamW(params, lr=lr, betas=ADAMW_BETAS, eps=ADAMW_EPS,
+                                  weight_decay=weight_decay)
+    spec = {"label": label, "optimizer": "torch.optim.AdamW", "lr": lr,
+            "betas": list(ADAMW_BETAS), "eps": ADAMW_EPS,
+            "weight_decay": weight_decay}
+    print(f"[optim] {label}: {spec['optimizer']} lr={lr} betas={ADAMW_BETAS} "
+          f"eps={ADAMW_EPS} weight_decay={weight_decay}", flush=True)
+    return optimizer, spec
+
+
+def optimizer_specs_agree(a, b):
+    """Fields on which two arms must match. `label` names the arm, so it is excluded."""
+    keys = [k for k in ("optimizer", "lr", "betas", "eps", "weight_decay")]
+    return {k: a.get(k) for k in keys} == {k: b.get(k) for k in keys}
+
+
 def encode_batch_tensor(model, tokenizer, texts, device, max_len, batch_size,
-                        *, requires_grad, autocast_enabled=True):
+                        *, requires_grad, autocast_enabled=True, normalize=True):
     """
     Single in-process encoder for GRASS. Encodes texts in mini-batches into
     L2-normalised CLS embeddings, returned as a torch.Tensor on `device`.
@@ -269,8 +340,13 @@ def encode_batch_tensor(model, tokenizer, texts, device, max_len, batch_size,
         with grad_ctx, torch.autocast(device_type='cuda', dtype=torch.bfloat16,
                                       enabled=use_autocast):
             out = model(**inputs)
-        embs = out.last_hidden_state[:, 0, :]
-        embs = torch.nn.functional.normalize(embs, dim=-1)
+        # A model that already pools returns the embedding itself (the paper ANCE
+        # encoder returns norm(embeddingHead(CLS))); an HF backbone returns a
+        # ModelOutput to take CLS from.
+        embs = (out.last_hidden_state[:, 0, :]
+                if hasattr(out, 'last_hidden_state') else out)
+        if normalize:
+            embs = torch.nn.functional.normalize(embs, dim=-1)
         all_embs.append(embs)
     return torch.cat(all_embs, dim=0)
 
@@ -480,7 +556,10 @@ def check_eval_artifacts(domain, qrels, excluded, *, query_ids=None,
     """Cross-artifact consistency at the evaluation boundary.
 
     * query ids == exclusion-map keys -- a query missing from the map is scored with
-      no exclusions at all, silently reproducing pre-filter numbers;
+      no exclusions at all, silently reproducing pre-filter numbers. ``excluded=None``
+      declares that this benchmark HAS no exclusion map (MS MARCO) and skips only
+      this check; it is not a way to opt a BRIGHT domain out of exclusion filtering,
+      and `load_excluded_ids` raises on a missing file so BRIGHT cannot reach it;
     * qrels query ids are covered by the query set -- a judged query that is never
       retrieved would otherwise contribute an invisible zero;
     * encoded ids == source ids, AS SETS -- the encoder may reorder, but a query it
@@ -496,13 +575,14 @@ def check_eval_artifacts(domain, qrels, excluded, *, query_ids=None,
         query_ids = _read_query_ids(queries_file)
     source = {str(q) for q in query_ids}
 
-    keys = {str(q) for q in excluded}
-    if keys != source:
-        raise ValueError(
-            f"[{domain}] query set and excluded_ids keys disagree: {len(source)} "
-            f"queries, {len(keys)} exclusion entries; queries with no entry: "
-            f"{_id_sample(source - keys)}; entries with no query: "
-            f"{_id_sample(keys - source)}")
+    if excluded is not None:
+        keys = {str(q) for q in excluded}
+        if keys != source:
+            raise ValueError(
+                f"[{domain}] query set and excluded_ids keys disagree: {len(source)} "
+                f"queries, {len(keys)} exclusion entries; queries with no entry: "
+                f"{_id_sample(source - keys)}; entries with no query: "
+                f"{_id_sample(keys - source)}")
 
     judged = {str(q) for q in qrels}
     if not judged <= source:
@@ -837,7 +917,8 @@ def build_run_manifest(recipe_name, ctx, recipe, *, data_files, world_size,
         # THIS run" check is an mtime comparison and not a date parse.
         "started_at_epoch": now.timestamp(),
         "seed": config.get('seed', 42),
-        "effective_config": {"recipe": dict(recipe), "model": dict(config['model'])},
+        "effective_config": {"recipe": dict(recipe),
+                             "model": effective_model_config(config, recipe)},
         "base_model": resolved,
         "base_model_configured": configured,
         "base_model_exists": bool(resolved and Path(resolved).exists()),
@@ -1046,6 +1127,39 @@ def _finite(value) -> bool:
 # what of the text survives truncation. Everything else in a training recipe (batch
 # size, LR, epochs) cannot change how a finished checkpoint encodes text.
 ENCODING_CONTRACT = ("pooling", "normalize", "query_max_len", "passage_max_len")
+
+
+# Model settings a recipe may override. Sequence lengths and the objective's
+# geometry: everything downstream reads through effective_model_config, so a key
+# added here becomes part of the manifest, the fingerprint and the eval cache
+# identity at once. No existing recipe declares any of these, which is what makes
+# adding one a byte-level no-op for every arm but the declarer.
+_MODEL_OVERRIDE_KEYS = ('query_max_len', 'passage_max_len', 'pooling', 'normalize',
+                        'temperature')
+
+
+def effective_model_config(config, recipe=None):
+    """The model settings a run ACTUALLY uses: globals, with recipe overrides applied.
+
+    Sequence lengths are global by default because every BGE arm shares one encoding
+    contract. The paper-fidelity ANCE arm does not: RoBERTa on MS MARCO wants q64/p512
+    where BRIGHT wants q1024/p512, and inheriting the global caps would make the
+    reproduction cost BGE-M3 money.
+
+    The same applies to the objective's geometry. `normalize` and `temperature` are
+    global because every BGE arm trains scaled cosine; the paper arm trains raw
+    unscaled dot, and inheriting the globals would make its manifest and its embedding
+    cache identity describe an objective it does not use.
+
+    A recipe that declares none of these keys gets `dict(config['model'])` back
+    unchanged, byte for byte, which is what keeps every existing manifest fingerprint
+    stable.
+    """
+    model = dict(config['model'])
+    for key in _MODEL_OVERRIDE_KEYS:
+        if recipe and recipe.get(key) is not None:
+            model[key] = recipe[key]
+    return model
 
 
 def load_training_manifest(model_path):
@@ -1401,13 +1515,16 @@ def _probe_encoder(model):
     return model
 
 
-def ranking_probe(model, tokenizer, triples, device, max_q, max_p, batch_size=8) -> Dict[str, Any]:
+def ranking_probe(model, tokenizer, triples, device, max_q, max_p, batch_size=8,
+                  normalize=True) -> Dict[str, Any]:
     """Positive-negative margin and ranking accuracy on a fixed probe set.
 
     Explicitly eval() + no_grad, entry mode restored in `finally`: a probe must not
     leave dropout off for the next training step. Encoding goes through
     encode_batch_tensor, so pooling and normalization match training exactly
-    (CLS + L2, per config.model.pooling / normalize).
+    (CLS + L2, per config.model.pooling / normalize). `normalize=False` measures the
+    margin in raw dot space, which is what the paper-fidelity ANCE arm trains in --
+    an L2-normalized probe there would report a different geometry than the loss.
     """
     if not triples:
         raise ValueError("ranking_probe needs at least one triple")
@@ -1423,12 +1540,12 @@ def ranking_probe(model, tokenizer, triples, device, max_q, max_p, batch_size=8)
     encoder.eval()
     try:
         with torch.no_grad():
-            q = encode_batch_tensor(encoder, tokenizer, [t[0] for t in triples],
-                                    device, max_q, batch_size, requires_grad=False)
-            p = encode_batch_tensor(encoder, tokenizer, [t[1] for t in triples],
-                                    device, max_p, batch_size, requires_grad=False)
-            n = encode_batch_tensor(encoder, tokenizer, [t[2] for t in triples],
-                                    device, max_p, batch_size, requires_grad=False)
+            enc = lambda texts, ml: encode_batch_tensor(
+                encoder, tokenizer, texts, device, ml, batch_size,
+                requires_grad=False, normalize=normalize)
+            q = enc([t[0] for t in triples], max_q)
+            p = enc([t[1] for t in triples], max_p)
+            n = enc([t[2] for t in triples], max_p)
             margin = ((q * p).sum(-1) - (q * n).sum(-1)).float()
     finally:
         if was_training:

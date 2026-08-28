@@ -36,6 +36,12 @@ data:
   msmarco:
     name: "sentence-transformers/msmarco-distilbert-margin-mse-mean-dot-v1"
     subset: "triplet"
+  msmarco_reproduction:
+    # These are separate repositories, so they require separate immutable revisions.
+    # The passage revision supplies train/dev; the corpus revision supplies all 8.8M
+    # passage ids/texts. Derived-file SHA-256 values are also recorded in each run.
+    passage_revision: "330a160b40a739d4c07d52c7ce562e2c549214c0"
+    corpus_revision: "21a2e1a8c6e7b1747c92f82cd2259a97077dc48d"
 
 # --- Training Recipes ---
 training:
@@ -334,9 +340,21 @@ training:
   ance:
     base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_mixed_bge_m3"
     model_name: "ance_mixed_bge_m3"
-    train_group_size: 2       # 1 negative — matches original ANCE paper (Table 3)
-    mining_depth: 200
-    total_epochs: 3           # async design: Trainer runs continuously; Inferencer refreshes in parallel
+    train_group_size: 2       # 1 explicit mined negative — paper: "uniformly sample one
+                              # negative from ANN top 200". Under the shared BGE-M3/
+                              # Tevatron objective the effective in-batch pool is 127 = 64*2-1:
+                              # that 1 mined negative plus 126 passages belonging to
+                              # other examples, which the pinned loss does NOT mask. This is
+                              # ANCE-style mining, not Microsoft's pairwise RoBERTa reproduction.
+    mining_depth: 200         # paper Table 7 "TopKNeg"
+    total_epochs: 2           # MATCHED to the GRASS arms (grass/fast_grass/async all run
+                              # num_epochs 2 at batch 64, group 2), so the BRIGHT table
+                              # compares negative SELECTION at an equal optimizer-step
+                              # budget. steps_per_epoch is floor(n/batch), matching
+                              # run_grass.py:332 and the trainer's own drop_last=True.
+                              # The reference ANCE is step-budgeted and far longer
+                              # (0.330 MRR@10 reported at 600K steps), so this is a
+                              # lower bound on ANCE, not ANCE at convergence.
     learning_rate: 1e-5
     batch_size: 64
     per_device_eval_batch_size: 512
@@ -345,10 +363,14 @@ training:
     warmup_ratio: 0.1
     weight_decay: 0.01
     max_grad_norm: 1.0
-    gradient_checkpointing: false
-    save_steps: 500
-    save_total_limit: 1
-    logging_steps: 100
+    save_steps: 1000          # THIS IS THE ANN REFRESH INTERVAL m, not a convenience:
+                              # saving a checkpoint is what triggers the Inferencer
+                              # ("update the ANN index once every m batches, i.e. with
+                              # checkpoint f_k"). Hold it constant across the sweep.
+                              # Matches async_fast_grass.async_mine_every_steps and its
+                              # documented 1000-2000 range; ~10 checkpoints over the
+                              # 2-epoch budget, which also bounds disk without a pruner.
+    logging_steps: 100        # also the trainer's ready-marker poll interval
     eval_top_k: 10
     data_gen_poll_interval: 60
     corpus_file: "reasonir_corpus.jsonl"
@@ -368,7 +390,11 @@ training:
     model_name: "ance_msmarco_bge_m3"
     train_group_size: 2                 # Paper: 1 negative per positive (Table 3)
     mining_depth: 200                   # Paper: top-200 ANN (Table 7)
-    total_epochs: 3                     # ~6 ANN refreshes to match paper (1 epoch ≈ 2 refreshes at bs=64)
+    total_epochs: 3                     # NOT matched to GRASS: this arm is compared to the
+                                        # PAPER, not to GRASS. See eval_metric below —
+                                        # this recipe is a BGE port sanity check, not a
+                                        # reproduction of 0.330/0.959 (which is RoBERTa +
+                                        # BM25 warm-up + LAMB at 600K steps, upstream).
     learning_rate: 5e-6                 # Paper LAMB 3e-6; AdamW equiv ~5e-6 for BGE-M3
     batch_size: 64
     per_device_eval_batch_size: 256     # full A100 (80GB) — ~35min per encode vs 2.3h at 64
@@ -376,12 +402,15 @@ training:
     warmup_ratio: 0.06                  # Paper: 5000 steps / ~83k total ≈ 6%
     weight_decay: 0.01
     max_grad_norm: 1.0
-    save_steps: 1250                    # Paper: 10k batches @ bs=8 → scaled: 10000×8/64=1250
-    save_total_limit: 3
+    save_steps: 1250                    # ANN refresh interval m. Paper: 10k batches @ bs=8
+                                        # → 10000*8/64 = 1250. One full-corpus encode of
+                                        # 8.8M passages takes hours, so the Inferencer
+                                        # cannot keep this cadence; expect 1-2 rounds.
     logging_steps: 500
-    eval_top_k: 1000
+    eval_top_k: 1000                    # Recall@1000 needs the full depth; MRR@10 is
+                                        # computed by truncating the run to 10.
     data_gen_poll_interval: 60
-    gradient_checkpointing: false
+    bf16: true
     corpus_file: "msmarco_corpus.jsonl"
     train_queries_file: "msmarco_train_queries.jsonl"
     train_qrels_file: "msmarco_train_qrels.txt"
@@ -391,7 +420,70 @@ training:
     eval_corpus_file: "msmarco_corpus.jsonl"
     eval_queries_file: "msmarco_dev_queries.jsonl"
     eval_qrels_file: "msmarco_dev_qrels.txt"
-    eval_metric: "recip_rank"
+    eval_metric: "mrr_at_10"            # scripts/eval_msmarco.py reports MRR@10 AND
+                                        # Recall@1000, the paper's two headline metrics.
+                                        # The old "recip_rank" at depth 1000 was MRR@1000.
+
+
+  ance_paper:
+    # PAPER-FIDELITY ANCE — a reproduction of Microsoft's MS MARCO passage result,
+    # NOT a GRASS control arm. Runs through the SAME entry point, miner, round
+    # handoff and supervision as `ance`; only the model, loss and optimizer differ.
+    #   python scripts/train_ance.py --recipe ance_paper
+    # Model/objective/mining values below follow microsoft/ANCE. The explicitly
+    # documented precision and training-budget deviations fit the DelftBlue limit.
+    paper_fidelity: true
+    model_name: "ance_paper_roberta"
+    # The released BM25 warm-up @60K. `from_pretrained` maps roberta.*/embeddingHead.*/
+    # norm.* directly onto AnceEncoder — no conversion step. The released ANCE @600K is
+    # an EVALUATION reference only; add its weight hash below when the artifact arrives.
+    base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/ance_bm25_warmup_60k"
+    forbidden_init_sha256: []   # optional deny-list; populate with released 600K weight sha256
+
+    # Objective geometry. These OVERRIDE model.* — without them the manifest and the
+    # embedding cache would inherit normalize:true / temperature:0.02 and describe a
+    # scaled-cosine objective this arm does not use (model/models.py:77-81).
+    normalize: false
+    temperature: 1.0            # explicit no-scaling; upstream has no temperature
+    pooling: "cls"              # masked_mean_or_first, use_mean=False (models.py:43-49)
+    query_max_len: 64           # --max_query_length; 128 is the BM25 warm-up ONLY
+    passage_max_len: 512        # --max_seq_length (run_train.sh:25)
+
+    train_group_size: 21        # 20 mined negatives: --negative_sample 20. The miner's
+                                # existing n_negs = train_group_size - 1 yields 20, and
+                                # the trainer expands each into its own triplet
+                                # (--triplet, data/msmarco_data.py:337-362).
+    mining_depth: 200           # --topk_training (run_train.sh:93)
+    batch_size: 64              # 8 x 2 x 4 GPUs upstream; one A100 fits 64 directly
+    learning_rate: 1.0e-6       # run_train.sh:36
+    lamb_eps: 1.0e-8            # --adam_epsilon, passed to LAMB as eps
+    weight_decay: 0.0           # upstream default; LAMB folds it into adam_step
+    max_grad_norm: 1.0
+    warmup_steps: 5000          # ABSOLUTE (run_train.sh:33), not a ratio
+    total_epochs: 2             # two expanded-dataset epoch EQUIVALENTS (~250K steps
+                                # for Tevatron's ~400,782 records). A fresh ANN round
+                                # can restart the shuffled loader partway through.
+                                # Hardware-constrained middle ground vs paper's 600K.
+    save_steps: 10000           # --save_steps: THE ANN REFRESH INTERVAL m
+    logging_steps: 100          # --logging_steps; also the round-poll interval
+    bf16: true                  # DEVIATION: upstream used fp16 + dynamic loss scaling.
+                                # bf16 needs no GradScaler, so there are no skipped
+                                # updates and global_step IS the successful-step count.
+    per_device_eval_batch_size: 256
+    dataloader_num_workers: 4
+    eval_top_k: 1000
+    data_gen_poll_interval: 60
+
+    corpus_file: "msmarco_corpus.jsonl"
+    train_queries_file: "msmarco_train_queries.jsonl"
+    train_qrels_file: "msmarco_train_qrels.txt"
+    mixture_dir: "msmarco_training_mixture"
+    temp_workdir: "temp_ance_paper"
+    setup_mode: "tevatron_msmarco"
+    eval_corpus_file: "msmarco_corpus.jsonl"
+    eval_queries_file: "msmarco_dev_queries.jsonl"
+    eval_qrels_file: "msmarco_dev_qrels.txt"
+    eval_metric: "mrr_at_10"
 
 
 # --- Evaluation Settings (Restored & Cleaned) ---

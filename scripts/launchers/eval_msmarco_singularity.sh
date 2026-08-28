@@ -22,9 +22,18 @@ export PYTORCH_ALLOC_CONF="expandable_segments:True"
 export CUDA_VISIBLE_DEVICES=0
 
 CONTAINER="/scratch/${USER}/containers/pytorch_2.1.sif"
-MODEL_DIR="/scratch/${USER}/dense-retrieval-SOTA/models/ance_msmarco_bge_m3"
-MODEL=$(singularity exec --bind /scratch/${USER}:/scratch/${USER} ${CONTAINER} \
-    python -c "from transformers.trainer_utils import get_last_checkpoint; print(get_last_checkpoint('${MODEL_DIR}'))")
+EVAL_RECIPE="${EVAL_RECIPE:-ance_msmarco}"
+DEFAULT_MODEL_DIR="/scratch/${USER}/dense-retrieval-SOTA/models/ance_msmarco_bge_m3"
+
+# An explicit path may be a released/final model without checkpoint-* children.
+# With no override, preserve the old behavior and select the latest BGE checkpoint.
+if [ -n "${EVAL_MODEL_PATH:-}" ]; then
+    MODEL="${EVAL_MODEL_PATH}"
+else
+    MODEL=$(singularity exec --bind /scratch/${USER}:/scratch/${USER} "${CONTAINER}" \
+        python -c 'from transformers.trainer_utils import get_last_checkpoint; import sys; print(get_last_checkpoint(sys.argv[1]))' \
+        "${DEFAULT_MODEL_DIR}")
+fi
 echo "Evaluating checkpoint: ${MODEL}"
 
 # get_last_checkpoint prints the string "None" when MODEL_DIR holds no checkpoint;
@@ -37,10 +46,10 @@ fi
 singularity exec --nv \
     --bind /scratch/${USER}:/scratch/${USER} \
     --bind /home/${USER}:/home/${USER} \
-    ${CONTAINER} \
+    "${CONTAINER}" \
     python -u scripts/eval_msmarco.py \
-        --model_path ${MODEL} \
-        --recipe ance_msmarco
+        --model_path "${MODEL}" \
+        --recipe "${EVAL_RECIPE}"
 
 EXIT_CODE=$?
 

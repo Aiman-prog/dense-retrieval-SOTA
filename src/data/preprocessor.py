@@ -32,6 +32,20 @@ REQUIRED_MIXTURE_FIELDS = ("query_id", "query", "positive_passages", "negative_p
 
 # The component files run_setup derives from, in read order. Explicit rather than a
 # glob: a stray or legacy *.jsonl left in the directory used to be silently ingested.
+# The training/dev and corpus sources are different Hugging Face repositories and their
+# commit hashes are unrelated. Keeping two revisions prevents an apparently pinned
+# configuration from passing one repository's SHA to the other.
+MSMARCO_REVISIONS = {'passage': None, 'corpus': None}
+
+
+def set_msmarco_revisions(*, passage, corpus):
+    """Pin the two Tevatron dataset repositories independently."""
+    if not passage or not corpus:
+        raise ValueError("MS MARCO reproduction requires passage and corpus revisions")
+    MSMARCO_REVISIONS.update(passage=str(passage), corpus=str(corpus))
+    return dict(MSMARCO_REVISIONS)
+
+
 MIXTURE_FILES = ("train_hq.jsonl", "train_msmarco.jsonl", "train_vl.jsonl")
 
 # An MS-MARCO-only experiment declares itself; it is never inferred from the fact
@@ -337,6 +351,7 @@ class BRIGHTPreprocessor:
         cache = Path(cache_dir) if cache_dir else get_path("bright")
         print("📥 Loading MS MARCO full corpus (~8.8M passages)...", flush=True)
         dataset = load_dataset(dataset_name, split='train', cache_dir=str(cache),
+                               revision=MSMARCO_REVISIONS['corpus'],
                                trust_remote_code=True)
         corpus_df = pd.DataFrame({'doc_id': dataset['docid'], 'text': dataset['text']})
         print(f"   Loaded {len(corpus_df):,} passages", flush=True)
@@ -366,7 +381,8 @@ class BRIGHTPreprocessor:
         skipped = 0
 
         stream = load_dataset(dataset_name, split='train', cache_dir=str(cache),
-                              trust_remote_code=True, streaming=True)
+                              revision=MSMARCO_REVISIONS['passage'], trust_remote_code=True,
+                              streaming=True)
         with atomic_write(mixture_path) as f:
             for entry in stream:
                 if not _reproduction_record_ok(entry):
@@ -411,7 +427,8 @@ class BRIGHTPreprocessor:
         queries = {}
         qrel_rows = []
         stream = load_dataset(dataset_name, split='validation', cache_dir=str(cache),
-                              trust_remote_code=True, streaming=True)
+                              revision=MSMARCO_REVISIONS['passage'], trust_remote_code=True,
+                              streaming=True)
         for entry in stream:
             qid = str(entry['query_id'])
             queries[qid] = entry['query']

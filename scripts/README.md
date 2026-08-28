@@ -17,6 +17,22 @@ it sets `DATA_BASE_DIR`, binds `/scratch`, and runs the entry point inside the c
 Rungs 4→5→6 are three generations of the same miner, each built to cut the previous one's cost.
 They are not alternatives to pick between; each imports from the one before it.
 
+The ANCE row is **ANCE-style asynchronous ANN mining under the same BGE-M3/Tevatron
+contrastive objective as naive GRASS**. At batch 64/group 2, each query sees one explicit
+ANN-mined negative plus 126 cross-example passages. That shared 127-negative objective makes
+the BRIGHT comparison about mining, but it is not Microsoft's pairwise RoBERTa/LAMB
+reproduction. Optimizer parity is currently guaranteed only for ANCE versus **naive GRASS**;
+Fast-GRASS and async Fast-GRASS retain their own optimizer paths.
+
+The paper's own recipe is reachable as `train_ance.py --recipe ance_paper` — the same entry
+point, miner and round handoff, with RoBERTa + a projection head, pairwise NLL over raw dot
+and LAMB swapped in (`scripts/ance_paper.py`). It is **not a rung of the ladder**: it is a
+separate MS MARCO experiment whose job is to show this implementation is faithful, so that
+the BRIGHT row can keep GRASS's objective and stay a comparison of mining. See
+`docs/ance_implementation_details.md` (appendix). It runs two epoch-equivalent budgets over 20
+expanded triplets/query (~250K steps), not Microsoft's 600K, because DelftBlue supplies
+one miner GPU and a 24-hour allocation; this limitation must accompany its result.
+
 ## Comparing rows 0, 1 and 2 honestly
 
 **In-batch vs cross-batch is a comparison of two complete recipes, not a controlled
