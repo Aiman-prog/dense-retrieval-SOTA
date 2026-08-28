@@ -17,6 +17,45 @@ it sets `DATA_BASE_DIR`, binds `/scratch`, and runs the entry point inside the c
 Rungs 4→5→6 are three generations of the same miner, each built to cut the previous one's cost.
 They are not alternatives to pick between; each imports from the one before it.
 
+## Comparing rows 0, 1 and 2 honestly
+
+**In-batch vs cross-batch is a comparison of two complete recipes, not a controlled
+test of negative-pool size.** At the configured settings the two differ in
+optimizer-step budget as much as in pool size:
+
+| | queries/step | passages/step | negatives per query | optimizer steps (same data, 2 epochs) |
+|---|---|---|---|---|
+| in-batch | 64 | 128 | 127 (17 in each epoch's 9-query final batch) | **16x more** |
+| cross-batch | 1,024 (512 x 2 ranks) | 2,048 | 2,047 (constant; the final step is padded) | 1x |
+
+One optimizer step consumes 1,024 queries instead of 64, so cross-batch takes 1/16 as
+many steps over the same mixture. Any difference in NDCG is attributable to the pool
+**and** to that budget. Neither arm isolates the other, so no causal claim about pool
+size can be drawn from the pair. Each run records both numbers as
+`negative_pool_size` and `optimizer_steps_planned` in its `run_manifest.json`, so the
+comparison can always be restated from the artifacts rather than from memory.
+
+Cross-batch is **distributed large-batch training**: the pool is one step's 2,048
+passages gathered across 2 ranks by `DistributedContrastiveLoss`. Negatives are not
+carried across optimizer steps, and `gradient_accumulation_steps` does not enlarge the
+pool — GradCache pools inside a single `training_step`. Launched without `torchrun`,
+`is_ddp` is false, the all-gather disappears and the pool silently halves;
+`check_batch_invariants` refuses that rather than training on it.
+
+**BM25 vs dense requires the same domains.** `run_bm25_evals.py` always evaluates all
+twelve `evaluation.eval_domains`, while `run_evaluate_singularity.sh` defaults to the
+four lambda-pilot domains. A default dense run is therefore **not** comparable to the
+BM25 baseline. Use `EVAL_DOMAINS=all`, and pass `--compare_bm25 <bm25 summary.json>` to
+`run_all_evals.py`, which refuses to write a summary when the two domain sets differ and
+when their corpus/query/qrel/exclusion hashes differ. Hashless legacy BM25 summaries are
+also refused because their evaluation inputs cannot be verified.
+
+Incidental false negatives (a passage that is a positive for two different queries, both
+landing in the same batch) affect every dense row and grow with the pool. Measured, not
+assumed: `python scripts/dev/check_neg_contamination.py` reports it alongside explicit
+negative-in-qrels contamination. The one explicit hard negative per query
+(`train_group_size: 2`) is unchanged by any of this.
+
 ## One evaluator
 
 There is a single BRIGHT evaluator. `EVAL_MODEL_PATH` chooses the model — it is **required**:

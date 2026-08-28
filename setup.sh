@@ -88,8 +88,11 @@ ${CONTAINER_CMD} exec "${CONTAINER}" \
 ${CONTAINER_CMD} exec "${CONTAINER}" \
     pip install --user --no-deps https://github.com/texttron/tevatron/archive/8f31cd8.tar.gz
 
+# Commit, not main: `main` is a moving target and GradCache reports a static 0.1.0 on
+# every commit, so a bad pull is undetectable from the version alone. Same SHA as
+# requirements.txt; `scripts/patch_tevatron.py --verify` prints what is installed.
 ${CONTAINER_CMD} exec "${CONTAINER}" \
-    pip install --user --no-deps https://github.com/luyug/GradCache/archive/main.tar.gz
+    pip install --user --no-deps https://github.com/luyug/GradCache/archive/906f03835fbc183132a9db32612a9e8f180ca3b4.tar.gz
 
 if ${CONTAINER_CMD} exec "${CONTAINER}" python -c "import tevatron" 2>/dev/null; then
     echo "✅ Tevatron installed successfully"
@@ -106,7 +109,7 @@ echo "🔧 Applying Tevatron patches..."
 TEVATRON_BASE="${HOME}/.local/lib/python3.10/site-packages/tevatron"
 
 # Patch 1: Run the external patch script
-echo "  → Patch 1/3: Running patch_tevatron.py script..."
+echo "  → Patch 1/4: Running patch_tevatron.py script..."
 if [ -f "scripts/patch_tevatron.py" ]; then
     ${CONTAINER_CMD} exec "${CONTAINER}" python3 scripts/patch_tevatron.py "${TEVATRON_BASE}"
 else
@@ -115,7 +118,7 @@ else
 fi
 
 # Patch 2: Add torch import to train.py
-echo "  → Patch 2/3: Adding torch import to train.py..."
+echo "  → Patch 2/4: Adding torch import to train.py..."
 TRAIN_FILE="${TEVATRON_BASE}/retriever/driver/train.py"
 if [ -f "${TRAIN_FILE}" ]; then
     if grep -q "^import torch" "${TRAIN_FILE}"; then
@@ -133,7 +136,7 @@ fi
 echo ""
 
 # --- Step 6: Verify patches ---
-echo "  → Patch 3/3: Verifying all patches..."
+echo "  → Patch 3/4: Verifying all patches..."
 PATCH_OK=true
 
 # Check that NO active Qwen/multimodal references remain
@@ -150,6 +153,14 @@ if grep -q "^import torch" "${TRAIN_FILE}"; then
     echo "  ✅ torch imported in train.py"
 else
     echo "  ❌ torch not imported in train.py"
+    PATCH_OK=false
+fi
+
+# Section 2.4 + the full documented checklist, and the resolved dependency versions.
+# The greps above cover 2.1/2.2/2.3 only; --verify also catches bytecode compiled from
+# a pre-patch source and prints the GradCache/Tevatron commits a result depends on.
+echo "  → Patch 4/4: Verifying the documented patch set (sections 2.1-2.4)..."
+if ! ${CONTAINER_CMD} exec "${CONTAINER}" python3 scripts/patch_tevatron.py --verify "${TEVATRON_BASE}"; then
     PATCH_OK=false
 fi
 

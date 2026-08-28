@@ -26,7 +26,9 @@ sys.path.append(str(project_root / 'src'))
 
 # Import your helpers and classes
 from utils.helpers import (load_config, get_data_base_dir, get_path,
-                           model_run_tag)
+                           model_run_tag, load_training_manifest, RUN_MANIFEST_NAME,
+                           encoding_contract_drift, training_provenance,
+                           eval_artifact_hashes)
 from data.preprocessor import BRIGHTPreprocessor
 from data.bright_loader import BRIGHTLoader
 
@@ -133,11 +135,43 @@ def collect_results(model_path, domains, config):
     return rows, invalid
 
 
+def validate_bm25_comparison(bm25, domains, artifact_hashes, summary_path):
+    """Return durable comparison provenance, or reject an unprovable comparison."""
+    bm25_domains = bm25.get('domains', [])
+    if set(bm25_domains) != set(domains):
+        raise ValueError(
+            f"Domain sets differ, so the two runs are not comparable. "
+            f"dense={sorted(domains)}, bm25={sorted(bm25_domains)}")
+
+    bm25_hashes = bm25.get('eval_artifact_sha256')
+    if not bm25_hashes:
+        raise ValueError(
+            "BM25 summary has no eval_artifact_sha256, so its corpus, queries, "
+            "qrels and exclusions cannot be proven identical to the dense run. "
+            "Regenerate the BM25 summary with the current runner.")
+    if bm25_hashes != artifact_hashes:
+        differing = sorted(d for d in domains
+                           if bm25_hashes.get(d) != artifact_hashes.get(d))
+        raise ValueError(
+            "The two runs scored different evaluation artifacts, so their macro "
+            f"scores are not comparable. Differing domains: {differing}")
+
+    return {'run_tag': bm25.get('run_tag'), 'model': bm25.get('model'),
+            'macro_ndcg_cut_10': bm25.get('macro_ndcg_cut_10'),
+            'summary': str(Path(summary_path).resolve()),
+            'eval_artifacts_verified': True}
+
+
 def main():
     config = load_config()
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model_path", type=str, help="Path to model")
+    parser.add_argument("--compare_bm25", type=str, default=None,
+                        help="Path to a BM25 summary.json. Requires the two runs to cover "
+                             "the SAME domain set before this summary is written -- the "
+                             "eval launcher defaults to four pilot domains, which is not "
+                             "comparable to the twelve-domain BM25 baseline.")
     parser.add_argument("--domains", type=str, default=None,
                         help="comma-separated subset (default: evaluation.eval_domains)")
     parser.add_argument("--results_json", type=str, default=None,
@@ -145,6 +179,11 @@ def main():
                              "summary.json)")
     parser.add_argument("--require_existing", action="store_true",
                         help="fail instead of preparing missing BRIGHT domain files")
+    parser.add_argument("--allow-config-drift", dest="allow_config_drift",
+                        action="store_true",
+                        help="evaluate despite the checkpoint having been trained under "
+                             "different pooling/normalization/sequence lengths. The exact "
+                             "old and new values are recorded in the summary.")
     args = parser.parse_args()
 
     # 1. Resolve Model Path
@@ -221,15 +260,68 @@ def main():
               f"missing or invalid results: {absent}")
         sys.exit(1)
 
-    macro = sum(r['ndcg_cut_10'] for r in rows) / len(rows)
-    print("\n" + "=" * 60)
+    # The checkpoint's encoding contract. A model trained with CLS pooling at
+    # passage_max_len 512 does not mean the same thing encoded mean-pooled at 128,
+    # and nothing else was catching that. Training DATA hashes are recorded but not
+    # enforced: a checkpoint stays valid when its mixture is no longer on disk.
+    train_manifest = load_training_manifest(model_path)
+    model_cfg = config['model']
+    drift = encoding_contract_drift(train_manifest, model_cfg)
+    if train_manifest is None:
+        print(f"⚠️  No {RUN_MANIFEST_NAME} for {model_path}; this checkpoint predates "
+              f"run manifests. Recording training_manifest: null.")
+    if drift and not args.allow_config_drift:
+        print("\n❌ Evaluation settings differ from the checkpoint's training contract:")
+        for key, vals in sorted(drift.items()):
+            print(f"   {key}: trained={vals['checkpoint']!r}  evaluating={vals['evaluation']!r}")
+        print("   Re-run with matching config/config.yaml model settings, or pass "
+              "--allow-config-drift to accept it (the difference is recorded).")
+        sys.exit(1)
+    if drift:
+        print(f"⚠️  Proceeding with --allow-config-drift: {sorted(drift)}")
+
+    artifact_hashes = eval_artifact_hashes(get_path("processed"), domains)
+
+    # Before anything is computed or written, exactly like the incomplete-run guard.
+    compared_to = None
+    if args.compare_bm25:
+        bm25 = json.loads(Path(args.compare_bm25).read_text())
+        try:
+            compared_to = validate_bm25_comparison(
+                bm25, domains, artifact_hashes, args.compare_bm25)
+        except ValueError as exc:
+            print(f"\n❌ {exc}")
+            sys.exit(1)
+
+    # Macro-average every metric trec_eval returned, not just NDCG@10. Recall@1000 and
+    # MRR are already in each row; they were computed and stored but never surfaced.
+    # Recall stays at depth 1000 to match ANCE, which reports Recall@1k (Table 1) and
+    # Recall@100 for the document task (Table 6). ANCE's @10 cutoffs are on MRR and
+    # NDCG, never on recall, so a Recall@10 here would be comparable to nothing.
+    def _macro(key):
+        vals = [r[key] for r in rows if key in r]
+        return (sum(vals) / len(vals)) if vals else None
+
+    macro = _macro('ndcg_cut_10')
+    macro_recall = _macro('recall_1000')
+    macro_mrr = _macro('recip_rank')
+
+    def _fmt(v):
+        return f"{v:.4f}" if v is not None else "  n/a "
+
+    print("\n" + "=" * 72)
     print(f"  {run_tag}")
-    print("=" * 60)
+    print("=" * 72)
+    print(f"  {'domain':<22} {'NDCG@10':>9} {'R@1000':>9} {'MRR':>9}   queries")
+    print("-" * 72)
     for r in rows:
-        print(f"  {r['domain']:<22} NDCG@10={r['ndcg_cut_10']:.4f}  "
-              f"({r['num_queries']} queries)")
-    print(f"  {'MACRO NDCG@10':<22} {macro:.4f}  over {len(rows)} domains")
-    print("=" * 60)
+        print(f"  {r['domain']:<22} {_fmt(r.get('ndcg_cut_10')):>9} "
+              f"{_fmt(r.get('recall_1000')):>9} {_fmt(r.get('recip_rank')):>9}   "
+              f"{r['num_queries']}")
+    print("-" * 72)
+    print(f"  {'MACRO':<22} {_fmt(macro):>9} {_fmt(macro_recall):>9} "
+          f"{_fmt(macro_mrr):>9}   over {len(rows)} domains")
+    print("=" * 72)
 
     # Default under the run tag, so two models of the same basename cannot
     # overwrite each other's summary. Only ever written for a complete run.
@@ -244,6 +336,12 @@ def main():
         'domains': domains,
         'per_domain': rows,
         'macro_ndcg_cut_10': macro,
+        'macro_recall_1000': macro_recall,
+        'macro_recip_rank': macro_mrr,
+        'compared_to': compared_to,
+        'training_manifest': training_provenance(train_manifest),
+        'eval_artifact_sha256': artifact_hashes,
+        'config_drift': drift or None,
     }, indent=2))
     print(f"📄 Summary written to {out}")
 

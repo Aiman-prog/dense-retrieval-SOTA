@@ -161,13 +161,16 @@ def _bm25_main_over_empty_processed_dir():
     import importlib
     bm25 = importlib.import_module('run_bm25_evals')
     empty = Path(tempfile.mkdtemp())
-    original = bm25.get_path, bm25.check_and_prepare_bm25_data
+    original = (bm25.get_path, bm25.check_and_prepare_bm25_data, bm25.preflight_java)
     bm25.get_path = lambda key, *a, **k: empty / key
     bm25.check_and_prepare_bm25_data = lambda *a, **k: None   # needs the HF cache
+    # This test is about the exit status after every domain fails, not about Java.
+    # The preflight is exercised directly in bm25_provenance_test.py.
+    bm25.preflight_java = lambda: "<stubbed>"
     try:
         return bm25.main()
     finally:
-        bm25.get_path, bm25.check_and_prepare_bm25_data = original
+        bm25.get_path, bm25.check_and_prepare_bm25_data, bm25.preflight_java = original
 
 
 def test_bm25_returns_nonzero_when_a_domain_fails():

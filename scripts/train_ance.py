@@ -6,7 +6,6 @@ import random
 import argparse
 import subprocess
 import pickle
-import shutil
 import numpy as np
 import faiss
 from pathlib import Path
@@ -19,7 +18,8 @@ sys.path.append(str(project_root / 'src'))
 
 from utils.helpers import get_path, get_training_context, load_config, \
                           encode_to_pickle, build_faiss_index, count_jsonl_examples, \
-                          _load_qrels, evaluate_bright, log_startup_config
+                          _load_qrels, evaluate_bright, log_startup_config, \
+                          build_run_manifest, prepare_output_dir
 from data.preprocessor import (BRIGHTPreprocessor, MIXTURE_FILES,
                                MSMARCO_ONLY_FILES, require_derived_artifacts,
                                require_mixture_files)
@@ -166,15 +166,20 @@ def main():
 
     output_model_dir = get_path("models") / ctx['args']['model_name']
 
-    # Remove checkpoints from any previous run. get_last_checkpoint() returns the
-    # highest step-numbered checkpoint in the directory, so a stale checkpoint-17202
-    # from a prior run will permanently shadow all new checkpoint-500/1000/... saves,
-    # keeping the inferencer stuck forever on the old weights.
-    stale = sorted(output_model_dir.glob("checkpoint-*"))
-    if stale:
-        for ckpt in stale:
-            shutil.rmtree(ckpt, ignore_errors=True)
-        print(f"[ANCE] Removed {len(stale)} stale checkpoint(s) from {output_model_dir.name}", flush=True)
+    # Remove checkpoints from any previous run and publish the run manifest. Shared
+    # with in-batch and cross-batch. get_last_checkpoint() returns the highest
+    # step-numbered checkpoint in the directory, so a stale checkpoint-17202 from a
+    # prior run would permanently shadow all new checkpoint-500/1000/... saves,
+    # keeping the inferencer stuck forever on the old weights. overwrite=True keeps
+    # ANCE's existing behaviour: it always starts fresh and never refuses a dir.
+    manifest = build_run_manifest(
+        recipe, ctx, ctx['args'],
+        data_files=sorted(mixture_dir.glob("*.jsonl")),
+        world_size=1,
+        negative_pool_size=ctx['args']['batch_size'] * ctx['args']['train_group_size'] - 1,
+        optimizer_steps=max_steps,
+    )
+    prepare_output_dir(output_model_dir, manifest, overwrite=True)
 
     # ── INITIAL ENCODE + MINE (once, before training starts) ─────────────────
     existing_jsonl = list(initial_data_dir.glob("*.jsonl"))

@@ -20,7 +20,7 @@ export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 
 # Java 11 required by pyserini/Lucene (see README for setup)
-export JAVA_HOME="/scratch/${USER}/.jdk21"
+export JAVA_HOME="/home/${USER}/.jdk21"   # P9: the /scratch copy was written during the BeeGFS fault and is broken
 export JVM_PATH="${JAVA_HOME}/lib/server/libjvm.so"
 export PATH="${JAVA_HOME}/bin:${PATH}"
 

@@ -1,5 +1,6 @@
 """Helper utility functions for Path and Context Management."""
 
+import time
 import sys
 import subprocess
 import pickle
@@ -9,7 +10,9 @@ import yaml
 import os
 import contextlib
 import hashlib
+import shutil
 import tempfile
+import datetime
 import numpy as np
 import faiss
 import torch
@@ -348,6 +351,19 @@ def count_jsonl_examples(pattern: str) -> int:
         with open(path) as f:
             total += sum(1 for line in f if line.strip())
     return total
+
+
+def _sha256(path) -> str:
+    """Streamed sha256 of a file's bytes.
+
+    Streamed rather than read-whole: the corpus and mixture files this hashes are
+    hundreds of megabytes, and a manifest must never be the reason a job OOMs.
+    """
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1 << 20), b''):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 @contextlib.contextmanager
@@ -732,3 +748,806 @@ def evaluate_bright(ctx, config, model_path, temp_workdir_key=None):
     mean_ndcg = sum(eval_summary) / len(eval_summary)
     print(f"\n📈 Final Mean NDCG@10: {mean_ndcg:.4f} over {len(eval_summary)} domains",
           flush=True)
+
+
+# ── Run identity: manifest, fresh-start gate, success validation ─────────────
+#
+# Tevatron's driver resumes unconditionally -- `train.py` does
+# `trainer.train(resume_from_checkpoint=(get_last_checkpoint(output_dir) is not None))`
+# and `--overwrite_output_dir` does not suppress it. A re-run into a finished
+# output directory therefore resumes, executes ZERO optimizer steps, rewrites the
+# stale weights and exits 0. Clearing `checkpoint-*` is what makes
+# `get_last_checkpoint` return None, so fresh-by-default needs no Tevatron patch.
+
+RUN_MANIFEST_NAME = "run_manifest.json"
+TRAINING_LOG_NAME = "training_log.jsonl"
+
+# Every package whose version can change a result. Absent ones record None rather
+# than raising: a manifest must never be the reason a job dies.
+# Distribution names, not import names: GradCache installs as "GradCache" (a
+# "grad-cache" lookup silently records null), and faiss ships as faiss-cpu locally
+# but faiss-gpu on the cluster, so both are asked for.
+_MANIFEST_PACKAGES = ("torch", "transformers", "accelerate", "datasets", "peft",
+                      "safetensors", "tevatron", "GradCache", "pyserini",
+                      "faiss-cpu", "faiss-gpu")
+
+# What resume compatibility is judged on. Deliberately excludes code revision and
+# dependency versions: a docstring edit must not invalidate a resumable run, and
+# those are recorded separately so a mismatch is still visible.
+_FINGERPRINT_KEYS = ("effective_config", "base_model", "data_sha256", "seed",
+                     "world_size")
+
+
+class RunDirectoryError(RuntimeError):
+    """The output directory cannot be used as requested."""
+
+
+def _package_versions(names=_MANIFEST_PACKAGES) -> Dict[str, Any]:
+    from importlib import metadata
+    out = {}
+    for name in names:
+        try:
+            out[name] = metadata.version(name)
+        except Exception:                                          # noqa: BLE001
+            out[name] = None
+    return out
+
+
+def _code_revision() -> Dict[str, Any]:
+    """Git HEAD and whether the tree is dirty, or nulls outside a checkout."""
+    root = Path(__file__).resolve().parent.parent.parent
+    def git(*args):
+        try:
+            out = subprocess.run(["git", "-C", str(root), *args],
+                                 capture_output=True, text=True, check=False)
+            return out.stdout.strip() if out.returncode == 0 else None
+        except Exception:                                          # noqa: BLE001
+            return None
+    head = git("rev-parse", "HEAD")
+    status = git("status", "--porcelain")
+    return {"git_sha": head,
+            "git_dirty": None if status is None else bool(status.strip())}
+
+
+def build_run_manifest(recipe_name, ctx, recipe, *, data_files, world_size,
+                       negative_pool_size, optimizer_steps, extra=None) -> Dict[str, Any]:
+    """Everything needed to say what produced a checkpoint. Pure but for hashing.
+
+    ``data_files`` is the tuple ``require_mixture_files`` already returns, so the
+    manifest hashes exactly the files training will read -- not a glob that might
+    resolve differently later.
+    """
+    config = load_config()
+    files = []
+    for path in data_files:
+        path = Path(path)
+        files.append({"name": path.name,
+                      "bytes": path.stat().st_size,
+                      "lines": count_jsonl_examples(str(path)),
+                      "sha256": _sha256(path)})
+
+    configured = recipe.get('base_model') or config['model']['base_model']
+    resolved = ctx.get('base_model')
+    now = datetime.datetime.now(datetime.timezone.utc)
+
+    manifest = {
+        "recipe": recipe_name,
+        "started_at": now.isoformat(),
+        # Kept alongside the ISO form purely so the "was a checkpoint written by
+        # THIS run" check is an mtime comparison and not a date parse.
+        "started_at_epoch": now.timestamp(),
+        "seed": config.get('seed', 42),
+        "effective_config": {"recipe": dict(recipe), "model": dict(config['model'])},
+        "base_model": resolved,
+        "base_model_configured": configured,
+        "base_model_exists": bool(resolved and Path(resolved).exists()),
+        "data_files": files,
+        "data_sha256": [f["sha256"] for f in files],
+        "code_revision": _code_revision(),
+        "dependencies": _package_versions(),
+        "world_size": int(world_size),
+        "negative_pool_size": int(negative_pool_size),
+        "optimizer_steps_planned": int(optimizer_steps),
+    }
+    if extra:
+        manifest.update(extra)
+
+    payload = {k: manifest[k] for k in _FINGERPRINT_KEYS}
+    manifest["fingerprint"] = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, default=str).encode('utf-8')).hexdigest()
+    return manifest
+
+
+def _fingerprint_diff(prior, manifest) -> str:
+    """Which fingerprint inputs disagree -- the error is useless without this."""
+    differing = [k for k in _FINGERPRINT_KEYS if prior.get(k) != manifest.get(k)]
+    return ", ".join(differing) if differing else "(unreadable prior manifest)"
+
+
+def prepare_output_dir(output_dir, manifest, *, resume=False, overwrite=False) -> Path:
+    """Gate the output directory, then publish the manifest. The one entry point.
+
+    Fresh is the default. Resume requires ``--resume`` AND a prior manifest whose
+    fingerprint matches; an incompatible directory is refused rather than silently
+    reused, because the failure it causes -- training zero steps and re-saving old
+    weights -- otherwise reports success.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = output_dir / RUN_MANIFEST_NAME
+
+    prior, unreadable = None, False
+    if manifest_path.is_file():
+        # An IO error and malformed JSON mean different things and must not share a
+        # branch. Malformed JSON is a corrupt manifest: unreadable-and-blocking is
+        # right, since we cannot tell what produced the directory. An OSError is
+        # /scratch being flaky, and treating THAT as "prior completed, incompatible"
+        # advised --overwrite, which then deletes every checkpoint -- the opposite of
+        # what a crashed run needs. Retry it, and fail loudly at startup if it stands.
+        raw = {}
+
+        def _read():
+            raw['text'] = manifest_path.read_text()
+
+        if not retry_io(_read, f"read {manifest_path}"):
+            raise RunDirectoryError(
+                f"could not read {manifest_path} after repeated attempts. This is an "
+                f"IO failure, not a configuration mismatch -- do NOT pass --overwrite, "
+                f"which would discard the checkpoints in {output_dir}.")
+        try:
+            prior = json.loads(raw['text'])
+        except ValueError:
+            # Unreadable is treated as present-and-incompatible, never as absent:
+            # "absent" would silently permit a fresh run over unknown state.
+            prior, unreadable = {}, True
+    same = prior is not None and prior.get('fingerprint') == manifest['fingerprint']
+    checkpoints = sorted(output_dir.glob("checkpoint-*"))
+
+    # Only a run that FINISHED is worth protecting. `finished_at` is stamped by
+    # assert_training_succeeded and by nothing else, so its absence means the run died
+    # before producing anything. The manifest is written BEFORE training, so without
+    # this a job that dies at startup locks its own output directory against the very
+    # fix it needs -- which is exactly what happened once the HF cache was seeded and
+    # base_model went from an unresolvable repo id to a real path.
+    # An unreadable manifest stays blocking: we cannot tell what it was.
+    prior_completed = unreadable or bool(prior and prior.get('finished_at'))
+
+    if resume:
+        if prior is None:
+            raise RunDirectoryError(
+                f"--resume was given but {manifest_path} does not exist; there is "
+                f"nothing to resume from. Drop --resume to start fresh.")
+        if not same:
+            raise RunDirectoryError(
+                f"--resume was given but {output_dir} was produced by a different "
+                f"configuration; differing: {_fingerprint_diff(prior, manifest)}. "
+                f"Start fresh with --overwrite, or point at the matching directory.")
+        if not checkpoints:
+            raise RunDirectoryError(
+                f"--resume was given and the manifest matches, but {output_dir} "
+                f"holds no checkpoint-* to resume from.")
+        # A resume needs a baseline, or "did this invocation train?" is unanswerable:
+        # --resume keeps training_log.jsonl, so max(global_step) is the PREVIOUS
+        # run's final step and a run that trains nothing still reads it back as
+        # success. trainer_state.json is HF's own record of where the checkpoint
+        # stopped; without it there is no baseline and the resume is refused.
+        start_step, start_src = _trainer_state_step(output_dir)
+        if start_step < 1:
+            raise RunDirectoryError(
+                f"--resume was given but no checkpoint in {output_dir} carries a "
+                f"readable trainer_state.json, so the invocation start step cannot "
+                f"be established and progress could not be verified afterwards. "
+                f"Start fresh instead of resuming from an unidentifiable state.")
+        _record_invocation(manifest, manifest_path, start_step)
+        print(f"[run] resuming from {len(checkpoints)} checkpoint(s) in "
+              f"{output_dir.name} at step {start_step} ({start_src.name}); "
+              f"fingerprint {manifest['fingerprint'][:12]}",
+              flush=True)
+        return output_dir
+
+    if prior_completed and not same and not overwrite:
+        raise RunDirectoryError(
+            f"{output_dir} already holds a run with a different configuration "
+            f"(differing: {_fingerprint_diff(prior, manifest)}). Pass --overwrite to "
+            f"discard it, or --resume if you meant to continue a matching run.")
+
+    if prior is None and checkpoints and not overwrite:
+        # Checkpoints with no manifest are unidentifiable: they predate this gate, so
+        # nothing says which configuration produced them. Deleting them silently is how
+        # a previous run's artifacts get discarded by someone who only meant to start a
+        # new one -- refuse and make the discard explicit instead.
+        raise RunDirectoryError(
+            f"{output_dir} holds {len(checkpoints)} checkpoint(s) but no "
+            f"{RUN_MANIFEST_NAME}, so they cannot be matched against this run's "
+            f"configuration. Pass --overwrite to discard them, or move them aside "
+            f"first. (--resume needs a manifest and cannot be used here.)")
+
+    if prior is not None and not prior_completed and not same:
+        print(f"[run] discarding an unfinished run's manifest "
+              f"(differing: {_fingerprint_diff(prior, manifest)})", flush=True)
+
+    # ignore_errors=True used to hide this: on EREMEOTEIO (P11) the directory stayed,
+    # get_last_checkpoint() returned its step number, Tevatron resumed from it and the
+    # run still printed "fresh run". Removal is retried, and then VERIFIED by
+    # re-globbing -- the claim being made is that nothing is left to resume from.
+    for ckpt in checkpoints:
+        retry_io(lambda c=ckpt: shutil.rmtree(c), f"remove {ckpt.name}")
+    survivors = sorted(p.name for p in output_dir.glob("checkpoint-*"))
+    if survivors:
+        raise RunDirectoryError(
+            f"could not remove stale checkpoint(s) from {output_dir}: "
+            f"{', '.join(survivors)}. Tevatron would resume from the highest of "
+            f"these and shadow every new save, so this is not a fresh run. Remove "
+            f"them by hand and re-submit.")
+    if checkpoints:
+        print(f"[run] removed {len(checkpoints)} stale checkpoint(s) from "
+              f"{output_dir.name}", flush=True)
+
+    # The log is append-only, so a fresh run into a used directory would inherit the
+    # previous attempt's records. assert_training_succeeded reads max(global_step)
+    # from it, so a run that died at step 50 would report the old run's 3000 and pass.
+    # Kept on --resume, where the earlier records belong to the same run.
+    stale_log = output_dir / TRAINING_LOG_NAME
+    if stale_log.exists():
+        retry_io(stale_log.unlink, f"remove stale {stale_log.name}")
+    if stale_log.exists():
+        raise RunDirectoryError(
+            f"could not remove stale {stale_log.name} from {output_dir}. Its old "
+            f"optimizer steps and ranking probes would be indistinguishable from "
+            f"this fresh invocation and could validate a zero-step run. Remove it "
+            f"by hand and re-submit.")
+
+    _record_invocation(manifest, manifest_path, 0)
+    print(f"[run] fresh run in {output_dir.name}; fingerprint "
+          f"{manifest['fingerprint'][:12]}", flush=True)
+    return output_dir
+
+
+def _safetensors_tensor_count(path) -> int:
+    """Tensors declared in a safetensors header, without loading any weights.
+
+    Reads the 8-byte length prefix and the JSON header only, so a truncated or
+    half-written file fails here instead of at the next job's model load.
+    """
+    with open(path, 'rb') as f:
+        raw = f.read(8)
+        if len(raw) != 8:
+            raise ValueError(f"{path} is shorter than its 8-byte length prefix")
+        length = int.from_bytes(raw, 'little')
+        header = f.read(length)
+        if len(header) != length:
+            raise ValueError(
+                f"{path} header is truncated: declared {length} bytes, read {len(header)}")
+    return len([k for k in json.loads(header) if k != "__metadata__"])
+
+
+def _newest_model_artifact(output_dir):
+    """The model file this run would have written, root first then checkpoints."""
+    candidates = [output_dir] + sorted(output_dir.glob("checkpoint-*"))
+    best = None
+    for directory in candidates:
+        for name in ("model.safetensors", "pytorch_model.bin"):
+            f = directory / name
+            if f.is_file() and (best is None or f.stat().st_mtime > best.stat().st_mtime):
+                best = f
+    return best
+
+
+def _finite(value) -> bool:
+    """True only for a real, finite number. None / NaN / non-numeric are not signals."""
+    try:
+        return value is not None and math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
+# The encoding contract: the only training settings evaluation actually depends on.
+# Pooling and normalization decide what an embedding MEANS, and the two lengths decide
+# what of the text survives truncation. Everything else in a training recipe (batch
+# size, LR, epochs) cannot change how a finished checkpoint encodes text.
+ENCODING_CONTRACT = ("pooling", "normalize", "query_max_len", "passage_max_len")
+
+
+def load_training_manifest(model_path):
+    """The run manifest for a checkpoint, or None for a checkpoint that predates it.
+
+    Resolves from the model directory, or its parent for a `checkpoint-*` subdir.
+    A legacy checkpoint has no manifest and stays evaluable; the caller records
+    training_manifest: null rather than refusing.
+    """
+    model_path = Path(model_path)
+    for candidate in (model_path, model_path.parent):
+        manifest = candidate / RUN_MANIFEST_NAME
+        if manifest.is_file():
+            raw = {}
+
+            def _read():
+                raw['text'] = manifest.read_text()
+
+            if not retry_io(_read, f"read {manifest}"):
+                raise RunDirectoryError(
+                    f"could not read {manifest} after repeated attempts. The "
+                    f"checkpoint's encoding contract cannot be verified, so this "
+                    f"is not treated as a legacy checkpoint.")
+            try:
+                return json.loads(raw['text'])
+            except ValueError as exc:
+                raise RunDirectoryError(
+                    f"{manifest} could not be read as valid JSON; the checkpoint's "
+                    f"encoding contract cannot be verified, so this is not treated "
+                    f"as a legacy checkpoint.") from exc
+        if not model_path.name.startswith("checkpoint-"):
+            break
+    return None
+
+
+def encoding_contract_drift(manifest, model_cfg):
+    """Where the live encoding settings differ from the checkpoint's.
+
+    Deliberately NOT compared: the training data hashes. A checkpoint stays valid
+    when the mixture that produced it is no longer on disk, so requiring equality
+    there would fail good checkpoints. Training provenance is recorded instead.
+    """
+    if not manifest:
+        return {}
+    trained = (manifest.get('effective_config') or {}).get('model') or {}
+    drift = {}
+    for key in ENCODING_CONTRACT:
+        if key not in trained:
+            continue
+        before, after = trained.get(key), model_cfg.get(key)
+        if before != after:
+            drift[key] = {"checkpoint": before, "evaluation": after}
+    return drift
+
+
+def training_provenance(manifest):
+    """What to record about the checkpoint's origin, whether or not it drifted."""
+    if not manifest:
+        return None
+    return {
+        "fingerprint": manifest.get('fingerprint'),
+        "recipe": manifest.get('recipe'),
+        "base_model": manifest.get('base_model'),
+        "final_global_step": manifest.get('final_global_step'),
+        "training_data_sha256": manifest.get('data_sha256'),
+        "encoding_contract": {k: (manifest.get('effective_config') or {})
+                              .get('model', {}).get(k) for k in ENCODING_CONTRACT},
+    }
+
+
+def eval_artifact_hashes(processed_dir, domains):
+    """Digest every file a domain's score depends on, so two runs can be compared.
+
+    Domain-set equality alone does not make a dense and a sparse run comparable: the
+    corpus, queries, judgments or exclusion lists can each have been regenerated
+    between them.
+    """
+    processed_dir = Path(processed_dir)
+    out = {}
+    for domain in sorted(domains):
+        entry = {}
+        for label, name in (("corpus", f"{domain}_corpus.jsonl"),
+                            ("queries", f"{domain}_queries.jsonl"),
+                            ("qrels", f"{domain}_qrels.txt"),
+                            ("excluded", f"{domain}_excluded.json")):
+            path = processed_dir / name
+            entry[label] = _sha256(path) if path.is_file() else None
+        out[domain] = entry
+    return out
+
+
+def _record_invocation(manifest, manifest_path, start_step):
+    """Stamp where THIS invocation began, then publish the manifest.
+
+    `invocation_start_step` is the baseline progress is measured against; a resume
+    inherits the previous run's log, so without it "did this invocation train?"
+    cannot be answered. Neither key is in _FINGERPRINT_KEYS, so recording them
+    cannot invalidate a resumable run.
+    """
+    manifest['invocation_start_step'] = int(start_step)
+    manifest['invocation_started_at'] = datetime.datetime.now(
+        datetime.timezone.utc).isoformat()
+    with atomic_write(manifest_path) as f:
+        json.dump(manifest, f, indent=2, default=str)
+    return manifest
+
+
+def _trainer_state_step(output_dir):
+    """Highest global_step HF itself recorded, from any checkpoint's trainer_state.json.
+
+    Independent of our diagnostics callback, whose writes are best-effort on BeeGFS.
+    Returns (step, source) with step 0 when nothing readable is found.
+    """
+    best, source = 0, None
+    for ckpt in sorted(Path(output_dir).glob("checkpoint-*")):
+        state_file = ckpt / "trainer_state.json"
+        if not state_file.is_file():
+            continue
+        try:
+            step = int(json.loads(state_file.read_text()).get('global_step', 0))
+        except (ValueError, OSError, TypeError):
+            continue
+        if step > best:
+            best, source = step, state_file
+    return best, source
+
+
+def assert_training_succeeded(output_dir, manifest, *,
+                              required_final_step=None) -> Dict[str, Any]:
+    """Refuse to call a run successful without evidence that it trained.
+
+    A clean exit proves nothing here: Tevatron's unconditional resume can finish a
+    run having taken zero optimizer steps and re-saved the weights it started from.
+
+    Success requires NEW progress past this invocation's start step AND reaching
+    the planned step count. `required_final_step` overrides the latter, for a run
+    that is deliberately short; neither baseline passes it.
+    """
+    output_dir = Path(output_dir)
+    log_path = output_dir / TRAINING_LOG_NAME
+    records = []
+    if log_path.is_file():
+        for line in log_path.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                records.append(json.loads(line))
+            except ValueError:
+                # A torn final line: appends are not atomic and a SIGKILL can cut one
+                # mid-write. That is not evidence of a failed run, so skip it rather
+                # than raise a JSONDecodeError the caller cannot interpret.
+                print(f"[diag] skipping an unparseable line in {log_path}",
+                      file=sys.stderr, flush=True)
+
+    steps = [r for r in records if r.get('phase') is None]
+    probes = [r for r in records if r.get('phase') is not None]
+    final_step = max((int(r.get('global_step', 0)) for r in records), default=0)
+
+    # Where this invocation began. Absent on manifests written before this key
+    # existed (job 18816), which is treated as a fresh start at 0.
+    start_step = int(manifest.get('invocation_start_step', 0) or 0)
+    planned = int(manifest.get('optimizer_steps_planned', 0) or 0)
+    target = required_final_step if required_final_step is not None else planned
+
+    # Our own log is written by the diagnostics callback, whose writes are
+    # best-effort on a flaky filesystem. trainer_state.json is written by HF itself
+    # into every checkpoint and carries the same global_step, so it is the
+    # independent witness -- a lost log must not condemn a run that did train.
+    state_step, state_src = _trainer_state_step(output_dir)
+    if state_step > final_step:
+        print(f"[diag] {log_path} holds {final_step} step(s); {state_src} reports "
+              f"{state_step}. Using it as the evidence of training.",
+              file=sys.stderr, flush=True)
+        final_step = state_step
+
+    # Progress, not position. On --resume the log is kept, so max(global_step) is
+    # the PREVIOUS invocation's final step and would pass on its own.
+    if final_step <= start_step:
+        raise RunDirectoryError(
+            f"training reported success with no new optimizer steps: this "
+            f"invocation started at step {start_step} and ended at {final_step}. "
+            f"{log_path} holds {len(steps)} step record(s). A stale checkpoint in "
+            f"{output_dir} that Tevatron resumed from is the usual cause.")
+
+    # Completion. A wall-clock kill or a mid-run crash leaves a real but partial
+    # run, which must not be reported as the configured experiment.
+    if target and final_step < target:
+        raise RunDirectoryError(
+            f"training stopped at step {final_step} of the {target} planned "
+            f"({100.0 * final_step / target:.1f}%); the run is incomplete, not "
+            f"successful. Resume it, or pass an explicit required_final_step to "
+            f"accept a short run deliberately.")
+
+    for r in steps:
+        loss = r.get('loss')
+        if loss is not None and not math.isfinite(float(loss)):
+            raise RunDirectoryError(
+                f"non-finite loss={loss} at step {r.get('global_step')} in "
+                f"{log_path}; the optimization diverged.")
+        # grad_norm warns rather than raises. It is the PRE-clipping norm, so a
+        # transient inf in bf16 is absorbed by max_grad_norm and the step that
+        # followed it was still valid. Failing the run here would discard a whole
+        # training run over a value clipping already handled.
+        gn = r.get('grad_norm')
+        if gn is not None and not math.isfinite(float(gn)):
+            print(f"[diag] non-finite grad_norm={gn} at step {r.get('global_step')} "
+                  f"(pre-clipping; max_grad_norm applies after this)",
+                  file=sys.stderr, flush=True)
+
+    artifact = _newest_model_artifact(output_dir)
+    if artifact is None:
+        raise RunDirectoryError(f"no model.safetensors or pytorch_model.bin under {output_dir}")
+    started = float(manifest['started_at_epoch'])
+    if artifact.stat().st_mtime < started:
+        raise RunDirectoryError(
+            f"{artifact} predates the start of this run "
+            f"({manifest['started_at']}); no new checkpoint was written.")
+
+    directory = artifact.parent
+    if directory.name.startswith("checkpoint-") and not is_valid_checkpoint(directory):
+        raise RunDirectoryError(
+            f"{directory} has no optimizer.pt; the trainer writes it last, so the "
+            f"checkpoint is incomplete.")
+    try:
+        from transformers import AutoConfig
+        AutoConfig.from_pretrained(str(directory))
+    except Exception as e:                                         # noqa: BLE001
+        raise RunDirectoryError(f"{directory} is not loadable: {type(e).__name__}: {e}")
+    if artifact.name == "model.safetensors" and _safetensors_tensor_count(artifact) == 0:
+        raise RunDirectoryError(f"{artifact} declares no tensors")
+
+    # A probe that raised is recorded as {"phase":…, "error":…} so its absence is
+    # never mistaken for a pass -- but it is not a signal. Counting those, in-batch
+    # 14990 shipped {"phase":"begin","error":"TypeError…"} and still validated.
+    # Two probes at the SAME step are one point measured twice, not two points.
+    ok_steps = {
+        int(r.get('global_step', 0)) for r in probes
+        if _finite(r.get('rank_acc')) and _finite(r.get('margin_mean'))}
+    if len(ok_steps) < 2:
+        raise RunDirectoryError(
+            f"the run left {len(ok_steps)} successful ranking probe point(s) at "
+            f"distinct steps (minimum 2), from {len(probes)} probe record(s) in "
+            f"{log_path}. Loss alone is not evidence of learning: trivial negatives "
+            f"give low loss and near-zero gradients.")
+
+    manifest_path = output_dir / RUN_MANIFEST_NAME
+    stored = json.loads(manifest_path.read_text()) if manifest_path.is_file() else dict(manifest)
+    stored.update({
+        "final_global_step": final_step,
+        "finished_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "checkpoint": str(directory),
+        "probe": probes,
+        "probe_ok_steps": sorted(ok_steps),
+    })
+    with atomic_write(manifest_path) as f:
+        json.dump(stored, f, indent=2, default=str)
+
+    print(f"[run] validated: {final_step} optimizer steps, checkpoint {directory.name}, "
+          f"{len(probes)} probe point(s)", flush=True)
+    return stored
+
+
+# ── Learning observability: shared by in-batch, cross-batch and ANCE ─────────
+#
+# Loss, learning rate and the PRE-CLIPPING gradient norm are already computed by
+# HF Trainer -- `grad_norm` in its logs is the return of accelerator.clip_grad_norm_,
+# i.e. the norm before clipping. Nothing new is computed here; the records are
+# merely persisted next to the checkpoint so the trajectory survives checkpoint
+# rotation. The one genuinely missing signal is the fixed-probe ranking metric.
+
+
+def retry_io(op, what, attempts=3, delay=0.5):
+    """Run ``op()``, retrying transient filesystem errors. True if it landed.
+
+    /scratch is BeeGFS and returns EREMOTEIO intermittently. The helper itself reports
+    failure without raising: best-effort diagnostics may ignore False, while critical
+    callers must verify their postcondition and raise. A failed diagnostic write must
+    never end training -- job 14990 died at step 3000 of 10314 because an OSError from
+    a one-line append propagated out of Trainer.log.
+    """
+    for attempt in range(attempts):
+        try:
+            op()
+            return True
+        except OSError as exc:
+            if attempt + 1 == attempts:
+                print(f"[diag] giving up on {what} after {attempts} attempts: "
+                      f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+                return False
+            time.sleep(delay * (2 ** attempt))
+    return False
+
+
+def append_jsonl(path, record) -> bool:
+    """Append one JSON record. Append, not atomic_write: this is a growing log.
+
+    Returns whether the record landed; never raises on an IO failure. See retry_io.
+    """
+    path = Path(path)
+    line = json.dumps(record, ensure_ascii=False, default=str) + '\n'
+
+    def _write():
+        # mkdir here rather than per-record at module scope: it is one metadata
+        # round-trip to a shared filesystem, and it must be inside the retry.
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(line)
+
+    return retry_io(_write, f"append to {path}")
+
+
+def probe_triples_from_mixture(data_files, n=64):
+    """A fixed (query, positive, negative) probe set. Deterministic, no RNG.
+
+    The last ``n`` usable records of the mixture, preferring train_hq.jsonl. These
+    records ARE seen during training, so the probe measures ranking fit rather than
+    generalization -- which is what a fixed-probe signal is for. Held-out retrieval
+    quality is what the BRIGHT evaluation is for, and it stays a separate job.
+    """
+    paths = [Path(p) for p in data_files]
+    chosen = next((p for p in paths if p.name == "train_hq.jsonl"), paths[0] if paths else None)
+    if chosen is None:
+        raise ValueError("probe_triples_from_mixture needs at least one data file")
+
+    from collections import deque
+    keep = deque(maxlen=n)
+    with open(chosen, encoding='utf-8') as f:
+        for line in f:
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            pos, neg = row.get('positive_passages') or [], row.get('negative_passages') or []
+            if not pos or not neg:
+                continue
+            keep.append((str(row.get('query') or ''), str(pos[0].get('text') or ''),
+                         str(neg[0].get('text') or '')))
+    if not keep:
+        raise ValueError(f"no record in {chosen} carries both a positive and a negative")
+    return list(keep)
+
+
+def _probe_encoder(model):
+    """The HF encoder inside whatever wrapper the caller has.
+
+    Tevatron's EncoderModel.forward takes (query=, passage=), not input_ids, so
+    encode_batch_tensor cannot call it directly. Detected by `encode_query`, which
+    EncoderModel defines and a bare HF model does not -- checking for `.encoder`
+    alone would wrongly unwrap XLMRobertaModel, which has an `.encoder` of its own.
+    """
+    model = getattr(model, 'module', model)                  # DistributedDataParallel
+    if hasattr(model, 'encode_query') and hasattr(model, 'encoder'):
+        return model.encoder
+    return model
+
+
+def ranking_probe(model, tokenizer, triples, device, max_q, max_p, batch_size=8) -> Dict[str, Any]:
+    """Positive-negative margin and ranking accuracy on a fixed probe set.
+
+    Explicitly eval() + no_grad, entry mode restored in `finally`: a probe must not
+    leave dropout off for the next training step. Encoding goes through
+    encode_batch_tensor, so pooling and normalization match training exactly
+    (CLS + L2, per config.model.pooling / normalize).
+    """
+    if not triples:
+        raise ValueError("ranking_probe needs at least one triple")
+    if tokenizer is None:
+        # Tevatron builds Trainer without tokenizer=, so the callback kwarg is None on
+        # every Tevatron pipeline. The caller must supply one; a bare TypeError from
+        # deep inside encode_batch_tensor said nothing about why.
+        raise ValueError(
+            "ranking_probe got tokenizer=None -- Tevatron's Trainer carries no "
+            "tokenizer, so the caller must pass one explicitly")
+    encoder = _probe_encoder(model)
+    was_training = encoder.training
+    encoder.eval()
+    try:
+        with torch.no_grad():
+            q = encode_batch_tensor(encoder, tokenizer, [t[0] for t in triples],
+                                    device, max_q, batch_size, requires_grad=False)
+            p = encode_batch_tensor(encoder, tokenizer, [t[1] for t in triples],
+                                    device, max_p, batch_size, requires_grad=False)
+            n = encode_batch_tensor(encoder, tokenizer, [t[2] for t in triples],
+                                    device, max_p, batch_size, requires_grad=False)
+            margin = ((q * p).sum(-1) - (q * n).sum(-1)).float()
+    finally:
+        if was_training:
+            encoder.train()
+    return {
+        "n": len(triples),
+        "margin_mean": float(margin.mean()),
+        "margin_p10": float(margin.quantile(0.10)),
+        "rank_acc": float((margin > 0).float().mean()),
+    }
+
+
+def attach_training_diagnostics(output_dir, probe_fn=None, *, probe_fractions=(0.5,)):
+    """Persist loss/LR/grad-norm and run ``probe_fn`` at >= 2 points.
+
+    Registered by appending to transformers.trainer.DEFAULT_CALLBACKS, which
+    Trainer.__init__ reads. This is the same monkey-patch idiom as
+    patch_tevatron_loss, and it is the only way to reach a Trainer that Tevatron
+    constructs from an argv list. transformers is imported here rather than at
+    module scope so BM25 -- which imports this module -- does not acquire the
+    dependency.
+    """
+    import transformers.trainer as _trainer_module
+    from transformers import TrainerCallback
+
+    if not hasattr(_trainer_module, 'DEFAULT_CALLBACKS'):
+        raise RuntimeError(
+            "transformers.trainer.DEFAULT_CALLBACKS is absent; training diagnostics "
+            "cannot be attached and the run would report success without evidence.")
+
+    log_path = Path(output_dir) / TRAINING_LOG_NAME
+
+    class TrainingDiagnosticsCallback(TrainerCallback):
+        """Loss/LR/pre-clipping grad norm every logging step, plus probe points."""
+
+        def __init__(self):
+            self._probed = set()
+
+        # Rank 0 only: every rank would otherwise interleave lines into one file.
+        @staticmethod
+        def _main(state):
+            return getattr(state, 'is_world_process_zero', True)
+
+        def _run_probe(self, phase, state, kwargs):
+            if probe_fn is None or not self._main(state):
+                return
+            model = kwargs.get('model')
+            tokenizer = kwargs.get('processing_class') or kwargs.get('tokenizer')
+            if model is None:
+                return
+            try:
+                result = probe_fn(model, tokenizer)
+            except Exception as e:                                 # noqa: BLE001
+                # A probe failure must not kill a training run; it is diagnostic.
+                # It is recorded so its absence is never mistaken for a passing probe.
+                result = {"error": f"{type(e).__name__}: {e}"}
+            append_jsonl(log_path, {"global_step": int(state.global_step),
+                                    "phase": phase, **result})
+
+        def on_train_begin(self, args, state, control, **kwargs):
+            self._run_probe("begin", state, kwargs)
+
+        def on_log(self, args, state, control, logs=None, **kwargs):
+            logs = logs or {}
+            if 'loss' not in logs or not self._main(state):
+                return
+            loss = logs['loss']
+            if not math.isfinite(float(loss)):
+                raise RunDirectoryError(
+                    f"non-finite loss={loss} at step {state.global_step}; stopping "
+                    f"rather than saving a diverged checkpoint.")
+            append_jsonl(log_path, {
+                "global_step": int(state.global_step),
+                "epoch": logs.get('epoch'),
+                "loss": loss,
+                "learning_rate": logs.get('learning_rate'),
+                # HF logs the norm returned by clip_grad_norm_, i.e. PRE-clipping.
+                "grad_norm": logs.get('grad_norm'),
+            })
+
+        def on_step_end(self, args, state, control, **kwargs):
+            total = getattr(state, 'max_steps', 0) or 0
+            for fraction in probe_fractions:
+                if fraction in self._probed or total <= 0:
+                    continue
+                if state.global_step >= max(1, int(fraction * total)):
+                    self._probed.add(fraction)
+                    self._run_probe(f"step_{int(fraction * 100)}pct", state, kwargs)
+
+        def on_train_end(self, args, state, control, **kwargs):
+            self._run_probe("end", state, kwargs)
+
+    # Idempotent: a second call must not double every record.
+    _trainer_module.DEFAULT_CALLBACKS[:] = [
+        cb for cb in _trainer_module.DEFAULT_CALLBACKS
+        if getattr(cb, '__name__', '') != 'TrainingDiagnosticsCallback']
+    _trainer_module.DEFAULT_CALLBACKS.append(TrainingDiagnosticsCallback)
+    return log_path
+
+
+def require_recipe_keys(recipe_name, recipe, consumed, optional=()) -> None:
+    """config.yaml is the source of truth: every declared key must be consumed.
+
+    Same contract as require_mixture_files' strict mode, applied to config keys
+    instead of files. An unused key is how `target_batch_size`, `gc_p_chunk_size`,
+    `grad_cache` and `bf16` came to be declared for cross-batch and silently
+    ignored while the code used literals; a missing key is how a recipe rename
+    reaches training as a KeyError mid-job. ``optional`` keys may be absent --
+    cross-batch's LoRA block is opt-in and the recipe declares it only when used.
+    """
+    declared, consumed = set(recipe), set(consumed)
+    missing = sorted(consumed - declared)
+    unused = sorted(declared - consumed - set(optional))
+    if missing or unused:
+        parts = []
+        if missing:
+            parts.append(f"consumed but not declared: {', '.join(missing)}")
+        if unused:
+            parts.append(f"declared but never consumed: {', '.join(unused)}")
+        raise ValueError(
+            f"config.yaml training.{recipe_name} is inconsistent with the code -- "
+            + "; ".join(parts))

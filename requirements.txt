@@ -18,11 +18,21 @@ peft>=0.7.0  # Parameter-efficient fine-tuning
 # --- Dense Retrieval Framework ---
 # NOTE: Install from GitHub to match patched version on HPC
 git+https://github.com/texttron/tevatron.git@8f31cd8  # CRITICAL: Use this exact commit, then apply patches (see DELFTBLUE_SETUP.md)
-git+https://github.com/luyug/GradCache.git  # Required for --grad_cache (cross-batch negatives)
+# PINNED TO A COMMIT, not to main. GradCache's version string is a static 0.1.0 on
+# every commit, so the version pin below would be meaningless -- the commit IS the
+# identity. helpers.patch_tevatron_loss rebinds `SimpleContrastiveLoss` and
+# `DistributedContrastiveLoss` by name inside tevatron.retriever.gc_trainer, so an
+# upstream rename would silently drop temperature scaling rather than fail. This SHA is
+# what the unpinned `main` resolved to in the project venv (recovered from pip's
+# direct_url.json via `python scripts/patch_tevatron.py --verify`), and it is VERIFIED
+# to be what DelftBlue already runs: all 11 files under grad_cache/ are byte-identical
+# to the cluster's copy (installed 2026-02-09 from archive/main.tar.gz). Pinning it
+# therefore freezes the working stack rather than changing it.
+git+https://github.com/luyug/GradCache.git@906f03835fbc183132a9db32612a9e8f180ca3b4  # Required for --grad_cache (cross-batch negatives)
 
 # --- Vector Search & Retrieval ---
 faiss-cpu  # Local dev (Mac). HPC uses faiss-gpu via requirements-hpc.txt + Singularity
-pyserini>=0.22.0
+pyserini==1.5.0  # exact: the Lucene version, and so index compatibility, rides on it
 pytrec-eval-terrier  # Python bindings for TREC evaluation (maintained fork)
 
 # --- Utilities ---

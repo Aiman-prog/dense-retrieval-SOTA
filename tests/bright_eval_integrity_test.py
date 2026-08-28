@@ -27,7 +27,9 @@ sys.path.insert(0, str(project_root / 'scripts'))
 
 from evaluation.trec_eval_wrapper import TrecEvalWrapper          # noqa: E402
 from utils.helpers import (                                       # noqa: E402
-    check_eval_artifacts, model_run_tag, require_eval_files,
+    RUN_MANIFEST_NAME, check_eval_artifacts, encoding_contract_drift,
+    eval_artifact_hashes, load_training_manifest, model_run_tag, require_eval_files,
+    training_provenance,
 )
 
 
@@ -233,6 +235,123 @@ def test_evaluate_bright_fails_on_incomplete_domain_set():
         helpers.get_path, helpers.encode_to_pickle = original_get_path, original_encode
 
 
+
+# ---- evaluation is bound to the checkpoint that produced it ------------------
+
+_TRAINED = {"pooling": "cls", "normalize": True,
+            "query_max_len": 1024, "passage_max_len": 512}
+
+
+def _manifest_dir(tmp, name="model", model=None, **extra):
+    d = Path(tmp) / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / RUN_MANIFEST_NAME).write_text(json.dumps({
+        "recipe": "inbatch", "fingerprint": "abc123", "base_model": "/bge-m3",
+        "data_sha256": ["hash-of-a-mixture-since-deleted"],
+        "final_global_step": 10314,
+        "effective_config": {"model": model if model is not None else dict(_TRAINED)},
+        **extra,
+    }))
+    return d
+
+
+def test_encoding_contract_drift_is_detected():
+    """Pooling/normalize/lengths decide what an embedding means."""
+    with tempfile.TemporaryDirectory() as tmp:
+        d = _manifest_dir(tmp)
+        m = load_training_manifest(d)
+        assert encoding_contract_drift(m, dict(_TRAINED)) == {}
+        drift = encoding_contract_drift(m, {**_TRAINED, "passage_max_len": 128})
+        assert drift == {"passage_max_len": {"checkpoint": 512, "evaluation": 128}}, drift
+        drift = encoding_contract_drift(m, {**_TRAINED, "pooling": "mean"})
+        assert set(drift) == {"pooling"}, drift
+
+
+def test_manifest_resolves_from_a_checkpoint_subdir():
+    with tempfile.TemporaryDirectory() as tmp:
+        d = _manifest_dir(tmp)
+        ckpt = d / "checkpoint-2062"
+        ckpt.mkdir()
+        assert load_training_manifest(ckpt)["fingerprint"] == "abc123"
+
+
+def test_legacy_checkpoint_without_a_manifest_is_evaluable():
+    """Pre-gate checkpoints exist; they warn, not fail, and record a null provenance."""
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp) / "legacy"
+        d.mkdir()
+        assert load_training_manifest(d) is None
+        assert training_provenance(None) is None
+        assert encoding_contract_drift(None, dict(_TRAINED)) == {}
+
+
+def test_training_data_hashes_are_recorded_not_enforced():
+    """A checkpoint stays valid when the mixture that produced it is gone."""
+    with tempfile.TemporaryDirectory() as tmp:
+        m = load_training_manifest(_manifest_dir(tmp))
+        prov = training_provenance(m)
+        assert prov["training_data_sha256"] == ["hash-of-a-mixture-since-deleted"]
+        assert prov["fingerprint"] == "abc123" and prov["recipe"] == "inbatch"
+        # the mixture is absent from this tmpdir entirely, and that is not an error
+        assert encoding_contract_drift(m, dict(_TRAINED)) == {}
+
+
+def test_eval_artifact_hashes_track_every_scoring_input():
+    with tempfile.TemporaryDirectory() as tmp:
+        proc = Path(tmp)
+        (proc / "biology_corpus.jsonl").write_text('{"docid":"d1","text":"a"}\n')
+        (proc / "biology_queries.jsonl").write_text('{"query_id":"q1","query":"x"}\n')
+        (proc / "biology_qrels.txt").write_text("q1 Q0 d1 1\n")
+        (proc / "biology_excluded.json").write_text('{"q1": []}')
+        first = eval_artifact_hashes(proc, ["biology"])
+        assert set(first["biology"]) == {"corpus", "queries", "qrels", "excluded"}
+        assert all(v for v in first["biology"].values())
+        # a regenerated corpus changes the digest, which is what makes two runs
+        # comparable or not
+        (proc / "biology_corpus.jsonl").write_text('{"docid":"d1","text":"CHANGED"}\n')
+        assert eval_artifact_hashes(proc, ["biology"])["biology"]["corpus"] != \
+            first["biology"]["corpus"]
+        # a missing artifact is recorded as null rather than crashing the digest
+        (proc / "biology_excluded.json").unlink()
+        assert eval_artifact_hashes(proc, ["biology"])["biology"]["excluded"] is None
+
+
+def test_bm25_comparison_requires_matching_artifact_hashes():
+    """A legacy BM25 summary cannot prove it scored the dense run's artifacts."""
+    import run_all_evals
+
+    domains = ["biology"]
+    current = {"biology": {"corpus": "a", "queries": "b",
+                            "qrels": "c", "excluded": "d"}}
+    base = {"domains": domains, "run_tag": "bm25", "model": "BM25",
+            "macro_ndcg_cut_10": 0.1}
+
+    _assert_raises(
+        ValueError,
+        lambda: run_all_evals.validate_bm25_comparison(
+            {**base, "domains": ["economics"], "eval_artifact_sha256": current},
+            domains, current, "wrong-domains.json"),
+        "Domain sets differ",
+    )
+    _assert_raises(
+        ValueError,
+        lambda: run_all_evals.validate_bm25_comparison(
+            base, domains, current, "legacy.json"),
+        "eval_artifact_sha256",
+    )
+    _assert_raises(
+        ValueError,
+        lambda: run_all_evals.validate_bm25_comparison(
+            {**base, "eval_artifact_sha256": {
+                "biology": {**current["biology"], "corpus": "different"}}},
+            domains, current, "different.json"),
+        "different evaluation artifacts",
+    )
+    record = run_all_evals.validate_bm25_comparison(
+        {**base, "eval_artifact_sha256": current}, domains, current, "matching.json")
+    assert record["eval_artifacts_verified"] is True
+
+
 TESTS = [
     ("aggregation: missing judged queries score zero", test_missing_judged_queries_score_zero),
     ("preflight: missing or empty artifact raises", test_preflight_rejects_missing_and_empty_files),
@@ -242,6 +361,12 @@ TESTS = [
     ("identity: collect_results rejects foreign/non-finite", test_collect_results_rejects_foreign_or_nonfinite),
     ("orchestration: empty domain selection exits nonzero", test_empty_domain_selection_exits_nonzero),
     ("orchestration: evaluate_bright fails, never skips", test_evaluate_bright_fails_on_incomplete_domain_set),
+    ("provenance: encoding-contract drift detected", test_encoding_contract_drift_is_detected),
+    ("provenance: manifest resolves from checkpoint-*", test_manifest_resolves_from_a_checkpoint_subdir),
+    ("provenance: legacy checkpoint stays evaluable", test_legacy_checkpoint_without_a_manifest_is_evaluable),
+    ("provenance: training hashes recorded not enforced", test_training_data_hashes_are_recorded_not_enforced),
+    ("provenance: eval artifact hashes track inputs", test_eval_artifact_hashes_track_every_scoring_input),
+    ("compare: BM25 artifact hashes mandatory", test_bm25_comparison_requires_matching_artifact_hashes),
 ]
 
 

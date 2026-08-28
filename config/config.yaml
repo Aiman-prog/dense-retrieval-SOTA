@@ -39,8 +39,8 @@ data:
 
 # --- Training Recipes ---
 training:
+  # Fallback for a recipe that declares no logging_steps of its own.
   logging_steps: 100
-  overwrite_output_dir: true
   dataloader_num_workers: 4
   inbatch:
     model_name: "inbatch_mixed_bge_m3"
@@ -53,6 +53,10 @@ training:
     warmup_ratio: 0.1
     weight_decay: 0.01
     max_grad_norm: 1.0
+    logging_steps: 100
+    save_total_limit: 6
+    save_fraction: 0.2        # checkpoint every 20% of total steps
+    gradient_checkpointing: true   # THE memory fix at query_max_len 1024 + eager attention
   crossbatch:
     model_name: "crossbatch_mixed_bge_m3_epoch2"
     target_batch_size: 1024   # = per_device_batch_size * num_gpus (negative pool); accum does NOT enlarge it
@@ -69,7 +73,14 @@ training:
     bf16: true
     max_grad_norm: 1.0
     logging_steps: 10
-    dataloader_num_workers: 4
+    dataloader_num_workers: 0   # 0 = collate inline. NOTE: this did NOT prevent the SIGBUS it was
+                                # added for -- 18995 died of SIGBUS at 98% with 0 workers, while
+                                # in-batch 18996 ran 4 workers for 13h clean. Real cause was the
+                                # mmap'd Singularity image going unreadable (P14). Value kept only
+                                # because changing it now would fork the crossbatch fingerprint.
+    save_steps: 100
+    save_total_limit: 3
+    gradient_checkpointing: true   # cross-batch omitted this and never reached a checkpoint
   grass:
     # σ estimator is selected at the CLI: --uncertainty {mc_dropout, ema}
     model_name: "grass_mixed_bge_m3"   # base name — code appends _mc_dropout or _ema

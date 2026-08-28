@@ -65,17 +65,32 @@ Run it after **every** later step. Any hash change ⇒ roll that step back and s
 KMP_DUPLICATE_LIB_OK=TRUE python scripts/dev/consolidation_preproc_check.py
 ```
 
-### Baseline hashes (recorded pre-consolidation, on `fast-grass` @ `86c74f3`)
+### Baseline hashes — REBASED at the preprocessor hardening pass
+
+```
+PREPROC_SHA256 reasonir_corpus.jsonl 0351bc8207ab1b625ec224a872407a5e345844260a3ba71362519ad2412da6b7
+PREPROC_SHA256 train_queries.jsonl   4e96bffd40045b642ef738618ed2b7f7101399763665036573ce478047dc7636
+PREPROC_SHA256 train_qrels.txt       2dfb9d294693a24a55733f1063a2fab8899788315fceca5381aae51d7d416838
+```
+
+Fixture summary line, invariant across the rebase: `586 unique passages (collapsed 10
+duplicate-text docids)`, `605 unique training queries`, `605 positive pairs`.
+Verified byte-identical across two consecutive runs.
+
+**Why the hashes moved.** The writers now emit only the fields the pinned Tevatron reader
+consumes — corpus `{docid, text}`, queries `{query_id, query}` — dropping the unused
+`text_id` from both and the duplicated `docid`/`text` from queries. That changes the bytes
+of every JSONL the preprocessor writes while changing no content. The summary line above is
+the evidence that the *algorithm* is untouched: identical passage count, identical collapse
+count, identical query and qrel counts, before and after.
+
+Superseded pre-hardening values, kept so an older log can still be matched:
 
 ```
 PREPROC_SHA256 reasonir_corpus.jsonl 7c0b8471ee679599b849d0ea58b4e28b498f743302266f18f3531ebe28914d60
 PREPROC_SHA256 train_queries.jsonl   74ae6b8a275878d418f0baed5ba8747b09ccb3e27c666f2f7657214bdd4e6997
 PREPROC_SHA256 train_qrels.txt       4e3ae34a1500c628bd720fa9d907eea925f3dbc6ab6b06684e4c0c9c54c17357
 ```
-
-Fixture summary line, also invariant: `586 unique passages (collapsed 10 duplicate-text
-docids)`, `605 unique training queries`, `605 positive pairs`.
-Verified byte-identical across two consecutive runs.
 
 ### Deviation D1 — fixture source
 
@@ -468,7 +483,7 @@ all. The tags are named in `CLAUDE.md`'s branch header and in this file.
 Recorded so they are not rediscovered from scratch. Each says what breaks and why. Fixing them
 is out of scope under rule 1; they need a separate, explicitly authorised task.
 
-**P1-P5 are FIXED.** **P6, P7 and D1 are open** (P7 is docs-only and now recorded; no code
+**P1-P5 are FIXED.** **P6, P7, P8, P9, P11 and D1 are open** (P11 is a live storage fault; P10 was found and fixed in the same pass) (P10 was found and fixed in the same pass) (P7 is docs-only and now recorded; no code
 change is wanted). P2-P6 were found while auditing `GPU_CHECKLIST.md`
 against the launcher bodies; each entry below records what it was and how it was resolved.
 
@@ -674,6 +689,208 @@ only in `~/.local` and in `/scratch/$USER/tevatron_patched_20260820.tgz` (93K, m
 2026-08-20). Re-verified as applied on that date; `from tevatron.retriever.modeling import
 DenseModel` is the check.
 
+### P10 — `patch_tevatron.py` was neither idempotent nor complete — **FIXED**
+
+Found by the new `--verify` on the cluster's real `~/.local` install, 2026-08-26.
+
+**Not idempotent.** Rules 1 and 2 matched `^(.*qwen_omni_utils.*)` / `^(.*Qwen2_5Omni.*)`
+with no already-commented guard, so every run prepended another `# `. The cluster's
+`retriever/collator.py` had reached `# # # #` — four runs. Each run rewrote the source,
+bumping its mtime and invalidating its bytecode, which is the very thing section 2.4
+exists to worry about. Fixed with a `(?!\s*#)` guard on both rules; three consecutive
+runs from a clean copy are now byte-identical.
+
+**Incomplete.** `retriever/driver/encode_mm.py` and `train_mm.py` import
+`MultiModalDenseModel` as `from tevatron.retriever.modeling import ...`, a form rule 5's
+literal replace never matched. Rule 3 deletes the class and rule 5 fixes
+`modeling/__init__.py`, so those two drivers were left importing a name that no longer
+exists. Inert for text-only retrieval (nothing imports the `_mm` drivers) but the package
+was not self-consistent, and `--verify` cannot distinguish that from a real miss. Fixed by
+a rule 6 that mops up any remaining active `MultiModalDenseModel` line, carrying the same
+guard.
+
+Verified: patch → `--verify` prints `TEVATRON_PATCHES_VERIFIED`; un-commenting a single
+patched import makes it fail again, so the check is not green by construction.
+
+---
+
+### P11 — ⚠️ `/scratch` is silently corrupting small-file writes (BeeGFS pool 1)
+
+**Discovered 2026-08-27 while installing the JDK for P9. This is a live storage fault, not
+a repo defect, and it blocks every GPU run until DelftBlue support resolves it.**
+
+**Symptom.** Writes to `/scratch/$USER` fail intermittently with `Remote I/O error`
+(EREMOTEIO, errno 121), leaving **zero-byte files**. `tar` reports
+`Cannot write` / `Cannot close` / `Cannot create symlink`.
+
+**Measured**, 300 small files per run, same directory, three consecutive runs:
+
+| run | zero-byte / total |
+|---|---|
+| 1 | 27 / 300 |
+| 2 | 19 / 300 |
+| 3 | 10 / 300 |
+
+**3-9% of small-file writes are silently lost.** The same test on `/home` (BeeGFS pool 2)
+returned **0 / 250**, and a full JDK extraction there produced **0 zero-byte files of 247**
+with a working `java -version`. So it is pool 1 specifically, not BeeGFS generally, and not
+the client node.
+
+**Ruled out.** Not quota (1.15 of 5.00 TiB, 18,559 of 1,000,000 chunk files). Not capacity
+(`df`: 256 TiB free). Not bandwidth (a 200 MB `dd` to the same directory ran at 1.9 GB/s).
+Not the metadata syscalls (`tar -m --no-same-owner` changed nothing). Large sequential
+writes succeed; many-small-file and symlink workloads fail.
+
+**Existing data checked and currently intact:** 0 zero-byte files across
+`data/processed` (54), `training_mixture` (3), `models` (172), `results` (12). The only
+empty files are HF `.lock` files (legitimately empty) and one `mining_log.jsonl` in a
+disposable GRASS temp workdir.
+
+**Why this blocks Phase 6.** `DATA_BASE_DIR=/scratch/$USER/dense-retrieval-SOTA` holds the
+mixture, corpora, checkpoints and results. A checkpoint written during this fault can be
+silently truncated. Do not start GPU training until the filesystem is confirmed healthy.
+
+**One mitigation already in place:** `helpers.assert_training_succeeded` reads the
+safetensors header and rejects a truncated or zero-tensor checkpoint, so a corrupted save
+now fails the run instead of being promoted to a result. That is a guard, not a fix.
+
+**It has already cost one run.** Job 14990 (in-batch) trained cleanly to step 3000 of 10314
+— loss 1.4419 → 0.3797, `checkpoint-2062` written — and then died because
+`helpers.append_jsonl` hit EREMEOTEIO appending ONE line to `training_log.jsonl`. The
+`OSError` propagated out of the diagnostics callback, through `Trainer.log`, and ended the
+job. Four hours of A100 time lost to a diagnostic write.
+
+**Fixed 2026-08-27:** `helpers.retry_io` retries transient `OSError` three times with
+backoff and `append_jsonl` returns `False` rather than raising, so a lost diagnostic can no
+longer end a run. `prepare_output_dir` now distinguishes a manifest that is *unreadable*
+(IO — retried, then a hard startup error) from one that is *malformed* (corrupt — still
+blocking), because the old shared branch advised `--overwrite`, which deletes checkpoints.
+`assert_training_succeeded` falls back to HF's own `checkpoint-*/trainer_state.json` when
+the diagnostics log is missing, so dropped writes cannot condemn a run that did train.
+
+**Residual, NOT fixed and not fixable from here.** HF's own checkpoint saves write ~3.3 GB
+(model + optimizer) to this same filesystem, from inside `Trainer.save_model`. Cross-batch
+does 6 such saves per run, in-batch 5. Nothing in this repo can wrap them. What bounds the
+loss is resume, not prevention: `prepare_output_dir` accepts `--resume` given a matching
+manifest and any `checkpoint-*`, which is exactly the state a mid-run crash leaves, so
+`CROSSBATCH_RESUME=1 sbatch ...` costs only the steps since the last save.
+
+**Also unfixed, deliberately out of scope.** `scripts/run_ance_train.py:150-154` calls
+`ranking_probe` and `append_jsonl` with no guard at all — the only unguarded probe left in
+the repo. `append_jsonl` no longer raises on IO, so the log write there is now safe, but a
+CUDA OOM inside the probe would still kill the ANCE trainer. The 2026-08-27 pass was scoped
+to in-batch and cross-batch; wrap it the way `attach_training_diagnostics` does before the
+next ANCE run.
+
+**Action:** raise a ticket with DelftBlue support quoting the three measurements above.
+Re-run the probe to confirm recovery:
+```bash
+d=/scratch/$USER/_probe; rm -rf $d; mkdir -p $d
+for i in $(seq 1 300); do echo x > $d/f$i; done
+echo "zero-byte: $(find $d -type f -size 0 | wc -l) of 300"; rm -rf $d
+```
+
+---
+
+### P9 — the JDK the BM25 launcher points at does not exist on `/scratch`
+
+**Symptom.** `run_bm25_singularity.sh` would fail at `from pyserini.search.lucene import
+LuceneSearcher` (`run_bm25_evals.py:88`), printing the misleading "JDK 11+" advice at
+`:94`. Experiment 0 cannot run.
+
+**Why.** The launcher exports `JAVA_HOME="/scratch/${USER}/.jdk21"` and
+`JVM_PATH="${JAVA_HOME}/lib/server/libjvm.so"`. Checked on DelftBlue 2026-08-26:
+
+```
+$ ls -d /scratch/$USER/.jdk*      -> no .jdk* in /scratch/aimanabdulwaha
+$ which java                       -> no java on PATH
+$ ls /scratch/$USER/               -> containers  dense-retrieval-SOTA  tevatron_patched_20260820.tgz
+$ module avail 2>&1 | grep -i jdk  -> nothing
+```
+
+`README.md:60-67` documents the JDK as a **one-time manual login-node install** that is in
+neither `setup.sh` nor any launcher, so nothing recreates it. It was either never installed
+on this account or removed since.
+
+**Scope.** BM25 only. No Python change fixes it — pyserini needs a real JVM.
+
+**Not verified from the login node:** `singularity exec` fails there
+(`squashfuse_ll ... Something went wrong trying to read the squashfs image`), so the
+container's own view was not checked. Confirm on a compute node before concluding.
+
+**Fix when authorised.** Re-run the `README.md` §Java step to install Temurin JDK 21 at
+`/scratch/$USER/.jdk21`, then re-check with
+`/scratch/$USER/.jdk21/bin/java -version`. Consider moving that step into `setup.sh` so a
+fresh account is not silently missing it, and correcting the three-way version claim
+(launcher comment says Java 11, `run_bm25_evals.py:94` says JDK 11+, `README.md:61` says
+17+, the artifact is 21).
+
+**Cluster CPU verification, 2026-08-26** (job 14692 on `cmp001`, inside
+`pytorch_2.1.sif`, i.e. the real `~/.local` stack — transformers **4.40.2**, torch
+2.10.0, accelerate 0.30.1, pyserini 1.2.0, faiss-gpu 1.7.2):
+
+| suite | result |
+|---|---|
+| `tests/train_guards_test.py` | **35/35** |
+| `tests/bm25_provenance_test.py` | **15/15** |
+| `scripts/patch_tevatron.py --verify` | 4 findings, all the known P10 `_mm` imports |
+
+This settles the one thing the local box could not: HF Trainer's `on_log` **does** carry
+`grad_norm` on 4.40.2, so the pre-clipping gradient norm comes free from the existing
+Trainer and nothing needs to compute it. Sample line from the run:
+`{'loss': 0.6971, 'grad_norm': 1.8228, 'learning_rate': 4.375e-05, 'epoch': 0.25}`.
+The four `callback:` tests build a real `Trainer`, so the DEFAULT_CALLBACKS registration
+and the 4.40-vs-4.57 `tokenizer`/`processing_class` kwarg rename are both covered.
+
+**Related, now closed:** the cluster's environment was captured while investigating this.
+pyserini is **1.2.0** (anserini-1.1.1 fatjar), transformers 4.40.2, faiss-gpu 1.7.2, and
+GradCache is byte-identical to commit `906f038...` -- all now pinned in
+`requirements-hpc.txt` / `requirements.txt`.
+
+---
+
+### P8 — `AC-SURFACE-01` has been failing on `main` since the post-consolidation refactors
+
+**Symptom.** The row raises before it can print `SURFACE_ALLOWLIST_OK`. Verified on
+untouched `main` (no working-tree changes) during the baseline-hardening pass.
+
+**Why.** Three independent drifts, all landed *after* `archive/consolidation-verified`
+and none of them covered by amendments A1–A5:
+
+1. **Relocated launcher diff** — `scripts/launchers/run_evaluate_singularity.sh` is pinned
+   as a *pure rename* (`MOVED_SH[...] = (..., [])`), but the eval refactor also deleted its
+   `RESULTS_JSON=` computation and the `--results_json` pass-through, replacing them with a
+   three-line comment. Six change lines against an expected zero.
+2. **Config byte reconstruction** — removing the Step-4 `training.ance_msmarco` block no
+   longer reproduces `archive/main-post-promotion:config/config.yaml`. The preprocessor
+   hardening pass rewrote `data.bright.examples_config`, dropped `data.reasonir.subset` and
+   `.train_file`, and rewrote `data.mixed_training` (percentages, `vl_skip_first_n`, the
+   total comment). 14 change lines.
+3. **Config semantic check** — the same drift makes `trimmed != base_cfg`, which raised the
+   opaque `"a pre-existing config value changed"`.
+
+**Scope.** Nothing is broken at runtime; this is the acceptance suite disagreeing with a
+`main` that legitimately moved on. But while the row is red it guards nothing, which is how
+(1) went unnoticed in the first place.
+
+**Recorded, deliberately NOT fixed.** Blessing these into the allowlist would hide exactly
+what the row exists to surface. They need their own authorised pass that decides, per drift,
+whether to re-pin the criterion or to treat the change as unintended.
+
+**What the baseline-hardening pass did instead:**
+- pinned drift (2) in `PRE_EXISTING_CONFIG_DRIFT`, labelled as this defect rather than as
+  permitted, so the list is visible and cannot silently grow;
+- replaced (3)'s opaque message with one that names the differing config paths;
+- left (1) untouched and failing.
+
+**Verified in isolation meanwhile.** Amendment A6's entry-point fingerprint half passes on
+the hardened tree and rejects all five mutations: a third CLI flag, a new `os.environ` key,
+a new `get_path` key, a *renamed* (i.e. removed) flag, and a flag added to a
+non-allowlisted entry point. Each mutation was asserted to have actually changed the file
+before its result was trusted.
+
+---
+
 ### D1 — `bug_fixes.md` is gitignored, so the MS MARCO runbook is not on `main`
 
 `bug_fixes.md` holds the `load_dataset` invocations, the `msmarco_dev_qrels.txt` `wget` and
@@ -818,9 +1035,9 @@ only — not retrieval quality, not GPU training correctness.
 ## Cleanup ideas — collected, NOT acted on
 
 0. **See "Pre-existing defects" above — P1 is the one that actually breaks a pipeline.**
-1. `prepare_msmarco_train_data()` (`src/data/preprocessor.py` ~line 289) calls
-   `random.shuffle(indices)` unseeded despite `seed: 42` — the 83,030-row MS MARCO mixture
-   slice is not reproducible.
+1. ~~`prepare_msmarco_train_data()` calls `random.shuffle(indices)` unseeded despite
+   `seed: 42`.~~ **FIXED** at the preprocessor hardening pass — it now uses a local
+   `random.Random(seed)`, pinned by `tests/preprocessor_test.py`.
 2. `ASYNC_FG_RUN_TESTS` cannot be disabled: the launcher does `${ASYNC_FG_RUN_TESTS:-1}` then
    tests `-n`, so `0` is still truthy and the `SKIPPED` branch is dead code.
 3. `async-grass-v2` carries ~2500 lines of committed `logs_cluster/eval_*` and a 629KB
@@ -829,3 +1046,168 @@ only — not retrieval quality, not GPU training correctness.
 5. Loose repo-root artifacts on `fast-grass`: three `.html`/`.png` miner diagrams, `bib.tex`,
    `logs_cluster/fg_32k_logs.zip`, two `logs_cluster/fast_grass_*` dirs — deliberately not
    committed at Step 2; decide whether they belong in the repo at all.
+
+---
+
+## Pre-existing defects recorded at the preprocessor hardening pass
+
+Found while hardening `src/data/preprocessor.py`. Recorded, deliberately not fixed.
+
+### P-PRE-01 — BRIGHT `excluded_ids` was ignored — **FIXED**
+
+Exclusions are now preserved by `BRIGHTLoader.get_excluded_ids`, written per domain as
+`{domain}_excluded.json`, and applied by all three BRIGHT evaluation paths
+(`src/evaluation/evaluate.py`, `helpers.evaluate_bright`, `scripts/run_bm25_evals.py`)
+through one shared filter in `src/utils/helpers.py`. Retrieval over-retrieves by the
+per-query exclusion count, so filtering runs *before* the top-k cut and eligible
+lower-ranked documents refill the list.
+
+Measured on the cached data: `aops` excludes up to 11,224 documents for a single query;
+8 of 12 domains store the literal `'N/A'` rather than a doc id; gold ∩ excluded is **0**
+in every domain, so qrels denominators are unaffected.
+
+⚠️ **Every BRIGHT number produced before this — ANCE NDCG@10 = 0.1683 and the λ-pilot
+conclusions included — was computed without exclusion filtering and must be re-run before
+it is comparable to published BRIGHT results.**
+
+### P-PRE-02 — the derived artifacts on disk predate the current code
+
+**Symptom.** `$DATA_BASE_DIR/data/processed/train_queries.jsonl` (Jan 30) holds 244,970 VL +
+100,521 HQ + **zero** MS MARCO queries, against a config of 149,970 + 97,000 + 83,030.
+`reasonir_corpus.jsonl` holds 1,635,104 passages, of which 1,145,164 are BRIGHT document ids
+that no code in the tree writes. `training_mixture/` locally holds only legacy
+`train_reasonir_{hq,vl}.jsonl` in the `positives`/`negatives` schema.
+
+**Why it matters.** These are the files ANCE's NDCG@10 = 0.1683 was mined against. Their
+provenance cannot be reconstructed.
+
+**Scope.** Nothing in the code stops a job from using them: `run_setup()` reuses whatever
+exists and does not check it against the mixture. Deleting the three derived files before the
+next run is a manual step.
+
+**Later fix.** Delete `reasonir_corpus.jsonl`, `train_queries.jsonl`, `train_qrels.txt`, run
+`python src/data/preprocessor.py`, then decide whether ANCE is re-run on the new mixture or
+the discontinuity is footnoted.
+
+### P-PRE-03 — the local HF cache cannot be read by the installed `datasets`
+
+**Symptom.** `load_dataset('reasonir/reasonir-data', 'hq', cache_dir=$DATA_BASE_DIR/data/bright)`
+raises `TypeError: must be called with a dataclass type or instance` from
+`datasets/features/features.py:generate_from_dict`. The 2.1 GB cache was written by an older
+`datasets` version.
+
+**Why it matters.** Regeneration on this machine is blocked until it is resolved. The Arrow
+shards themselves are fine — they read directly through `pyarrow`.
+
+**Scope.** Local environment. Check the DelftBlue container's `datasets` version before
+assuming regeneration works there.
+
+**Later fix.** Pin `datasets` to the version that wrote the cache, or re-download.
+
+---
+
+### P12 — baseline code review 2026-08-27: nine findings, all FIXED
+
+Review of BM25 / in-batch / cross-batch under `docs/CODE_REVIEW_PROMPT.md`. Three were
+experiment-breaking. No algorithm or hyperparameter changed.
+
+| sev | finding | fix |
+|---|---|---|
+| **5.0** | `--resume` kept `training_log.jsonl`, so `max(global_step)` was the PREVIOUS run's final step and a resumed run taking zero new steps validated. The exact defect the gate exists to prevent, reachable through the resume door. | `invocation_start_step` recorded at gate time from `trainer_state.json`; success needs `final_step > start` AND `>= optimizer_steps_planned`. Resume is refused when the baseline is indeterminate. |
+| **5.0** | A killed Lucene build left a partial index at the canonical path while the OLD `index_meta.json` stayed beside it, so an unchanged corpus made the partial index match its own provenance and be reported "reusing". | Staged build, atomic publish, meta written last; the archived index keeps its metadata. |
+| **5.0** | BM25 reloaded BRIGHT independently and skipped on file existence, so the sparse and dense arms could score different collections. | BM25 corpus derived from the dense `{domain}_corpus.jsonl`, validated by exact docid to text equality; every qrel document must exist in it. |
+| 2.0 | `shutil.rmtree(ckpt, ignore_errors=True)` hid EREMOTEIO, leaving checkpoints Tevatron resumed from while the run printed "fresh run". | Retried removal, then re-glob; survivors raise. |
+| 2.0 | Probe records carrying `{"error": ...}` counted as diagnostics, so a run with no working ranking signal validated (job 14990 shipped one). | Two successful probes at DISTINCT steps required; finite `rank_acc` and `margin_mean`. |
+| 2.0 | Nothing bound evaluation to the checkpoint: pooling / normalization / sequence lengths could drift from training silently. | Encoding contract compared against the run manifest; `--allow-config-drift` records exact old/new values. Training data hashes are RECORDED, not enforced, because a checkpoint stays valid when its mixture is gone. |
+| 1.0 | No Java preflight; failure surfaced deep inside indexing. | `preflight_java()` before Pyserini import. Launcher moved to the verified `/home/$USER/.jdk21` (closes **P9**). |
+| 1.0 | Docs stated 127 / 2,047 negatives unconditionally. | In-batch's final batch is 9 queries / 17 negatives. Cross-batch's pool is CONSTANT: Accelerate's `even_batches` pads the last distributed step, which carries 265 new records but a full 2,047-column denominator. |
+| 0.5 | Docs framed the arms as a negative-pool comparison. | Relabelled a complete-recipe comparison; pool and step budget move together, so no causal claim about pool size follows. |
+
+Evaluation artifacts (corpus, queries, qrels, exclusions) are now hashed into both
+dense and BM25 summaries, and `--compare_bm25` requires those hashes to agree as well
+as the domain sets. Regression tests were written before each fix and mutation-tested
+in an isolated copy, leaving the working tree untouched.
+
+Follow-up review closed three fail-open edges in those fixes: stale training-log and
+BM25 staging removal are now verified after retry, present-but-corrupt evaluation
+manifests fail closed instead of looking legacy, and hashless legacy BM25 summaries
+cannot enter a formal comparison. Java is also preflighted before Pyserini initializes
+the JVM. These are guard changes only; training, retrieval and scoring logic are
+unchanged.
+
+**Verified on DelftBlue 2026-08-27 (no GPU job submitted).** All seven CPU suites pass
+inside the container against the pinned `transformers 4.40.2` and the real Tevatron
+`8f31cd8`. `preflight_java()` accepts `/home/$USER/.jdk21` and refuses the old
+`/scratch` copy with `no known VMs. (check for corrupt jvm.cfg file)`, which is P11
+damage, so P9 is closed with evidence rather than by inspection. BM25 corpus derivation
+was exercised on the real dense artifacts into a temp root: biology 57,359 docs and
+leetcode 413,932 docs derived, exact match both ways, a second call validates instead of
+regenerating, and a tampered `contents` field is detected and regenerated. **No BM25
+corpus exists on `/scratch` yet**, so finding P12-3 was latent, not live: BM25 has never
+run to completion because of P9.
+
+### P13 — two pre-existing issues surfaced by the P12 verification, NOT fixed
+
+**`patch_tevatron.py --verify` reports 4 problems in multimodal drivers.**
+`retriever/driver/{encode_mm,train_mm}.py` still import `MultiModalDenseModel`, which
+the §2.1/2.2 patch removed from `retriever/modeling/__init__.py`. Rule 6 was meant to
+mop these up and did not. **Harmless today**: nothing in this repo imports either
+driver (grepped), so the dangling reference is latent. It does mean `--verify` exits
+nonzero on a correctly patched install, which will mislead the next person to run it.
+*Scope*: `patch_tevatron.py`, outside the P12 review. Fix rule 6 or narrow `--verify`
+to the drivers actually used.
+
+**`async_fast_grass_pilot_test.py` is not isolated from the ambient data root.**
+"preflight reports missing inputs" passes locally and fails on DelftBlue, because
+`DATA_BASE_DIR` is unset in a login shell and `get_data_base_dir()` falls back to the
+real `/scratch` tree where all three mixture components exist, so the missing-component
+condition cannot arise. `DATA_BASE_DIR=$(mktemp -d)` gives 61/61 on the cluster. The
+test should build its own root rather than read the environment.
+
+---
+
+### P14 — `/scratch` BeeGFS data loss, and the SIGBUS misdiagnosis it corrects — **NOT FIXED (cluster-side)**
+
+**Symptom.** `singularity exec` refuses the container with
+`image format not recognized`; reading it directly gives `Remote I/O error`
+(EREMOTEIO, errno 121) with **zero bytes readable**, while the metadata is intact
+(3,768,557,568 bytes, Aug 26 17:19). The same error affects a scattered subset of
+`/scratch`. `/home` is unaffected and `df` shows 261 TB free with unlimited quota, so
+this is a failed storage target, not exhaustion.
+
+**Confirmed lost** (verified by `dd`, 2026-08-28):
+`containers/pytorch_2.1.sif` · the whole of `data/training_mixture/` (directory gone) ·
+12 of 51 files in `data/processed/` — `aops`, `biology`, `leetcode`, `reasonir`,
+`stackoverflow`, `theoremqa_theorems` corpora, `train_queries.jsonl`,
+`robotics_queries.jsonl`, `psychology`/`robotics` qrels, `robotics`/
+`theoremqa_theorems` excluded · cross-batch `checkpoint-600` (its only checkpoint) ·
+many ANCE, GRASS, fast-GRASS and async checkpoints.
+
+**Confirmed intact.** `models/inbatch_mixed_bge_m3/model.safetensors` and its
+`run_manifest.json` read end to end. Job 18996's result survives.
+
+**Why it matters.** All GPU work is blocked until the image is restored, and a full
+12-domain evaluation is blocked separately because six corpora are unreadable.
+Cross-batch cannot be resumed (`checkpoint-600` is gone) and cannot be cleanly re-run
+(`training_mixture/` is gone, and regenerating it forks every downstream comparison,
+including the in-batch checkpoint already trained against the old mixture).
+
+**It also corrects an earlier misdiagnosis.** Job 15039's SIGBUS was attributed to
+DataLoader worker shm hand-off, and `training.crossbatch.dataloader_num_workers` was set
+to 0 on that basis. The evidence refutes it:
+
+| job | workers | outcome |
+|---|---|---|
+| 18996 in-batch | 4 | completed, 10,314/10,314 steps, 13h15m |
+| 18995 cross-batch | **0** | **SIGBUS on both ranks at once**, 11h25m, at 98% |
+
+Singularity mmaps the SquashFS image, so when the file became unreadable mid-run every
+rank faulted on its next page touch — which is exactly the simultaneous two-rank
+signature seen at 11:58:45. The worker setting was never the cause and the change was
+never the fix. The config value is kept only because changing it now would fork the
+cross-batch fingerprint; the comments at `config/config.yaml` and
+`scripts/launchers/run_crossbatch_singularity.sh` were corrected to say so.
+
+**Later fix.** DelftBlue servicedesk ticket quoting the EREMOTEIO. Ask whether recovery
+is possible *before* regenerating the mixture, since recovery preserves comparability
+and a rebuild destroys it. Copy the in-batch checkpoint to `/home` meanwhile.

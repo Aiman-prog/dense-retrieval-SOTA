@@ -19,7 +19,8 @@ from torch.optim import AdamW
 project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root / 'src'))
 
-from utils.helpers import get_training_context, load_config
+from utils.helpers import get_training_context, load_config, append_jsonl, \
+                          ranking_probe, probe_triples_from_mixture, TRAINING_LOG_NAME
 
 os.environ["TRANSFORMERS_ATTENTION_IMPLEMENTATION"] = "eager"
 
@@ -140,7 +141,20 @@ def main():
     warmup_steps = int(args.max_steps * ctx['args'].get('warmup_ratio', 0.1))
     scheduler = get_linear_schedule_with_warmup(optimizer, warmup_steps, args.max_steps)
 
+    # Same shared diagnostics the Tevatron pipelines use: persistent loss/LR/
+    # pre-clipping grad norm, plus a fixed-probe ranking signal at >= 2 points.
+    log_path = output_dir / TRAINING_LOG_NAME
+    mixture_dir = Path(ctx['processed_dir']) / ctx['args'].get('mixture_dir', 'training_mixture')
+    probe_triples = probe_triples_from_mixture(sorted(mixture_dir.glob("*.jsonl")))
+
+    def _probe(phase, step):
+        append_jsonl(log_path, {"global_step": step, "phase": phase,
+                                **ranking_probe(model, tokenizer, probe_triples,
+                                                torch.device('cuda'),
+                                                ctx['max_q'], ctx['max_p'])})
+
     global_step = 0
+    _probe("begin", 0)
     model.train()
     print(f"[Trainer] Starting: max_steps={args.max_steps}, "
           f"logging_steps={logging_steps}, save_steps={save_steps}", flush=True)
@@ -187,13 +201,22 @@ def main():
             loss = outputs.loss
         loss.backward()
 
-        torch.nn.utils.clip_grad_norm_(model.parameters(), ctx['args'].get('max_grad_norm', 1.0))
+        # clip_grad_norm_ returns the norm BEFORE clipping -- the diagnostic value.
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            model.parameters(), ctx['args'].get('max_grad_norm', 1.0))
         optimizer.step()
         scheduler.step()
         optimizer.zero_grad(set_to_none=True)
         global_step += 1
 
         if global_step % logging_steps == 0:
+            append_jsonl(log_path, {
+                "global_step": global_step,
+                "loss": loss.item(),
+                "learning_rate": scheduler.get_last_lr()[0],
+                "grad_norm": float(grad_norm),
+                "ann_no": last_ann_no,
+            })
             print(f"[Trainer] step={global_step}/{args.max_steps} loss={loss.item():.4f} "
                   f"ann_no={last_ann_no}", flush=True)
 
@@ -207,6 +230,8 @@ def main():
             torch.save(scheduler.state_dict(), ckpt / "scheduler.pt")
             torch.save(optimizer.state_dict(), ckpt / "optimizer.pt")  # written last: Inferencer validity flag
             print(f"[Trainer] Saved checkpoint-{global_step}", flush=True)
+
+    _probe("end", global_step)
 
     # Final model save
     model.save(str(output_dir))             # EncoderModel.save() → self.encoder.save_pretrained()

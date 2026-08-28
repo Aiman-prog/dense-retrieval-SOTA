@@ -2,7 +2,7 @@
 
 #SBATCH --job-name=eval-reasonir
 #SBATCH --partition=gpu-a100
-#SBATCH --time=02:00:00
+#SBATCH --time=04:00:00   # all 12 domains = 1.33M docs, ~2.5h of encoding
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --gpus-per-task=1

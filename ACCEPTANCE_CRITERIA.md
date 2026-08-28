@@ -10,6 +10,24 @@ The import harnesses set `CUDA_VISIBLE_DEVICES` empty and force Transformers/Hug
 
 ## AC-SURFACE-01
 
+> **Amendment A6 (baseline hardening pass).** `train_inbatch.py` and
+> `train_crossbatch.py` gain `--resume` / `--overwrite` and read `WORLD_SIZE`. Both are
+> load-bearing, not conveniences: Tevatron's driver resumes from any `checkpoint-*` in
+> the output dir unconditionally, so "fresh unless asked" needs a flag to opt out of,
+> and cross-batch launched without `torchrun` silently halves its negative pool, which
+> only `WORLD_SIZE` can detect before training starts. The row now allowlists **exactly**
+> these additions on **exactly** these two files: any third flag, any other env key, any
+> new `get_path`/`get_training_context` key, any removal, and any change to the other
+> four entry points still fail. Strictly stronger than a blanket exemption, and pinned
+> the way A5 pins launcher diffs.
+>
+> A6 also extends the pinned diffs of `run_inbatch_singularity.sh` and
+> `run_crossbatch_singularity.sh` with `${INBATCH_RESUME:+--resume}`-style knobs, following
+> the `${GRASS_DEBUG:+--debug}` pattern the P5 fix already established. Every GPU run in
+> this project goes through a launcher, so a flag reachable only by direct `python`
+> invocation is not reachable at all. **With both knobs unset the emitted command line is
+> byte-identical to before**, so the default `sbatch` path is unchanged.
+
 > **Amended during consolidation (approved at Gate A; evidence in `CONSOLIDATION_STATUS.md`).**
 > **A1** — `BASE` is `archive/main-post-promotion` (`main` immediately after the Step-3
 > fast-forward), not `archive/main-pre-consolidation`. The latter is `main` @ `b633376`, which
@@ -145,19 +163,53 @@ MOVED_SH = {
         "+            python -u tests/async_fast_grass_integration_smoke.py",
         "+            python -u tests/fast_grass_test.py",
     ]),
-    "scripts/run_bm25_singularity.sh": ("scripts/launchers/run_bm25_singularity.sh", []),   # pure rename
+    # A8: JAVA_HOME moves to /home. Defect P9 -- the /scratch JDK was written during
+    # the BeeGFS fault (P11) and its libjli.so is corrupt, so every BM25 job failed at
+    # JVM start. The /home copy is verified working (java -version succeeds).
+    "scripts/run_bm25_singularity.sh": (
+        "scripts/launchers/run_bm25_singularity.sh", [
+        '-export JAVA_HOME="/scratch/${USER}/.jdk21"',
+        '+export JAVA_HOME="/home/${USER}/.jdk21"   # P9: the /scratch copy was written during the BeeGFS fault and is broken',
+    ]),
+    # A7: the two resource lines and the [alloc] echo. Job 15039 died host-side with a
+    # DataLoader worker SIGBUS on an allocation of 32GB/8CPU for two ranks, where every
+    # other GPU launcher here takes 125GB/16CPU for one. The echo prints what the
+    # allocation actually granted, because the failing memory term could not be
+    # identified after the fact (MaxRSS 10.4GB against a 32GB cap).
     "scripts/run_crossbatch_singularity.sh": (
         "scripts/launchers/run_crossbatch_singularity.sh", [
-        "+EXIT_CODE=$?",
-        "+",
-        "+if [ $EXIT_CODE -eq 0 ]; then",
-        "+    echo \"\u2705 Cross-batch training completed successfully\"",
-        "+else",
-        "+    echo \"\u274c Cross-batch training failed with code $EXIT_CODE\"",
-        "+fi",
-        "+",
-        "+",
-        "+exit $EXIT_CODE",
+        '-#SBATCH --cpus-per-task=4          # 2 CPUs per GPU (for 4 workers)',
+        '+#SBATCH --cpus-per-task=8           # 2 tasks x 8 = 16 CPUs, matching every other GPU launcher',
+        '-#SBATCH --mem-per-gpu=16GB           # 16GB RAM per GPU',
+        '+#SBATCH --mem-per-cpu=8000M         # 16 x 8000M = 125GB. --mem-per-gpu=16GB gave 2 ranks 32GB',
+        '+                                    # total while in-batch gets 125GB for one; job 15039 died',
+        '+                                    # host-side with a DataLoader worker SIGBUS.',
+        '+# --- Experiment Knobs (override via env vars before sbatch) ---',
+        '+# CROSSBATCH_RESUME=1     # continue a run whose manifest fingerprint matches',
+        '+# CROSSBATCH_OVERWRITE=1  # discard an output dir built by a DIFFERENT config',
+        '+# nproc_per_node MUST stay 2: train_crossbatch.py refuses any other world size,',
+        '+# because a single process drops the all-gather and halves the negative pool.',
+        '+',
+        "+# What the allocation actually granted. 15039's SIGBUS could not be pinned to a",
+        '+# specific memory term after the fact; print the limits so a recurrence is read, not guessed.',
+        '+echo "[alloc] cgroup memory.max: $(cat /sys/fs/cgroup/memory.max 2>/dev/null \\',
+        '+    || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo unknown)"',
+        '+echo "[alloc] /dev/shm: $(df -h /dev/shm | tail -1)"',
+        '+',
+        '-    torchrun --nproc_per_node=2 scripts/train_crossbatch.py',
+        '+    torchrun --nproc_per_node=2 scripts/train_crossbatch.py \\',
+        '+        ${CROSSBATCH_RESUME:+--resume} \\',
+        '+        ${CROSSBATCH_OVERWRITE:+--overwrite}',
+        '+',
+        '+EXIT_CODE=$?',
+        '+',
+        '+if [ $EXIT_CODE -eq 0 ]; then',
+        '+    echo "✅ Cross-batch training completed successfully"',
+        '+else',
+        '+    echo "❌ Cross-batch training failed with code $EXIT_CODE"',
+        '+fi',
+        '+',
+        '+exit $EXIT_CODE',
     ]),
     "scripts/run_evaluate_singularity.sh": ("scripts/launchers/run_evaluate_singularity.sh", []),   # pure rename
     "scripts/run_fast_grass_feasibility_singularity.sh": (
@@ -202,8 +254,18 @@ MOVED_SH = {
     ]),
     "scripts/run_inbatch_singularity.sh": (
         "scripts/launchers/run_inbatch_singularity.sh", [
-        "-#SBATCH --time=14:00:00   # TEMP: OOM smoke test \u2014 passes step-1 mem peak then SLURM kills it. RESTORE to 24:00:00 for real run.",
-        "+#SBATCH --time=24:00:00",
+        '-#SBATCH --time=14:00:00   # TEMP: OOM smoke test — passes step-1 mem peak then SLURM kills it. RESTORE to 24:00:00 for real run.',
+        '+#SBATCH --time=24:00:00',
+        '+# --- Experiment Knobs (override via env vars before sbatch) ---',
+        '+# INBATCH_RESUME=1        # continue a run whose manifest fingerprint matches',
+        '+# INBATCH_OVERWRITE=1     # discard an output dir built by a DIFFERENT config',
+        '+# Default (both unset) starts FRESH: stale checkpoint-* are removed first, which is',
+        '+# what stops Tevatron resuming them and reporting success after zero steps.',
+        '+',
+        '-    python -u scripts/train_inbatch.py',
+        '+    python -u scripts/train_inbatch.py \\',
+        '+        ${INBATCH_RESUME:+--resume} \\',
+        '+        ${INBATCH_OVERWRITE:+--overwrite}',
     ]),
     "scripts/run_refresh_stale_index_singularity.sh": ("scripts/launchers/run_refresh_stale_index_singularity.sh", []),   # pure rename
 }
@@ -215,6 +277,21 @@ ENTRY_POINTS = [
     "scripts/run_fast_grass.py",
     "scripts/train_async_fast_grass.py",
 ]
+
+# Amendment A6 -- the ONLY permitted surface additions, pinned per entry point.
+# Anything not listed here still fails, as does any removal. See the amendment note
+# above the criterion for why these two exist.
+ALLOWED_SURFACE_ADDITIONS = {
+    "scripts/train_inbatch.py":   {"cli": {"--resume", "--overwrite"},
+                                   "env_keys": {("get", "WORLD_SIZE")}},
+    # RANK: only rank 0 writes the checkpoint and the diagnostics log under DDP, so
+    # only rank 0 may validate them.
+    "scripts/train_crossbatch.py": {"cli": {"--resume", "--overwrite"},
+                                    "env_keys": {("get", "WORLD_SIZE"),
+                                                 ("get", "RANK")}},
+}
+SURFACE_FIELDS = ("cli", "recipes", "path_keys", "env_keys", "sys_path_ops",
+                  "mains", "main_guards")
 
 def git(*args, text=False):
     return subprocess.check_output(["git", *args], text=text)
@@ -300,10 +377,62 @@ def candidates(lines, ranges):
         choices = [old + [new] for old in choices for new in variants]
     return choices
 
-if not any("".join(line for i, line in enumerate(head_lines)
-                    if not any(start <= i < end for start, end in selected)) == base_text
-           for selected in candidates(head_lines, ranges)):
-    raise AssertionError("config diff is not exactly the additive Step-4 block")
+# Config drift that predates the baseline-hardening pass. The preprocessor
+# hardening landed after archive/consolidation-verified and this row has been
+# FAILING on main ever since -- recorded as defect P8 in CONSOLIDATION_STATUS.md,
+# pinned here so it is visible rather than blessed. Do not add to this list.
+PRE_EXISTING_CONFIG_DRIFT = [
+    '-    examples_config: "Gemini-1.0_reason"',
+    '+    examples_config: "examples"',
+    '-    subset: "hq"',
+    '-    train_file: "train_reasonir.jsonl"',
+    '-    msmarco_samples: 83030   # 23.7% - Public data bridge + calibration (prevent forgetting)',
+    '-    vl_samples: 149970       # 42.8% - ALL available clean VL (length generalization)',
+    '-    hq_samples: 97000        # 27.7% - Nearly all HQ (reasoning-intensive queries)',
+    '-    # Total: ~350k samples | Note: VL corrupted before index 95k, only 150k clean samples available',
+    '+    msmarco_samples: 83030   # 25.2% - Public data bridge + calibration (prevent forgetting)',
+    '+    vl_samples: 149970       # 45.4% - ALL available clean VL (length generalization)',
+    '+    hq_samples: 97000        # 29.4% - Nearly all HQ (reasoning-intensive queries)',
+    '+    vl_skip_first_n: 95000   # VL rows before this index are corrupted; skipped at generation',
+    '+    # Requested total: 330,000. VL writes 149,963 (7 rows past the cutoff are unusable),',
+    '+    # so the actual total is 329,993 -- the generators print requested vs written.',
+]
+
+# Amendment A6: config.yaml becomes the source of truth for values the two Tevatron
+# trainers used to hard-code, and training.overwrite_output_dir goes because it is
+# read by nothing and contradicts the fresh-start gate in helpers.prepare_output_dir.
+A6_CONFIG_LINES = [
+    '+  # Fallback for a recipe that declares no logging_steps of its own.',
+    '-  overwrite_output_dir: true',
+    '+    logging_steps: 100',
+    '+    save_total_limit: 6',
+    '+    save_fraction: 0.2        # checkpoint every 20% of total steps',
+    '+    gradient_checkpointing: true   # THE memory fix at query_max_len 1024 + eager attention',
+    # A7: cross-batch only, and pinned HERE because that is where it falls in the file.
+    # 0 removes the DataLoader worker processes entirely, so the shm tensor hand-off and
+    # the SIGCHLD path that surfaced job 15039's SIGBUS cannot occur. Every other recipe
+    # keeps its worker count.
+    '-    dataloader_num_workers: 4',
+    '+    dataloader_num_workers: 0   # 0 = collate inline: no worker processes, so no shm hand-off and no worker SIGBUS (job 15039)',
+    '+    save_steps: 100',
+    '+    save_total_limit: 3',
+    '+    gradient_checkpointing: true   # cross-batch omitted this and never reached a checkpoint',
+]
+EXPECTED_CONFIG_LINES = PRE_EXISTING_CONFIG_DRIFT + A6_CONFIG_LINES
+
+residuals = ["".join(line for i, line in enumerate(head_lines)
+                     if not any(start <= i < end for start, end in selected))
+             for selected in candidates(head_lines, ranges)]
+if not any(residual == base_text for residual in residuals):
+    # Not byte-identical to BASE: the remainder must be EXACTLY the pinned lines, so
+    # any other deletion, replacement, relocation or added hunk still fails.
+    actual = min((change_lines(base_text, residual) for residual in residuals), key=len)
+    if actual != EXPECTED_CONFIG_LINES:
+        unexpected = [l for l in actual if l not in EXPECTED_CONFIG_LINES]
+        missing = [l for l in EXPECTED_CONFIG_LINES if l not in actual]
+        raise AssertionError(
+            "config diff is not the permitted one (Step-4 block + pinned lines):\n"
+            f"  unexpected: {unexpected}\n  missing: {missing}")
 
 try:
     import yaml
@@ -323,8 +452,58 @@ for parent, child in (("training", "ance_msmarco"),):
     if child not in trimmed.get(parent, {}):
         raise AssertionError(f"missing required Step-4 block: {parent}.{child}")
     del trimmed[parent][child]
+
+# Amendment A6, semantic half: reverse exactly the keys the baseline-hardening pass
+# moved into config.yaml, so every OTHER semantic change still fails.
+A6_ADDED_KEYS = {
+    ("training", "inbatch"): ("logging_steps", "save_total_limit", "save_fraction",
+                              "gradient_checkpointing"),
+    ("training", "crossbatch"): ("save_steps", "save_total_limit",
+                                 "gradient_checkpointing"),
+}
+A6_REMOVED_KEYS = {("training",): ("overwrite_output_dir",)}
+for (parent, child), keys in A6_ADDED_KEYS.items():
+    for key in keys:
+        if key not in trimmed[parent][child]:
+            raise AssertionError(f"A6 expects {parent}.{child}.{key} to be present")
+        del trimmed[parent][child][key]
+for parents, keys in A6_REMOVED_KEYS.items():
+    node, base_node = trimmed, base_cfg
+    for seg in parents:
+        node, base_node = node[seg], base_node[seg]
+    for key in keys:
+        if key in node:
+            raise AssertionError(f"A6 expects {'.'.join(parents)}.{key} to be removed")
+        node[key] = base_node[key]
+
+# Amendment A7: cross-batch dataloader_num_workers 4 -> 0, so the DataLoader collates
+# inline and cannot spawn the worker processes whose SIGBUS killed job 15039. This is
+# a VALUE change rather than a key addition, so A6's add/remove machinery does not
+# cover it; reverse it by value, and every OTHER value change still fails.
+A7_CHANGED_VALUES = {("training", "crossbatch", "dataloader_num_workers"): (4, 0)}
+for path, (base_value, head_value) in A7_CHANGED_VALUES.items():
+    node = trimmed
+    for seg in path[:-1]:
+        node = node[seg]
+    if node.get(path[-1]) != head_value:
+        raise AssertionError(
+            f"A7 expects {'.'.join(path)} == {head_value}, found {node.get(path[-1])!r}")
+    node[path[-1]] = base_value
+
 if trimmed != base_cfg:
-    raise AssertionError("a pre-existing config value changed")
+    # Name the paths rather than saying "a value changed": defect P8 (the preprocessor
+    # hardening pass) already differs here, and an opaque message made that invisible.
+    def diff_paths(a, b, prefix=""):
+        if isinstance(a, dict) and isinstance(b, dict):
+            out = []
+            for key in sorted(set(a) | set(b)):
+                out += diff_paths(a.get(key), b.get(key), f"{prefix}.{key}" if prefix else key)
+            return out
+        return [] if a == b else [prefix]
+    raise AssertionError(
+        "config values differ outside the Step-4 block and the A6 keys at: "
+        + ", ".join(diff_paths(trimmed, base_cfg))
+        + "  (see CONSOLIDATION_STATUS.md defect P8)")
 
 # Step-6 logging may add reads for display, but it may not change these public
 # surfaces. train_crossbatch.py is inspected statically; --help is never used.
@@ -381,8 +560,22 @@ for path in ENTRY_POINTS:
         after = git("show", f"{HEAD}:{path}", text=True)
     except subprocess.CalledProcessError as exc:
         raise AssertionError(f"entry point is not present at both revisions: {path}") from exc
-    if fingerprint(before, path) != fingerprint(after, path):
+    before_fp, after_fp = fingerprint(before, path), fingerprint(after, path)
+    if before_fp == after_fp:
+        continue
+    allowed = ALLOWED_SURFACE_ADDITIONS.get(path)
+    if allowed is None:
         raise AssertionError(f"CLI/config-path/env/sys.path/main surface changed: {path}")
+    for field, was, now in zip(SURFACE_FIELDS, before_fp, after_fp):
+        permitted = allowed.get(field, set())
+        added, removed = now - was, was - now
+        if removed:
+            raise AssertionError(
+                f"{path}: {field} removed {sorted(removed)}; A6 permits additions only")
+        if added != permitted:
+            raise AssertionError(
+                f"{path}: {field} added {sorted(added)}, A6 permits exactly "
+                f"{sorted(permitted)}")
 
 print("SURFACE_ALLOWLIST_OK")
 PY

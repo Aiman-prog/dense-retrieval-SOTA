@@ -29,6 +29,12 @@ export OMP_NUM_THREADS=8
 # Container path
 CONTAINER="/scratch/${USER}/containers/pytorch_2.1.sif"
 
+# --- Experiment Knobs (override via env vars before sbatch) ---
+# INBATCH_RESUME=1        # continue a run whose manifest fingerprint matches
+# INBATCH_OVERWRITE=1     # discard an output dir built by a DIFFERENT config
+# Default (both unset) starts FRESH: stale checkpoint-* are removed first, which is
+# what stops Tevatron resuming them and reporting success after zero steps.
+
 # --- Run Training in Container ---
 echo "🚀 Starting In-Batch Negatives Training..."
 
@@ -36,7 +42,9 @@ singularity exec --nv \
     --bind /scratch/${USER}:/scratch/${USER} \
     --bind /home/${USER}:/home/${USER} \
     ${CONTAINER} \
-    python -u scripts/train_inbatch.py
+    python -u scripts/train_inbatch.py \
+        ${INBATCH_RESUME:+--resume} \
+        ${INBATCH_OVERWRITE:+--overwrite}
 
 EXIT_CODE=$?
 

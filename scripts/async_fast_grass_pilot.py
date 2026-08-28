@@ -34,7 +34,6 @@ Usage:
   python scripts/async_fast_grass_pilot.py check-gate --async_dir ... --model_dir ...
 """
 import argparse
-import hashlib
 import json
 import sys
 from pathlib import Path
@@ -45,7 +44,7 @@ project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root / 'src'))
 sys.path.insert(0, str(project_root / 'scripts'))
 
-from utils.helpers import get_path  # noqa: E402
+from utils.helpers import _sha256, get_path  # noqa: E402
 
 
 # ---- mixture layout ---------------------------------------------------------
@@ -241,14 +240,6 @@ def build_manifest(by_source, counts, seed=42):
             keyed.append(((i + 0.5) / n, rank, i, source, qid))
     keyed.sort(key=lambda t: (t[0], t[1], t[2]))
     return [{'query_id': qid, 'source': source} for _k, _r, _i, source, qid in keyed]
-
-
-def _sha256(path):
-    h = hashlib.sha256()
-    with open(path, 'rb') as f:
-        for chunk in iter(lambda: f.read(1 << 20), b''):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def write_manifest(path, rows, seed, counts, preset=None):

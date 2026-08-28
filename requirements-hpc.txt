@@ -31,5 +31,18 @@ pytrec-eval-terrier                # TREC evaluation metrics (MRR, NDCG, Recall)
 pandas>=2.0.0                      # Data manipulation (qrels, results, preprocessing)
 matplotlib>=3.7.0                  # Plotting (recall curves)
 
+# --- Sparse retrieval (BM25 baseline) ---
+# pyserini was absent from this file entirely while being the package that produces the
+# BM25 numbers -- README.md installed it unpinned by copy-paste. Every BM25 result JSON
+# now records the pyserini version that built its index, and an index whose recorded
+# version differs is rebuilt rather than reused (scripts/run_bm25_evals.py).
+#
+# Verified on DelftBlue 2026-08-26 (~/.local/lib/python3.10/site-packages): pyserini
+# 1.2.0, bundling anserini-1.1.1-fatjar.jar -- that jar IS the Lucene identity, so the
+# pyserini pin is what fixes index compatibility. NOTE the local dev box runs pyserini
+# 1.5.0, so an index built there is NOT reusable here; run_bm25_evals.py detects the
+# mismatch from index_meta.json and rebuilds rather than searching a foreign index.
+pyserini==1.2.0
+
 # --- Utilities ---
 pyyaml>=6.0
