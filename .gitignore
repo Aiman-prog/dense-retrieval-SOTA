@@ -86,3 +86,10 @@ bug_fixes.md
 grass-report.tex
 grass_draft-5.pdf
 .gitignore
+
+# Thesis-writing notes and the review rubric: local only
+docs/CODE_REVIEW_PROMPT.md
+docs/inbatch.md
+docs/crossbatch.md
+docs/evaluation.md
+docs/preprocessor.md
