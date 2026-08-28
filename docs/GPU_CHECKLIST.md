@@ -490,9 +490,6 @@ setup is wrong, and the same fault would corrupt `ance_msmarco`. A local checkpo
 that passes that preflight but misses the local acceptance criteria is a training result,
 not an evaluator failure.
 
-See `docs/ance_implementation_details.md` for the exact Microsoft/local configuration
-table, expected 250,488-step calculation, and required hardware-limitation wording.
-
 ---
 
 ## What is unchanged from pre-consolidation
