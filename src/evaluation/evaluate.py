@@ -12,6 +12,7 @@ import subprocess
 import numpy as np 
 from pathlib import Path
 import json
+import datetime
 import faiss
 import shutil
 import torch 
@@ -21,10 +22,14 @@ os.environ["TRANSFORMERS_ATTENTION_IMPLEMENTATION"] = "eager"
 
 project_root = Path(__file__).resolve().parent.parent.parent
 sys.path.append(str(project_root / 'src'))
+from utils.eval_attempt import configure_cache, identity_digest, model_identity
+if __name__ == '__main__':
+    configure_cache()
 
 from utils.helpers import (load_config, get_data_base_dir, load_excluded_ids,
                            search_depth, apply_exclusions, model_run_tag,
-                           _load_qrels, require_eval_files, check_eval_artifacts)
+                           _load_qrels, require_eval_files, check_eval_artifacts,
+                           atomic_write, eval_artifact_hashes, _code_revision)
 from evaluation.trec_eval_wrapper import TrecEvalWrapper
 
 def main():
@@ -33,6 +38,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=str, required=True)
     parser.add_argument("--domain", type=str, default="biology")
+    parser.add_argument('--attempt_manifest', type=Path)
     args = parser.parse_args()
 
     # Read k and batch_size from config.yaml
@@ -63,7 +69,8 @@ def main():
     # The tag hashes the ABSOLUTE model path: two runs can both end in
     # `checkpoint-500`, and a basename-only tag let them share this directory.
     model_tag = model_run_tag(args.model_path)
-    eval_dir = base_dir / 'data' / 'evaluation' / model_tag / args.domain
+    attempt_id = configure_cache()
+    eval_dir = base_dir / 'data' / 'evaluation' / model_tag / attempt_id / args.domain
     eval_dir.mkdir(parents=True, exist_ok=True)
 
     corpus_file = processed_dir / f"{args.domain}_corpus.jsonl"
@@ -75,6 +82,21 @@ def main():
     require_eval_files(args.domain, [
         corpus_file, queries_file, qrels_file,
         processed_dir / f"{args.domain}_excluded.json"])
+    if args.attempt_manifest:
+        attempt = json.loads(args.attempt_manifest.read_text())
+        if attempt['attempt_id'] != attempt_id:
+            raise ValueError('Evaluation attempt does not match inherited environment')
+        if (attempt['identity']['model_config'] != config['model'] or
+                attempt['identity']['evaluation_config'] != config['evaluation']):
+            raise ValueError('Evaluation configuration changed after attempt started')
+        results_base = args.attempt_manifest.parent
+    else:
+        attempt = {'attempt_id': attempt_id, 'identity': {
+            'model': model_identity(args.model_path), 'model_config': config['model'],
+            'evaluation_config': config['evaluation'],
+            'artifacts': eval_artifact_hashes(processed_dir, [args.domain]),
+            'evaluator_revision': _code_revision()}}
+        results_base = base_dir / config['paths']['results_dir'] / model_tag / attempt_id
     
     corpus_pkl = eval_dir / 'corpus_emb' / 'corpus.pkl'
     query_pkl = eval_dir / 'query_emb' / 'query.pkl'
@@ -106,6 +128,7 @@ def main():
             '--per_device_eval_batch_size', str(args.batch_size),
             '--dataset_name', 'json',
             '--dataset_path', str(input_f),
+            '--dataset_cache_dir', os.environ['HF_DATASETS_CACHE'],
             '--encode_output_path', str(output_p),
             '--attn_implementation', 'eager',
             '--dataloader_num_workers', str(args.dataloader_num_workers),
@@ -117,12 +140,7 @@ def main():
         
         if is_q:
             q_len = str(config['model'].get('query_max_len', 128))
-            temp_cmd = cmd + ['--encode_is_query', '--query_max_len', q_len]
-            res = subprocess.run(temp_cmd)
-            if res.returncode != 0:
-                print("⚠️ Retrying with fallback flags...", flush=True)
-                temp_cmd = cmd + ['--encode_is_qry', '--q_max_len', q_len]
-                subprocess.run(temp_cmd, check=True)
+            subprocess.run(cmd + ['--encode_is_query', '--query_max_len', q_len], check=True)
         else:
             p_len = str(config['model'].get('passage_max_len', 512))
             subprocess.run(cmd + ['--passage_max_len', p_len], check=True)
@@ -188,7 +206,6 @@ def main():
     print(f"Recall@1000: {metrics.get('recall_1000', 0):.4f}\n" + "*"*40, flush=True)
 
     # Save results to JSON for downstream aggregation
-    results_base = base_dir / config['paths']['results_dir'] / model_tag
     results_base.mkdir(parents=True, exist_ok=True)
     result_file = results_base / f"{args.domain}_results.json"
     # model_path is resolved and run_tag recorded so a collector can prove this file
@@ -199,7 +216,10 @@ def main():
         "run_tag": model_tag,
         "metrics": metrics
     }
-    with open(result_file, 'w') as f:
+    result_data.update(attempt_id=attempt_id,
+                       identity_sha256=identity_digest(attempt['identity']),
+                       completed_at=datetime.datetime.now(datetime.timezone.utc).isoformat())
+    with atomic_write(result_file) as f:
         json.dump(result_data, f, indent=2)
     print(f"📄 Results saved to: {result_file}", flush=True)
 

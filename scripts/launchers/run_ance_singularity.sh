@@ -2,7 +2,7 @@
 
 #SBATCH --job-name=ance-reasonir
 #SBATCH --partition=gpu-a100
-#SBATCH --time=10:00:00              # Async ANCE: encoding passes add significant time
+#SBATCH --time=24:00:00              # p1024 encoding + >=2 mined rounds do not fit 10h
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16           # More CPUs for FAISS operations
 #SBATCH --gpus-per-task=2            # 1:1 Trainer:Inferencer GPU split (paper Appendix A.3)
@@ -13,6 +13,7 @@
 #SBATCH --chdir=/home/aimanabdulwaha/dense-retrieval-SOTA
 
 # --- Environment Setup ---
+source scripts/launchers/runtime_provenance.sh || exit 1
 export DATA_BASE_DIR="/scratch/${USER}/dense-retrieval-SOTA"
 export PYTHONPATH="/home/${USER}/dense-retrieval-SOTA/src:${PYTHONPATH}"
 export APPTAINER_CACHEDIR=/scratch/${USER}/.apptainer
@@ -37,7 +38,7 @@ singularity exec --nv \
     --bind /scratch/${USER}:/scratch/${USER} \
     --bind /home/${USER}:/home/${USER} \
     ${CONTAINER} \
-    python -u scripts/train_ance.py
+    python -u scripts/train_ance.py --recipe ance
 
 EXIT_CODE=$?
 

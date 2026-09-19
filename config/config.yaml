@@ -8,7 +8,23 @@ model:
   normalize: true
   temperature: 0.02  # Standard for dense retrieval contrastive learning
   query_max_len: 1024  # Measured (BGE-M3 tokenizer): BRIGHT eval queries are long reasoning prompts (median ~666 tok); 256 covered ~0% of them, 1024 covers ~95%. Train queries (reasonir, median ~79) fit easily. Dynamic padding => negligible cost on short queries.
-  passage_max_len: 512  # Measured token coverage (BGE-M3 tokenizer): ~90% of reasonir/BRIGHT passages retained at 512 vs only ~57% at 128. 128 truncated 70-79% of theoremqa/aops/leetcode passages. Re-encode stale index after changing.
+  passage_max_len: 512   # FirstP cap for every BGE-M3 arm. p1024 was adopted and then
+                         # REVERTED on measurement: job 64255 (A100 80GB) put batch 64 /
+                         # group 2 at 11.29 s/step against p512's measured 4.05, i.e. ~32h
+                         # for two epochs against a 24h per-job wall. Peak was 60.09 GiB
+                         # with gradient checkpointing already enabled, so that cannot be
+                         # traded back, and attention is stuck on eager (transformers is
+                         # pinned at 4.40.2, where XLM-R reports _supports_sdpa False).
+                         # What 512 costs is real and tabulated per domain in
+                         # docs/ance_code_review_and_bright_adaptation.md 7.3: it retains
+                         # only 46.18% of StackOverflow and 18.42% of Earth-science
+                         # relevant tokens, against 87.78% / 29.29% at 1024. Whether that
+                         # truncation changes RETRIEVAL is unmeasured -- that is the 7.4
+                         # step-2 ablation, and it gates any future move back to 1024.
+                         # Dynamic padding everywhere, so short passages cost nothing.
+                         # Changing this forks EVERY arm: it is part of the encoding
+                         # contract, so checkpoints at the other cap are refused at
+                         # evaluation, and the Fast-GRASS stale index must be rebuilt.
 
 # --- Paths Configuration ---
 paths:
@@ -69,7 +85,10 @@ training:
     per_device_batch_size: 512   # 512 * 2 GPUs (DistributedContrastiveLoss all_gather) = 1024 query pool
     gradient_accumulation_steps: 1   # accumulation does not pool cross-batch negatives in GradCache
     gc_q_chunk_size: 32       # GradCache bounds PEAK MEMORY by chunk (not per_device); raise/lower this to tune memory
-    gc_p_chunk_size: 32
+    gc_p_chunk_size: 32       # Briefly 16 to hold peak memory flat at p1024; restored with
+                              # the p512 revert, which is also what checkpoint-600 was built
+                              # at. Chunk size bounds activation memory only -- the pool stays
+                              # 1024 queries / 2047 negatives (check_batch_invariants).
     learning_rate: 1e-5  # Lower LR for BGE-M3 continued training
     warmup_ratio: 0.1
     weight_decay: 0.01
@@ -90,7 +109,11 @@ training:
   grass:
     # σ estimator is selected at the CLI: --uncertainty {mc_dropout, ema}
     model_name: "grass_mixed_bge_m3"   # base name — code appends _mc_dropout or _ema
-    base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_mixed_bge_m3"
+    base_model: "BAAI/bge-m3"   # every mining arm starts from the SAME base as the
+                                # in-batch baseline, so the BRIGHT table compares one
+                                # variable: negative selection. Warm-starting these
+                                # from inbatch_mixed_bge_m3 gave them ~2x the baseline's
+                                # cumulative optimizer steps.
 
     # --- Shared ---
     P: 200             # candidates retrieved from stale ANN per query
@@ -101,7 +124,10 @@ training:
     learning_rate: 1e-5
     num_epochs: 2
     train_group_size: 2
-    bf16: true
+    bf16: true                # bf16 WEIGHTS, not just autocast: Tevatron's driver
+                              # derives torch_dtype from this for the in-batch and
+                              # cross-batch arms, so the BRIGHT comparison would
+                              # otherwise straddle two numerical paths.
     dataloader_num_workers: 2
     warmup_ratio: 0.1
     weight_decay: 0.01
@@ -125,7 +151,11 @@ training:
     # Negative-Cache-inspired mining: one bounded global cache H replaces the
     # per-query stale top-P pools. See fast_grass_*.md. Default = MCDP + TopK.
     model_name: "fast_grass_mixed_bge_m3"
-    base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_mixed_bge_m3"
+    base_model: "BAAI/bge-m3"   # every mining arm starts from the SAME base as the
+                                # in-batch baseline, so the BRIGHT table compares one
+                                # variable: negative selection. Warm-starting these
+                                # from inbatch_mixed_bge_m3 gave them ~2x the baseline's
+                                # cumulative optimizer steps.
 
     # --- Cache / selection (v0 defaults from fast_grass_implementation_details.md) ---
     B_doc: 100000            # global cache size; ablate 32k / 100k / 512k
@@ -166,7 +196,10 @@ training:
     batch_size: 64           # minibatch size for the Algorithm-1 outer loop
     train_group_size: 2
     mc_batch_size: 1024      # encode batch size for queries / cache maintenance
-    bf16: true
+    bf16: true                # bf16 WEIGHTS, not just autocast: Tevatron's driver
+                              # derives torch_dtype from this for the in-batch and
+                              # cross-batch arms, so the BRIGHT comparison would
+                              # otherwise straddle two numerical paths.
     dataloader_num_workers: 2
     warmup_ratio: 0.1
     weight_decay: 0.01
@@ -185,7 +218,11 @@ training:
     # Sibling to `fast_grass` above, which stays SEQUENTIAL (lazy top-L MCDP) —
     # these defaults deliberately differ from it.
     model_name: "async_fast_grass_mixed_bge_m3"
-    base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_mixed_bge_m3"
+    base_model: "BAAI/bge-m3"   # every mining arm starts from the SAME base as the
+                                # in-batch baseline, so the BRIGHT table compares one
+                                # variable: negative selection. Warm-starting these
+                                # from inbatch_mixed_bge_m3 gave them ~2x the baseline's
+                                # cumulative optimizer steps.
 
     # --- cached-MCDP: no L key; every query is scored against ALL of H ---
     uncertainty: "cached_mcdp"   # async production mode; async EMA is deferred
@@ -256,7 +293,10 @@ training:
     batch_size: 64
     train_group_size: 2
     mc_batch_size: 1024      # trainer encode batch
-    bf16: true
+    bf16: true                # bf16 WEIGHTS, not just autocast: Tevatron's driver
+                              # derives torch_dtype from this for the in-batch and
+                              # cross-batch arms, so the BRIGHT comparison would
+                              # otherwise straddle two numerical paths.
     dataloader_num_workers: 2
     warmup_ratio: 0.1
     weight_decay: 0.01
@@ -338,7 +378,11 @@ training:
     pilot_gate_min_steps: 1  # 64 total steps cannot reach the pilot's 128
 
   ance:
-    base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_mixed_bge_m3"
+    base_model: "BAAI/bge-m3"   # every mining arm starts from the SAME base as the
+                                # in-batch baseline, so the BRIGHT table compares one
+                                # variable: negative selection. Warm-starting these
+                                # from inbatch_mixed_bge_m3 gave them ~2x the baseline's
+                                # cumulative optimizer steps.
     model_name: "ance_mixed_bge_m3"
     train_group_size: 2       # 1 explicit mined negative — paper: "uniformly sample one
                               # negative from ANN top 200". Under the shared BGE-M3/
@@ -346,6 +390,12 @@ training:
                               # that 1 mined negative plus 126 passages belonging to
                               # other examples, which the pinned loss does NOT mask. This is
                               # ANCE-style mining, not Microsoft's pairwise RoBERTa reproduction.
+                              # For the record, upstream is 1 hard negative and ZERO in-batch
+                              # (models.py:76-81 builds a [B, 2] softmax); --negative_sample 20
+                              # is run COVERAGE, 20 separate instances at 20 separate steps,
+                              # never a 20-wide denominator. So this arm contrasts against MORE
+                              # negatives than ANCE does, not fewer. Report it as "ANCE-style
+                              # mining"; `ance_paper` is the faithful reproduction.
     mining_depth: 200         # paper Table 7 "TopKNeg"
     total_epochs: 2           # MATCHED to the GRASS arms (grass/fast_grass/async all run
                               # num_epochs 2 at batch 64, group 2), so the BRIGHT table
@@ -357,8 +407,22 @@ training:
                               # lower bound on ANCE, not ANCE at convergence.
     learning_rate: 1e-5
     batch_size: 64
-    per_device_eval_batch_size: 512
-    bf16: true
+    per_device_eval_batch_size: 64   # 512 -> 64 for p1024 encoding. The short-passage
+                              # throughput setting does not transfer to a 1024-token cap.
+    gradient_checkpointing: true     # THE memory fix at q1024/p512 + eager attention,
+                              # matching the in-batch arm this is compared against.
+    ann_chunk_factor: 1       # Mine every BRIGHT training query each round. This smaller
+                              # dataset does not need Microsoft's five-way MS MARCO shard;
+                              # full coverage maximizes exposure inside the two-epoch budget.
+    max_encode_seconds: 21600 # 6h. The ANCE stall detector: a heartbeat cannot detect a
+                              # deadlocked encode subprocess, a timeout can. Deliberately
+                              # generous — this is a hang guard, not a performance budget.
+    min_fresh_rounds: 2       # rounds from DISTINCT checkpoints, each consumed for at
+                              # least logging_steps. One refresh is not an ANCE loop.
+    bf16: true                # bf16 WEIGHTS, not just autocast: Tevatron's driver
+                              # derives torch_dtype from this for the in-batch and
+                              # cross-batch arms, so the BRIGHT comparison would
+                              # otherwise straddle two numerical paths.
     dataloader_num_workers: 2
     warmup_ratio: 0.1
     weight_decay: 0.01
@@ -385,44 +449,6 @@ training:
     eval_metric: "ndcg_cut_10"
 
 
-  ance_msmarco:
-    base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/inbatch_mixed_bge_m3"
-    model_name: "ance_msmarco_bge_m3"
-    train_group_size: 2                 # Paper: 1 negative per positive (Table 3)
-    mining_depth: 200                   # Paper: top-200 ANN (Table 7)
-    total_epochs: 3                     # NOT matched to GRASS: this arm is compared to the
-                                        # PAPER, not to GRASS. See eval_metric below —
-                                        # this recipe is a BGE port sanity check, not a
-                                        # reproduction of 0.330/0.959 (which is RoBERTa +
-                                        # BM25 warm-up + LAMB at 600K steps, upstream).
-    learning_rate: 5e-6                 # Paper LAMB 3e-6; AdamW equiv ~5e-6 for BGE-M3
-    batch_size: 64
-    per_device_eval_batch_size: 256     # full A100 (80GB) — ~35min per encode vs 2.3h at 64
-    dataloader_num_workers: 4
-    warmup_ratio: 0.06                  # Paper: 5000 steps / ~83k total ≈ 6%
-    weight_decay: 0.01
-    max_grad_norm: 1.0
-    save_steps: 1250                    # ANN refresh interval m. Paper: 10k batches @ bs=8
-                                        # → 10000*8/64 = 1250. One full-corpus encode of
-                                        # 8.8M passages takes hours, so the Inferencer
-                                        # cannot keep this cadence; expect 1-2 rounds.
-    logging_steps: 500
-    eval_top_k: 1000                    # Recall@1000 needs the full depth; MRR@10 is
-                                        # computed by truncating the run to 10.
-    data_gen_poll_interval: 60
-    bf16: true
-    corpus_file: "msmarco_corpus.jsonl"
-    train_queries_file: "msmarco_train_queries.jsonl"
-    train_qrels_file: "msmarco_train_qrels.txt"
-    mixture_dir: "msmarco_training_mixture"
-    temp_workdir: "temp_ance_msmarco"
-    setup_mode: "tevatron_msmarco"
-    eval_corpus_file: "msmarco_corpus.jsonl"
-    eval_queries_file: "msmarco_dev_queries.jsonl"
-    eval_qrels_file: "msmarco_dev_qrels.txt"
-    eval_metric: "mrr_at_10"            # scripts/eval_msmarco.py reports MRR@10 AND
-                                        # Recall@1000, the paper's two headline metrics.
-                                        # The old "recip_rank" at depth 1000 was MRR@1000.
 
 
   ance_paper:
@@ -438,7 +464,17 @@ training:
     # norm.* directly onto AnceEncoder — no conversion step. The released ANCE @600K is
     # an EVALUATION reference only; add its weight hash below when the artifact arrives.
     base_model: "/scratch/aimanabdulwaha/dense-retrieval-SOTA/models/ance_bm25_warmup_60k"
-    forbidden_init_sha256: []   # optional deny-list; populate with released 600K weight sha256
+    # EXACT allow-list, not a deny-list. A deny-list can only refuse hashes someone
+    # thought to write down, so an empty one admits any structurally compatible
+    # checkpoint — the released, finished 600K weights included, which would
+    # "reproduce" 0.330 by construction. Produce the value on DelftBlue with:
+    # train_ance_warmup.py PRINTS this hash on success; copy it from there. To
+    # recompute it, note transformers 4.40.2 writes model.safetensors, not
+    # pytorch_model.bin (assert_permitted_init accepts either):
+    #   python -c "import sys;sys.path.insert(0,'src');from utils.helpers import _sha256
+    #              print(_sha256('<base_model>/model.safetensors'))"
+    # The run REFUSES to start while this is null.
+    expected_init_sha256: "17e06536c86ce874ea911d9080a3aa0657877fe344d6390703538fd4b2b802cf"
 
     # Objective geometry. These OVERRIDE model.* — without them the manifest and the
     # embedding cache would inherit normalize:true / temperature:0.02 and describe a
@@ -460,13 +496,29 @@ training:
     weight_decay: 0.0           # upstream default; LAMB folds it into adam_step
     max_grad_norm: 1.0
     warmup_steps: 5000          # ABSOLUTE (run_train.sh:33), not a ratio
-    total_epochs: 2             # two expanded-dataset epoch EQUIVALENTS (~250K steps
-                                # for Tevatron's ~400,782 records). A fresh ANN round
-                                # can restart the shuffled loader partway through.
-                                # Hardware-constrained middle ground vs paper's 600K.
+    # STEP-budgeted, like the reference, and the two steps are different numbers.
+    # --single_warmup builds ONE linear decay over --max_steps (default 1,000,000)
+    # while the released comparison checkpoint is 600K, so the horizon sets the LR at
+    # every step and the stop step only decides where the run ends (run_ann.py:174-178).
+    scheduler_max_steps: 1000000
+    train_stop_steps: 300000    # Fixed one-allocation hardware budget. 600K does not fit
+                                # one 24h allocation on a single A100 and there is no
+                                # cross-job resume; the deviation is recorded in provenance.
+    ann_chunk_factor: 5         # --ann_chunk_factor default (run_ann_data_gen.py:543)
+    max_encode_seconds: 43200   # 12h hang guard on the 8.8M-passage encode
+    min_fresh_rounds: 2
+    gradient_checkpointing: false  # upstream has none, and RoBERTa-base at q64/p512
+                                # does not need it
     save_steps: 10000           # --save_steps: THE ANN REFRESH INTERVAL m
     logging_steps: 100          # --logging_steps; also the round-poll interval
-    bf16: true                  # DEVIATION: upstream used fp16 + dynamic loss scaling.
+    bf16: true                  # AUTOCAST ONLY -- parameters stay FP32 here, unlike the
+                                # BGE arms, which load bf16 weights to match Tevatron's
+                                # driver. LAMB at lr 1e-6 moves a weight by far less
+                                # than bf16 can represent, so bf16 master weights would
+                                # round most updates to zero. A labelled deviation
+                                # either way: the supplied ANCE command runs FP32
+                                # throughout (--fp16 is store_true and run_train.sh
+                                # never passes it; only run_train_warmup.sh does).
                                 # bf16 needs no GradScaler, so there are no skipped
                                 # updates and global_step IS the successful-step count.
     per_device_eval_batch_size: 256
@@ -485,9 +537,67 @@ training:
     eval_qrels_file: "msmarco_dev_qrels.txt"
     eval_metric: "mrr_at_10"
 
+  ance_paper_warmup:
+    # THE BM25 WARM-UP `ance_paper` INITIALIZES FROM. Microsoft's released 60K warm-up
+    # is gone -- both blob URLs return HTTP 409 and microsoft/ANCE #23/#24/#26 have been
+    # open since 2022 -- and the only surviving mirror is bit-identical to the 600K
+    # FINAL, which assert_permitted_init exists to refuse. So we train it.
+    #   python scripts/train_ance_warmup.py
+    # Values mirror commands/run_train_warmup.sh. Same model, same loss (NLL,
+    # models.py:77-81 == ance_paper.pairwise_nll) and same optimizer as `ance_paper`;
+    # only the negatives (static BM25, not mined ANN), the lengths and the
+    # hyperparameters differ. There is no mining and no round handoff here.
+    paper_fidelity: true
+    model_name: "ance_bm25_warmup_60k"
+    base_model: "roberta-base"      # the projection head does not exist yet; the
+                                    # warm-up is what trains it
+    mixture_dir: "msmarco_training_mixture"
+
+    train_group_size: 31      # 30 BM25 negatives already in the mixture, each expanded
+                              # into its own (query, positive, negative) triplet by
+                              # ANCEDataset's paper mode. 400,782 x 30 = ~12M triplets;
+                              # 60K steps at batch 32 consumes under 2M of them.
+    batch_size: 32            # --per_gpu_train_batch_size 32
+    learning_rate: 2.0e-4     # --learning_rate 2e-4. 200x the ANCE lr: this is a fresh
+                              # head on a cold body, not a refinement.
+    lamb_eps: 1.0e-8
+    weight_decay: 0.0
+    max_grad_norm: 1.0
+    warmup_steps: 1000        # --warmup_steps 1000, ABSOLUTE
+    train_stop_steps: 60000   # the released checkpoint's label is 60K
+    # NOT a typo, and not the stop step. Upstream decays over
+    # num_train_epochs 2.0 x expected_train_size 35,000,000 / batch 32 = ~2.19M steps,
+    # so at step 60K the LR is still ~2e-4 (essentially flat). Collapsing this to 60000
+    # would decay it to zero by the end and be a different optimization entirely.
+    scheduler_max_steps: 2187500
+
+    # BOTH 128 (--max_seq_length 128 feeds all three fields through one processor).
+    # NOT ance_paper's q64/p512 -- inheriting those would be a different warm-up.
+    query_max_len: 128
+    passage_max_len: 128
+    normalize: false          # raw dot, as in ance_paper
+    temperature: 1.0
+    pooling: "cls"
+    bf16: true                # FP32 weights under bf16 autocast, matching ance_paper.
+                              # At lr 2e-4 the bf16-underflow argument does not bind
+                              # either way; keeping it identical removes an axis of
+                              # difference between the two runs.
+    gradient_checkpointing: false
+    dataloader_num_workers: 0   # 0, NOT 4: ANCEDataset holds the whole 5.2 GB mixture as
+                              # Python objects (measured 28.4 GB RSS, job 75676), and each
+                              # forked worker copies it as refcounting defeats COW.
+                              # Tokenizing ~96 short texts is negligible beside a step.
+    logging_steps: 1000       # --logging_steps 1000
+    save_steps: 30000         # --save_steps 30000. Plain checkpointing here: this
+                              # recipe has no ANN index, so it is NOT a refresh interval.
+                              # Written as interim-<step>/, a RESCUE artifact with no
+                              # optimizer state: there is no resume, and without it a
+                              # wall-clock kill loses the whole run.
+
 
 # --- Evaluation Settings (Restored & Cleaned) ---
 evaluation:
+  primary_metric: "recall_1000"
   eval_domains:
     - "biology"
     - "earth_science"
@@ -506,7 +616,10 @@ evaluation:
     - "NDCG@10"
     - "Recall@1000"
   top_k: 1000
-  batch_size: 128
+  batch_size: 64            # 128 -> 64 with passage_max_len 1024. Encode-only
+                            # throughput: it is not part of the encoding contract and
+                            # moves no metric, but 128 x 1024 tokens on the 413k-doc
+                            # leetcode corpus is where evaluation would OOM.
   trec_eval_path: "trec_eval"
   bf16: True
   dataloader_num_workers: 4

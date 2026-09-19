@@ -851,6 +851,11 @@ GradCache is byte-identical to commit `906f038...` -- all now pinned in
 
 ### P8 — `AC-SURFACE-01` has been failing on `main` since the post-consolidation refactors
 
+> **SUPERSEDED by `P-ANCE-03` (ANCE refactor).** `AC-SURFACE-01` is now retired in
+> `ACCEPTANCE_CRITERIA.md` rather than merely red. The drifts below are the evidence for
+> why it was unrepairable, and are kept for that reason; no action remains against them.
+
+
 **Symptom.** The row raises before it can print `SURFACE_ALLOWLIST_OK`. Verified on
 untouched `main` (no working-tree changes) during the baseline-hardening pass.
 
@@ -1053,6 +1058,35 @@ only — not retrieval quality, not GPU training correctness.
 
 Found while hardening `src/data/preprocessor.py`. Recorded, deliberately not fixed.
 
+### P-EVAL-01 — Recall@1000 must become the primary BRIGHT metric — **FIXED**
+
+**Intended methodology.** Recall@1000 is the thesis's primary BRIGHT metric. NDCG@10 and
+MRR remain reportable secondary metrics. Before this fix, the report described that
+protocol but the evaluation summaries still centered NDCG@10.
+
+**Resolution.** `evaluation.primary_metric` now names `recall_1000`. Dense, BM25, and
+internal BRIGHT evaluation report Recall@1000 as primary while retaining NDCG@10 and MRR.
+New dense and BM25 summaries publish `primary_metric`, `primary_score`, and macro values
+for all three metrics. Formal sparse/dense comparisons require matching primary metrics
+as well as matching domains and evaluation-artifact hashes.
+
+The internal BRIGHT helper now uses the configured depth of 1,000, applies exclusions
+before truncation, and reports all three macro metrics. The separate MS MARCO ANCE
+evaluation remains unchanged because its paper comparison uses MRR@10 and Recall@1000.
+
+**Historical boundary.** The completed lambda pilot remains a historical NDCG@10-based
+screening analysis. Do not reinterpret its recorded decision, rewrite its result files, or
+propose a full-scale rerun of the lambda 0/0.3/0.5 arms. Future decision tooling should use
+the configured Recall@1000 primary metric, but its promotion thresholds require a separate
+wide-refactor decision and are deliberately not specified here.
+
+**Verification.** `tests/bright_eval_integrity_test.py` (19/19),
+`tests/bm25_provenance_test.py` (24/24), and
+`tests/async_fast_grass_pilot_test.py` (61/61) pass. Existing stored results were not
+rewritten; formal comparisons must regenerate summaries that predate the new fields.
+
+---
+
 ### P-PRE-01 — BRIGHT `excluded_ids` was ignored — **FIXED**
 
 Exclusions are now preserved by `BRIGHTLoader.get_excluded_ids`, written per domain as
@@ -1071,6 +1105,12 @@ conclusions included — was computed without exclusion filtering and must be re
 it is comparable to published BRIGHT results.**
 
 ### P-ANCE-01 — job 9566838 / 0.1683 is QUARANTINED, non-reportable
+
+**Replacement in flight (2026-09-16).** `ance_mixed_bge_m3` was retrained cleanly by job
+70367 (9 refreshes from 9 distinct checkpoints, mining kept pace) but has no BRIGHT score
+yet: the first attempt (204851) lost 3 of 12 domains to `P-EVAL-02`. Job 220292 is the
+re-evaluation, with 220293 chained behind it for the in-batch baseline. Until 220292
+publishes a twelve-domain `summary.json`, there is still no reportable ANCE number.
 
 Not a result. Do not cite it, compare against it, or use it as a "prior run for
 reference". Six independent grounds, any one of which is disqualifying:
@@ -1104,6 +1144,42 @@ all twelve domains carrying `eval_artifact_sha256` and `training_manifest`:
 EVAL_REQUIRE_EXISTING=1 EVAL_DOMAINS=all EVAL_MODEL_PATH=<checkpoint> \
   sbatch scripts/launchers/run_evaluate_singularity.sh
 ```
+
+---
+
+### P-ANCE-03 — `ance_msmarco` retired; `AC-SURFACE-01` and `AC-COMP-08` retired with it
+
+**What was removed.** The `training.ance_msmarco` config block,
+`scripts/launchers/run_ance_msmarco_singularity.sh`, and the `temp_ance_msmarco` path key in
+`src/utils/helpers.py`.
+
+**Why.** `ance_msmarco` was a BGE-M3 port of MS MARCO described in its own config comment as
+a sanity check, explicitly not a reproduction of 0.330/0.959 and not a BRIGHT arm. It was
+never run end to end (`GPU_CHECKLIST.md` called the first submission a smoke test), it was
+blocked on `P6`, and it sat between the two arms that do carry a claim: `ance` (BGE-M3,
+BRIGHT, reportable) and `ance_paper` (RoBERTa, MS MARCO Passage, the reproduction). It
+produced no result anyone would cite while duplicating the MS MARCO setup, launcher and
+evaluation surface of `ance_paper`.
+
+Its launcher was also the concrete hazard `run_ance_paper_singularity.sh` was written to
+remove: `ANCE_RECIPE="${ANCE_RECIPE:-ance_msmarco}"` meant an unset variable silently
+selected a different model, and two docs instructed exactly that form for paper runs.
+
+**Consequences accepted.**
+- `AC-SURFACE-01` is retired. It pinned `ance_msmarco` as the sole additive config block and
+  its launcher as one of two allowed additions, so with the recipe gone the allowlist
+  describes a tree that no longer exists. It could only be rewritten against a new baseline,
+  which would make it a different criterion. It was already red (`P8`).
+- `AC-COMP-08` is retired. It required the deleted launcher to invoke the deleted recipe.
+- `scripts/eval_msmarco.py` now defaults to `--recipe ance_paper`.
+- `tests/preprocessor_test.py`'s partial-rebuild test is retained, renamed and repointed at
+  `ance_paper`: partial MS MARCO setup rebuilding is still live behaviour, shared through
+  `setup_mode: tevatron_msmarco`.
+
+**What still guards the property `AC-SURFACE-01` protected.** Both remaining ANCE launchers
+hardcode their recipe, so no unset variable can select the wrong experiment, and
+`helpers.require_recipe_keys` fails any run whose config declares a key nothing reads or
+reads a key nothing declares.
 
 ---
 
@@ -1284,3 +1360,172 @@ cross-batch fingerprint; the comments at `config/config.yaml` and
 **Later fix.** DelftBlue servicedesk ticket quoting the EREMOTEIO. Ask whether recovery
 is possible *before* regenerating the mixture, since recovery preserves comparability
 and a rebuild destroys it. Copy the in-batch checkpoint to `/home` meanwhile.
+
+---
+
+### P-ANCE-04 — Microsoft's 60K BM25 warm-up was withdrawn; we build our own
+
+**Symptom.** `ance_paper` cannot start. It initializes from Microsoft's released 60K BM25
+warm-up, and `assert_permitted_init` refuses to run while
+`training.ance_paper.expected_init_sha256` is null. The artifact is no longer obtainable.
+
+**Evidence.** Both released URLs return `HTTP 409 Public access is not permitted on this
+storage account`:
+
+```
+.../semistructstore/OpenSource/warmup_checpoint.zip                (60K warm-up, MRR@10 0.311)
+.../semistructstore/OpenSource/Passage_ANCE_FirstP_Checkpoint.zip  (600K final,   MRR@10 0.330)
+```
+
+microsoft/ANCE issues **#23** (Nov 2022), **#24** (Mar 2023) and **#26** (May 2025) all report
+broken downloads and are open and unanswered. No mirror of the *warm-up* exists: the only
+candidate, `3ricL/ad-hoc-ance-msmarco` ("a re-upload … for a reproduction study"), was
+compared tensor by tensor against `castorini/ance-msmarco-passage` and is **bit-identical** —
+203 of 203 comparable tensors, maximum absolute difference exactly 0. It is the released 600K
+**final**, which is exactly what the allow-list exists to refuse: initializing from it would
+"reproduce" 0.330 by construction. Its `config.json` also declares
+`finetuning_task: docmsmarco`, the document task, which is out of scope here.
+
+**Scope.** `ance_paper` only. The BRIGHT `ance` arm is unaffected — it initializes from
+`BAAI/bge-m3` and needs nothing from Microsoft.
+
+**What was done, rather than left open.** `scripts/train_ance_warmup.py` plus
+`training.ance_paper_warmup` build the warm-up from `roberta-base` following
+`commands/run_train_warmup.sh` (seq 128 both fields, batch 32, lr 2e-4, LAMB, warmup 1,000,
+stop 60,000, decay horizon 2,187,500). The BM25 negatives were already on scratch — up to 30
+per query in `msmarco_training_mixture/` — so there is no mining phase. Same model, same loss and
+same optimizer as `ance_paper`: upstream's warm-up trains `RobertaDot_NLL_LN`, whose `NLL`
+(`model/models.py:58-81`) is `ance_paper.pairwise_nll`.
+
+**A defect found while building it.** `AnceEncoder` declares
+`base_model_prefix = 'ance_encoder'`, so `AnceEncoder.from_pretrained('roberta-base')` cannot
+map the checkpoint's unprefixed keys onto `self.roberta.*`. It reports the **entire body** as
+newly initialized and returns a random encoder that trains, lowers its loss and writes a
+checkpoint while carrying no pretrained knowledge. Measured: all 28 tensors of a one-layer
+model. `build_ance_encoder_from_base` loads the body as a `RobertaModel` and copies it in,
+verifying every tensor transferred (199/199 against the real `roberta-base`), and reads
+`output_loading_info` rather than the returned state dict — `from_pretrained` fills an absent
+key with a random tensor, so by then the dict is complete and the difference is invisible.
+
+**Consequence for the claim.** The reproduction now carries **two** labelled deviations, both
+recorded in `paper_provenance.deviations`: the shortened `train_stop_steps`, and an
+initialization that is ours rather than Microsoft's. The warm-up also uses Tevatron's BM25
+negatives rather than the official 35M-triplet file — the same kind of negative, a different
+source.
+
+**A second defect: the mixture is ragged, and we required it not to be.** Job 70494 died
+2:30 in with `record 63 (query '1033667') carries 8 negative(s), needs 30`. Upstream has no
+per-query negative count at all: its warm-up reads `triples.train.small.tsv` **one triplet per
+line** (`drivers/run_warmup.py:743`; `triple_process_fn`, `data/process_fn.py:48-70`, takes
+exactly three tab cells) and its ANN path yields one instance per negative
+(`data/msmarco_data.py:355-360`). The uniform-count requirement came from Tevatron's grouped
+record shape plus `ANCEDataset`'s `divmod` addressing. Measured at three offsets in the 5.2 GB
+file, **~1.8% of `Tevatron/msmarco-passage` records carry fewer than 30** (1.87% / 2.01% /
+1.52%, min 1), passed through verbatim by `preprocessor._reproduction_record_ok`, which only
+tests non-emptiness. Fixed by `ANCEDataset(..., ragged=True)` — set only by the warm-up —
+which indexes by cumulative counts, making `train_group_size` a per-query ceiling; a test pins
+that it is identical to `divmod` on uniform data. Mined rounds keep strict `_validate`.
+
+**Why the tests did not catch it.** Four warm-up tests existed and all passed. Every fixture
+in `tests/` gives each record *exactly* `n_negs` negatives, so the uniformity that `divmod`
+depends on was baked into the fixtures rather than asserted. The ragged shape is now a fixture,
+and `train_ance_warmup.py --preflight` runs the same code on the same data with no GPU and no
+writes (`run_ance_warmup_preflight_singularity.sh`, `compute-p1`, minutes; also stage 1 of the
+GPU launcher). Three further latent failures were fixed with it: `save_steps` was declared
+consumed but never used, so a wall-clock kill wrote nothing at all — it now writes
+`interim-<step>/` as a rescue artifact, named to stay out of `_newest_model_artifact`; the two
+ranking probes were both swallowed on error while `assert_training_succeeded` needs two finite
+ones, so the begin probe now fails fast; and `prepare_output_dir(overwrite=True)` was
+hardcoded, so re-running deleted a finished warm-up — it now refuses without `--overwrite`.
+
+**Gate.** Evaluate the warm-up before spending an allocation on the 300K-step run; expect
+MRR@10 ≈ 0.311. It requires `EVAL_ALLOW_DRIFT=1`: the warm-up trains at q128/p128 and is
+consumed at q64/p512, so `encoding_contract_drift` fires and `eval_msmarco.py` exits before
+encoding. Evaluating at q64/p512 is deliberate — that is the contract `ance_paper` uses it
+under and the one upstream's 0.311 refers to. A warm-up landing well short means ANCE starts from a worse position than the
+paper did and the comparison degrades accordingly.
+
+**Still worth obtaining.** The released 600K final (mirrored at
+`castorini/ance-msmarco-passage`) remains useful as the **evaluator** reference: scoring it
+through our path and recovering 0.330 / 0.959 validates the measurement independently of any
+training run. That is the documented job of `within_paper_tolerance`.
+
+---
+
+### P-ANCE-05 — encode children died at import against libgomp — **FIXED**
+
+**Symptom.** Job 204931 (`ance_paper`) reached step 10,100/300,000 in 7h21m. Its first ANN
+refresh spawned the encode child, which exited 1 after ~31s printing only
+`mkl-service + Intel(R) MKL: MKL_THREADING_LAYER=INTEL is incompatible with libgomp.so.1`
+— no traceback, because mkl-service prints that and exits. Supervision then terminated the
+trainer, correctly.
+
+**Why it hid.** The trigger is the parent's process image, not its imports. Round 0 had run
+the same command minutes earlier from `train_ance.py`, and two import matrices (220305 CPU,
+220335 GPU with faiss-gpu and CUDA live) reproduced nothing: their parents held nothing. The
+real Inferencer holds the 8.8M-entry corpus lookup (5.7 GB RSS) when it forks.
+
+**Reproduction, 2m23s, no new code.** `run_ance_refresh_repro_singularity.sh` runs the real
+`run_ance_data_gen.py` against the `checkpoint-10000` the dead run left behind: job 220386
+FAILED identically, job 220456 (same job, remedy applied) ran to TIMEOUT at 30:22 still
+encoding. Both on `gpu-a100-small`, which was empty while `gpu-a100` queued for days.
+
+**Resolution.** `helpers._encode_child_env` pins `MKL_THREADING_LAYER=GNU` for every encode
+child, at all three spawn sites in `encode_to_pickle`, so mining, refresh and both
+evaluators agree whichever launcher started the parent. `setdefault`, so an explicit value
+wins. Not `MKL_SERVICE_FORCE_INTEL` (silences the guard rather than resolving it).
+
+**Verification.** `tests/bright_eval_integrity_test.py` (25/25), two tests new. The failure
+is invisible to any small-parent test, so the cluster reproduction is the real evidence.
+
+---
+
+### P-ANCE-06 — MS MARCO refresh cadence is ~96K steps, not the configured 10K — **OPEN**
+
+**Measured (204931).** Initial mining 6h38m; training 0.246 s/step, so 10K steps = 41 min
+and 300K = 20.5h. A refresh costs about what round 0 costs (~6.6h on one mining GPU), so
+negatives refresh roughly every 96K steps — about 3 refreshes per run.
+
+**Not a code defect.** Upstream ran 4 mining GPUs against 4 training GPUs (Appendix A.3);
+this pipeline gets one of each.
+
+**What it constrains.** The arm may not be described as refreshing every *m*=10K. Report the
+achieved cadence, consumed-round count and staleness beside any MRR@10. `min_fresh_rounds: 2`
+remains satisfiable; a gate demanding all five query shards would not be, and adopting one
+would mean not running the arm — a decision, not an implementation detail.
+
+**Partially mitigated.** Round 0 now runs as its own one-GPU job (`--prepare-initial` /
+`--initial-round`), returning 6h38m to the training allocation, which is what makes 300K fit
+a 24h wall. It does not change the interval. `PhaseTimer` now instruments the initial round,
+so the next preparation job reports where those hours go (encode vs 27 GiB serialization vs
+index vs search) — the evidence for whether GPU search is worth building.
+
+---
+
+### P-EVAL-02 — concurrent evaluations corrupt a shared datasets cache — **FIXED**
+
+**Symptom.** Jobs 204851/204852 (BRIGHT, ANCE and in-batch) were submitted together and both
+failed partway — 9/12 and 6/12 domains — with `FileNotFoundError` on the same HF datasets
+cache fingerprint directory under a shared `HF_HOME`.
+
+**Recorded honestly.** Dismissed on 2026-09-03 as disproved, because a simultaneous BeeGFS
+read fault on `/scratch` (errno 121, reproducible from the login node outside any job)
+produced similar failures and masked it. Both were real; the storage fault later cleared.
+
+**Resolution.** `src/utils/eval_attempt.py` gives every invocation a private writable
+datasets cache, propagated into encoder subprocesses, while the offline model cache stays
+shared and read-only. Reportable jobs also require existing processed artifacts, so two runs
+cannot race to rebuild shared data.
+
+**Verification.** `tests/bright_eval_integrity_test.py` — `cache: concurrent invocations
+isolated, children inherit`.
+
+---
+
+### P-EVAL-03 — a query-encode retry masked every real error — **FIXED**
+
+`evaluate.py` retried a failed query encode with `--encode_is_qry --q_max_len`, flags the
+pinned Tevatron rejects, so every failure surfaced as `ValueError: Some specified arguments
+are not used by the HfArgumentParser` and the real cause was discarded — which is how the
+P-EVAL-02 failures first presented. The fallback is gone; the original command, exit status
+and stderr are preserved. Verified by `encode: original error preserved without retry`.

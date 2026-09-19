@@ -1,6 +1,6 @@
 """Wrapper for TREC eval using pytrec_eval (Python bindings)."""
 
-from typing import Dict, List, Set, Optional, Union
+from typing import Dict, Set, Union
 import pandas as pd
 import pytrec_eval
 
@@ -51,8 +51,7 @@ class TrecEvalWrapper:
         Calculate metrics for the given run results.
         
         Args:
-            run_results: Dictionary {query_id: {doc_id: score}} 
-                         (Output from format_faiss_results)
+            run_results: Dictionary {query_id: {doc_id: score}}
             metrics: Set of metrics to calculate.
             
         Returns:
@@ -90,24 +89,3 @@ class TrecEvalWrapper:
             final_metrics[metric] = sum(values) / len(values) if values else 0.0
 
         return final_metrics
-
-    @staticmethod
-    def format_faiss_results(rankings: Dict[str, List[str]], k: int = 10) -> Dict[str, Dict[str, float]]:
-        """
-        Helper to convert simple FAISS ranking lists to pytrec_eval format.
-        
-        Args:
-            rankings: Dictionary {query_id: [doc_id1, doc_id2, ...]}
-            k: Cutoff rank
-        """
-        formatted_run = {}
-        for qid, doc_ids in rankings.items():
-            formatted_run[str(qid)] = {}
-            # Take top-k
-            top_docs = doc_ids[:k]
-            for rank, doc_id in enumerate(top_docs, start=1):
-                # Create a dummy score based on rank (Rank 1 = Score 10...)
-                score = (k + 1) - rank 
-                formatted_run[str(qid)][str(doc_id)] = float(score)
-                
-        return formatted_run

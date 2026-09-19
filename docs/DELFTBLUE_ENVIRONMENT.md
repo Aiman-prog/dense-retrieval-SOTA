@@ -68,3 +68,22 @@ singularity exec /scratch/$USER/containers/pytorch_2.1.sif python -m pip list --
 
 Tracked as defect **P7** in `CONSOLIDATION_STATUS.md` — recorded deliberately, with no code
 fix intended.
+
+---
+
+## GPU partitions — what actually schedules
+
+Measured 2026-09-16, and the reason a day-long diagnosis loop became a minutes-long one.
+
+| partition | nodes | per-job cap | time limit | typical queue |
+|---|---|---|---|---|
+| `gpu-a100` | 9, usually all allocated | 4 GPUs | 48 h | **days** |
+| `gpu-a100-small` | 1 node, 28 A100 slices | **1 GPU, 2 CPUs, 8000M/CPU** | 4 h | usually **empty** |
+| `gpu-v100` | 10 | 4 × V100S | 48 h | not measured |
+
+- **Put diagnostics on `gpu-a100-small`** — the import matrices and the refresh
+  reproduction started in minutes there. Ask for the time actually needed: short jobs
+  backfill into gaps a 24 h job cannot use.
+- **It cannot run ANCE training or round-0 preparation**: the 1-GPU cap rules out the
+  Trainer/Inferencer split, 16 GB total rules out a full corpus lookup, and 4 h is under
+  preparation's ~6.6 h. Those belong on `gpu-a100`.

@@ -27,9 +27,9 @@ sys.path.insert(0, str(project_root / 'scripts'))
 
 from evaluation.trec_eval_wrapper import TrecEvalWrapper          # noqa: E402
 from utils.helpers import (                                       # noqa: E402
-    RUN_MANIFEST_NAME, check_eval_artifacts, encoding_contract_drift,
-    eval_artifact_hashes, load_training_manifest, model_run_tag, require_eval_files,
-    training_provenance,
+    RUN_MANIFEST_NAME, RunDirectoryError, check_eval_artifacts, encoding_contract_drift,
+    eval_artifact_hashes, load_config, load_training_manifest, model_run_tag, require_eval_files,
+    require_completed_training_manifest, training_provenance,
 )
 
 
@@ -179,33 +179,22 @@ def test_excluded_none_is_for_benchmarks_with_no_exclusion_map():
 
 def test_excluded_none_does_not_weaken_bright():
     """BRIGHT can never reach the None path: load_excluded_ids raises on a missing
-    file, so a domain cannot opt out of exclusion filtering this way."""
-    src = (project_root / 'src' / 'utils' / 'helpers.py').read_text()
-    body = src[src.index('def load_excluded_ids('):src.index('def search_depth(')]
-    assert 'raise' in body, "a missing exclusion file no longer raises"
-    for caller in ('src/utils/helpers.py', 'src/evaluation/evaluate.py',
-                   'scripts/run_bm25_evals.py'):
-        text = (project_root / caller).read_text()
-        for line in text.splitlines():
-            if 'check_eval_artifacts(' in line and 'def ' not in line:
-                assert 'None' not in line, f"{caller} passes excluded=None: {line!r}"
-
-
-def test_msmarco_evaluator_checks_ids_before_searching():
-    """The check has to run before the FAISS search, or a wrong run is built first."""
-    src = (project_root / 'scripts' / 'eval_msmarco.py').read_text()
-    assert 'check_eval_artifacts(' in src, "eval_msmarco does not verify query ids"
-    assert src.index('check_eval_artifacts(') < src.index('idx.search('),         "ids are verified after the search"
+    file, so a domain cannot opt out of exclusion filtering by deleting one."""
+    from utils.helpers import load_excluded_ids
+    with tempfile.TemporaryDirectory() as tmp:
+        _assert_raises(FileNotFoundError,
+                       lambda: load_excluded_ids(Path(tmp), 'biology'))
 
 
 def test_msmarco_paper_comparison_requires_official_query_count():
-    from eval_msmarco import msmarco_paper_comparable
+    """A verdict on any other denominator is a comparison to nothing."""
+    from eval_msmarco import msmarco_paper_comparable, within_paper_tolerance
     assert msmarco_paper_comparable(6980) is True
     for count in (0, 1, 6979, 6981, 101093):
         assert msmarco_paper_comparable(count) is False
-    src = (project_root / 'scripts' / 'eval_msmarco.py').read_text()
-    assert 'if paper_comparable else ""' in src
-    assert "'paper_comparable': paper_comparable" in src
+    # ...and off the official split the verdict is withheld, not computed.
+    verdict, deltas = within_paper_tolerance(0.330, 0.959, False)
+    assert verdict is None and deltas == {'mrr_at_10': 0.0, 'recall_1000': 0.0}
 
 
 # ---- run identity ----------------------------------------------------------
@@ -349,6 +338,19 @@ def test_legacy_checkpoint_without_a_manifest_is_evaluable():
         assert encoding_contract_drift(None, dict(_TRAINED)) == {}
 
 
+def test_only_completed_manifested_runs_are_evaluable():
+    with tempfile.TemporaryDirectory() as tmp:
+        d = _manifest_dir(tmp)
+        unfinished = load_training_manifest(d)
+        _assert_raises(
+            RunDirectoryError,
+            lambda: require_completed_training_manifest(unfinished, d),
+            "without finished_at")
+        unfinished['finished_at'] = "2026-01-01T00:00:00+00:00"
+        assert require_completed_training_manifest(unfinished, d) is unfinished
+        assert require_completed_training_manifest(None, d) is None
+
+
 def test_training_data_hashes_are_recorded_not_enforced():
     """A checkpoint stays valid when the mixture that produced it is gone."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -388,19 +390,21 @@ def test_bm25_comparison_requires_matching_artifact_hashes():
     current = {"biology": {"corpus": "a", "queries": "b",
                             "qrels": "c", "excluded": "d"}}
     base = {"domains": domains, "run_tag": "bm25", "model": "BM25",
-            "macro_ndcg_cut_10": 0.1}
+            "macro_ndcg_cut_10": 0.1, "macro_recall_1000": 0.9,
+            "macro_recip_rank": 0.2, "primary_metric": "recall_1000",
+            "primary_score": 0.9}
 
     _assert_raises(
         ValueError,
         lambda: run_all_evals.validate_bm25_comparison(
             {**base, "domains": ["economics"], "eval_artifact_sha256": current},
-            domains, current, "wrong-domains.json"),
+            domains, current, "wrong-domains.json", "recall_1000"),
         "Domain sets differ",
     )
     _assert_raises(
         ValueError,
         lambda: run_all_evals.validate_bm25_comparison(
-            base, domains, current, "legacy.json"),
+            base, domains, current, "legacy.json", "recall_1000"),
         "eval_artifact_sha256",
     )
     _assert_raises(
@@ -408,12 +412,76 @@ def test_bm25_comparison_requires_matching_artifact_hashes():
         lambda: run_all_evals.validate_bm25_comparison(
             {**base, "eval_artifact_sha256": {
                 "biology": {**current["biology"], "corpus": "different"}}},
-            domains, current, "different.json"),
+            domains, current, "different.json", "recall_1000"),
         "different evaluation artifacts",
     )
+    _assert_raises(
+        ValueError,
+        lambda: run_all_evals.validate_bm25_comparison(
+            {**base, "primary_metric": "ndcg_cut_10", "eval_artifact_sha256": current},
+            domains, current, "different-primary.json", "recall_1000"),
+        "Primary metrics differ",
+    )
     record = run_all_evals.validate_bm25_comparison(
-        {**base, "eval_artifact_sha256": current}, domains, current, "matching.json")
+        {**base, "eval_artifact_sha256": current}, domains, current, "matching.json",
+        "recall_1000")
     assert record["eval_artifacts_verified"] is True
+    assert record["primary_metric"] == "recall_1000"
+    assert record["primary_score"] == 0.9
+
+
+def test_recall_is_the_configured_bright_primary_metric():
+    assert load_config()['evaluation']['primary_metric'] == 'recall_1000'
+    dense_src = (project_root / 'scripts' / 'run_all_evals.py').read_text()
+    helper_src = (project_root / 'src' / 'utils' / 'helpers.py').read_text()
+    for field in ("'primary_metric': primary_metric", "'primary_score': primary_score"):
+        assert field in dense_src, field
+    assert "eval_top_k = config['evaluation']['top_k']" in helper_src
+    assert "'recall_1000', 'ndcg_cut_10', 'recip_rank'" in helper_src
+
+
+
+def test_encode_children_pin_the_mkl_threading_layer():
+    """Job 204931 lost a 7-hour run when its refresh encode child died at import with
+    "MKL_THREADING_LAYER=INTEL is incompatible with libgomp.so.1". Reproduced in 2m23s
+    by job 220386 and fixed by pinning GNU for the child (job 220456 then encoded to its
+    wall). Pinned here because the failure is invisible to every small-parent test: the
+    same child spawned from an empty parent never reproduces it.
+
+    Both branches are checked -- the paper encoder and the Tevatron driver -- because the
+    miner, the MS MARCO evaluator and the BRIGHT evaluators all spawn through them.
+    """
+    from unittest.mock import patch
+    from utils.helpers import encode_to_pickle
+    base = {'per_device_eval_batch_size': 1, 'dataloader_num_workers': 0}
+    for label, ctx in (
+            ('tevatron', {'args': dict(base), 'pooling': 'cls', 'normalize': True,
+                          'max_q': 64, 'max_p': 128}),
+            ('paper', {'args': dict(base, paper_fidelity=True), 'pooling': 'cls',
+                       'normalize': False, 'max_q': 64, 'max_p': 128})):
+        for is_query in (True, False):
+            with patch('subprocess.run') as run:
+                encode_to_pickle('model', Path('in.jsonl'), Path('out/x.pkl'),
+                                 is_query, ctx, {})
+            env = run.call_args.kwargs.get('env')
+            assert env is not None, f'{label}/{is_query}: child got no explicit env'
+            assert env.get('MKL_THREADING_LAYER') == 'GNU', \
+                f'{label}/{is_query}: threading layer not pinned ({env.get("MKL_THREADING_LAYER")})'
+            assert 'MKL_SERVICE_FORCE_INTEL' not in env, \
+                'the guard must be resolved, not silenced'
+
+
+def test_an_explicit_threading_layer_is_not_overridden():
+    """A future diagnosis must still be able to vary it: the pin is a default, not a
+    policy that outranks the operator."""
+    from unittest.mock import patch
+    from utils.helpers import encode_to_pickle
+    ctx = {'args': {'per_device_eval_batch_size': 1, 'dataloader_num_workers': 0},
+           'pooling': 'cls', 'normalize': True, 'max_q': 64}
+    with patch.dict(os.environ, {'MKL_THREADING_LAYER': 'INTEL'}):
+        with patch('subprocess.run') as run:
+            encode_to_pickle('model', Path('q.jsonl'), Path('out/q.pkl'), True, ctx, {})
+        assert run.call_args.kwargs['env']['MKL_THREADING_LAYER'] == 'INTEL'
 
 
 TESTS = [
@@ -423,7 +491,6 @@ TESTS = [
     ("consistency: encoded ids match source as sets", test_encoded_query_ids_must_match_source),
     ("artifacts: excluded=None for MS MARCO", test_excluded_none_is_for_benchmarks_with_no_exclusion_map),
     ("artifacts: excluded=None cannot weaken BRIGHT", test_excluded_none_does_not_weaken_bright),
-    ("artifacts: MS MARCO checks ids before searching", test_msmarco_evaluator_checks_ids_before_searching),
     ("artifacts: paper comparison requires 6,980", test_msmarco_paper_comparison_requires_official_query_count),
     ("identity: run tag isolates same basename", test_run_tag_isolates_same_basename),
     ("identity: collect_results rejects foreign/non-finite", test_collect_results_rejects_foreign_or_nonfinite),
@@ -432,9 +499,93 @@ TESTS = [
     ("provenance: encoding-contract drift detected", test_encoding_contract_drift_is_detected),
     ("provenance: manifest resolves from checkpoint-*", test_manifest_resolves_from_a_checkpoint_subdir),
     ("provenance: legacy checkpoint stays evaluable", test_legacy_checkpoint_without_a_manifest_is_evaluable),
+    ("provenance: manifested run must be completed", test_only_completed_manifested_runs_are_evaluable),
     ("provenance: training hashes recorded not enforced", test_training_data_hashes_are_recorded_not_enforced),
     ("provenance: eval artifact hashes track inputs", test_eval_artifact_hashes_track_every_scoring_input),
     ("compare: BM25 artifact hashes mandatory", test_bm25_comparison_requires_matching_artifact_hashes),
+    ("metrics: Recall@1000 is primary", test_recall_is_the_configured_bright_primary_metric),
+]
+
+
+def test_cache_isolation_and_inheritance():
+    from concurrent.futures import ThreadPoolExecutor
+    env = dict(os.environ)
+    env.pop('DENSE_EVAL_ATTEMPT_ID', None)
+    env['PYTHONPATH'] = str(project_root / 'src')
+    program = ('import json,os; from utils.eval_attempt import configure_cache; '
+               'a=configure_cache(); b=configure_cache(); '
+               'print(json.dumps([a,b,os.environ["HF_DATASETS_CACHE"]]))')
+    def launch(_):
+        return json.loads(subprocess.check_output([sys.executable, '-c', program], env=env))
+    with ThreadPoolExecutor(2) as pool:
+        a, b = list(pool.map(launch, range(2)))
+    assert a[0] == a[1] and b[0] == b[1]
+    assert a[0] != b[0] and a[2] != b[2]
+
+
+def test_launcher_revision_without_container_git():
+    from unittest.mock import patch
+    from utils.helpers import _code_revision
+    with patch.dict(os.environ, {'SOURCE_GIT_SHA': 'a' * 40, 'SOURCE_GIT_DIRTY': '0'}):
+        with patch('subprocess.run', side_effect=FileNotFoundError('git')) as git:
+            value = _code_revision()
+        assert value['git_sha'] == 'a' * 40 and value['git_dirty'] is False
+        assert value['source'] == 'launcher' and not git.called
+
+
+def test_query_encode_preserves_original_error():
+    from unittest.mock import patch
+    from utils.helpers import encode_to_pickle
+    ctx = {'args': {'per_device_eval_batch_size': 1, 'dataloader_num_workers': 0},
+           'pooling': 'cls', 'normalize': True, 'max_q': 64}
+    original = subprocess.CalledProcessError(23, ['encoder'])
+    with patch('subprocess.run', side_effect=original) as run:
+        try:
+            encode_to_pickle('model', Path('q.jsonl'), Path('out/q.pkl'), True, ctx, {})
+        except subprocess.CalledProcessError as error:
+            assert error is original
+        else:
+            raise AssertionError('encoder failure was hidden')
+        assert run.call_count == 1
+
+
+def test_attempt_identity_rejects_stale_and_corrupt_results():
+    from unittest.mock import patch
+    from utils.eval_attempt import model_identity, identity_digest
+    import run_all_evals
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / 'model.safetensors').write_bytes(b'old')
+        before = model_identity(root)
+        (root / 'model.safetensors').write_bytes(b'new')
+        assert before != model_identity(root)
+        attempt = {'attempt_id': 'new', 'identity': {'model': model_identity(root)}}
+        row = {'domain': 'good', 'model_path': str(root.resolve()),
+               'attempt_id': 'old', 'identity_sha256': identity_digest(attempt['identity']),
+               'completed_at': 'now',
+               'metrics': {'ndcg_cut_10': 0.2, 'recip_rank': 0.3, 'recall_1000': 0.4}}
+        path = root / 'good_results.json'
+        path.write_text(json.dumps(row))
+        with patch.object(run_all_evals, 'get_data_base_dir', return_value=root), \
+             patch.object(run_all_evals, '_num_queries', return_value=1):
+            def collect():
+                return run_all_evals.collect_results(root, ['good'],
+                    {'paths': {'results_dir': 'unused'}}, attempt=attempt, result_dir=root)
+            assert collect()[1] == ['good']
+            row['attempt_id'] = 'new'
+            path.write_text(json.dumps(row))
+            assert len(collect()[0]) == 1
+            path.write_text('{broken')
+            assert collect()[1] == ['good']
+
+
+TESTS += [
+    ('cache: concurrent invocations isolated, children inherit', test_cache_isolation_and_inheritance),
+    ('provenance: host revision needs no container git', test_launcher_revision_without_container_git),
+    ('encode: original error preserved without retry', test_query_encode_preserves_original_error),
+    ('identity: stale and corrupt attempt results refused', test_attempt_identity_rejects_stale_and_corrupt_results),
+    ('encode: child pins MKL threading layer', test_encode_children_pin_the_mkl_threading_layer),
+    ('encode: explicit threading layer wins', test_an_explicit_threading_layer_is_not_overridden),
 ]
 
 

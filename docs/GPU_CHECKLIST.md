@@ -37,7 +37,9 @@ separate file** — tracebacks land in `.err`, not `.out`:
 | 4 sync GRASS | `logs/grass_<jobid>.out` | `.err` |
 | 5 seq Fast-GRASS | `logs/fast_grass_<jobid>.out` | `.err` |
 | 6 async Fast-GRASS | `logs/async_fg_<jobid>.out` | `.err` |
-| 7 ANCE MS MARCO | `logs/ance_msmarco_<jobid>.out` | `.err` |
+| 7 ANCE paper (MS MARCO) | `logs/ance_paper_<jobid>.out` | `.err` |
+| 7a BM25 warm-up (prereq for 7) | `logs/ance_warmup_<jobid>.out` | `.err` |
+| 7a-pre warm-up preflight (CPU) | `logs/ance_warmup_preflight_<jobid>.out` | `.err` |
 | MS MARCO eval | `logs/eval_msmarco_<jobid>.out` | `.err` |
 | BRIGHT eval | `logs/eval_<jobid>.out` | `.err` |
 | stale-index refresh | `logs/refresh_stale_<jobid>.out` | `.err` |
@@ -56,13 +58,14 @@ unset, so `$DATA_BASE_DIR/...` silently collapses to `/...`. Use absolute paths 
 ### 3. Respect the ordering — the seven are not independent
 
 ```
-1 in-batch ──► produces models/inbatch_mixed_bge_m3, the base_model for 3,4,5,6
-                      │
-5 seq Fast-GRASS ─────┴──► builds temp_grass_workdir/stale_index/corpus.pkl
-                      │         (or: sbatch scripts/launchers/run_refresh_stale_index_singularity.sh)
+1 in-batch ──► models/inbatch_mixed_bge_m3. A BASELINE ARM ONLY — no longer the
+               base_model for anything. 3,4,5,6 now start from BAAI/bge-m3, so
+               every arm is "BGE-M3 + one mining strategy" at an equal step budget.
+5 seq Fast-GRASS ─────► builds temp_grass_workdir/stale_index/corpus.pkl
+                      │  (or: sbatch scripts/launchers/run_refresh_stale_index_singularity.sh)
                       ▼
               6 async Fast-GRASS   ← HARD-FAILS without that pickle (defect B2)
-7 MS MARCO ──► blocked on a separate data-prep step; see §7
+7 MS MARCO ──► needs 7a, the BM25 warm-up, built first (Microsoft's is gone); see §7
 ```
 
 `train_async_fast_grass.py:280` raises `FileNotFoundError: stale index not found at …` and
@@ -114,10 +117,12 @@ batch size, learning rate, epochs and the recipe name are what you intended.
 
 ⚠️ **The `base_model` line is the one that matters.** `get_training_context()` resolves the
 model against the HF snapshot cache and **silently falls back to the raw configured string**
-when no snapshot directory holds a `config.json`. Four recipes — `ance`, `grass`,
-`fast_grass`, `async_fast_grass` — plus `ance_msmarco` train from
-`/scratch/$USER/dense-retrieval-SOTA/models/inbatch_mixed_bge_m3`. If that path is missing they
-will **train cleanly against the wrong weights**. The block prints `[PATH DOES NOT EXIST]`:
+when no snapshot directory holds a `config.json`. `ance`, `grass`, `fast_grass` and
+`async_fast_grass` now all train from **`BAAI/bge-m3`** (resolved from the offline hub cache),
+the same base as the in-batch baseline. Only `ance_paper` trains from a path,
+`/scratch/$USER/dense-retrieval-SOTA/models/ance_bm25_warmup_60k`. If a configured path is
+missing the run will **train cleanly against the wrong weights**; the block prints
+`[PATH DOES NOT EXIST]`:
 
 ```bash
 grep 'PATH DOES NOT EXIST' logs/<name>_<jobid>.out && echo "STOP — wrong base model"
@@ -148,7 +153,10 @@ ls $MODELS/inbatch_mixed_bge_m3/checkpoint-*/
 grep -oE "'loss': [0-9.]+" logs/inbatch_neg_<jobid>.out | head    # finite, not nan/inf
 ```
 
-This is the **prerequisite for experiments 3–7** — they all train from its output.
+**No longer a prerequisite for anything.** Experiments 3–6 now train from `BAAI/bge-m3`,
+the same base this arm starts from, so it is a baseline to compare against rather than a
+dependency to wait on. The completed `inbatch_mixed_bge_m3` (q1024/p512, 2 epochs, 10,314
+steps, 12.2 h) already satisfies the current encoding contract and needs no retrain.
 
 ---
 
@@ -188,14 +196,48 @@ ls $MODELS/crossbatch_mixed_bge_m3_epoch2/checkpoint-100/
 ## 3. ANCE (BRIGHT) — `train_ance.py`
 
 ```bash
+# validate the inputs first — no GPU, nothing written, minutes not hours
+srun --partition=compute --time=00:20:00 --cpus-per-task=2 --mem-per-cpu=8000M \
+     --account=Education-EEMCS-MSc-DSAIT \
+     singularity exec --bind /scratch/$USER:/scratch/$USER \
+     --bind /home/$USER:/home/$USER /scratch/$USER/containers/pytorch_2.1.sif \
+     python scripts/train_ance.py --preflight
+
 sbatch scripts/launchers/run_ance_singularity.sh
 ```
 
 | | |
 |---|---|
-| allocation | `gpu-a100`, **2 GPUs** (Trainer GPU 0 / Inferencer GPU 1), `--time=10:00:00` |
-| smoke flag | none |
-| checkpoint cadence | `save_steps: 1000` (= the ANN refresh interval *m*) |
+| allocation | `gpu-a100`, **2 GPUs** (Trainer GPU 0 / Inferencer GPU 1), `--time=24:00:00` |
+| smoke flag | `--preflight` (input validation only, no GPU) |
+| checkpoint cadence | `save_steps: 1000` sets the ANN refresh interval *m*; job 70367 achieved it (~52 min/round vs ~77 min/1000 steps, `stale_steps` flat). The MS MARCO arm does **not** — see §7 |
+| encoding | q1024/**p512**, dynamic padding, `per_device_eval_batch_size: 64` |
+| query shards | `ann_chunk_factor: 1` — every BRIGHT training query is mined each round |
+| stall guard | `max_encode_seconds` — a hung encode raises, the inferencer exits nonzero |
+
+⚠️ **Run `--preflight` before every ANCE submission.** Job 59904 was handed two A100s and
+died 1:47 later in `preflight_inputs`; the whole check costs minutes on `compute`. Like the
+async one it loads the corpus **with text**, so it is a batch job, never a login node.
+
+⚠️ A positive docid absent from `reasonir_corpus.jsonl` is **not** by itself a defect.
+`preprocessor._derive` remaps the corpus and the qrels (whitespace escaping, duplicate-text
+collapse) and deliberately leaves the mixture holding raw ids. Preflight canonicalizes and
+reports the count; only a positive whose TEXT is missing, or whose canonical owner the
+query's qrels do not carry, is real staleness — and that means regenerate the derived
+artifacts, not relax the guard.
+
+**The smoke has run — job 64255, A100 80GB.** At the (now retired) q1024/p1024 shape:
+`bge_train` batch 64 / group 2 peaked at **60.09 GiB** and **11,290.8 ms/step**;
+`bge_encode` at eval batch 64 peaked at **13.80 GiB** and **847.0 ms/step = 76 docs/s**.
+Those numbers are what retired p1024: 11.29 s/step is ~32h for two epochs against a 24h
+wall, and 60 GiB of 80 with gradient checkpointing already enabled means it cannot be
+turned off. Both readings are worst case — `_varied` forces a cap-length item, so every
+batch pads to the cap. Re-run it (`sbatch scripts/launchers/run_gpu_smoke_singularity.sh`)
+only when a shape changes; it exits nonzero if any requested arm fails. The shard factors
+and generous encode hang timeouts are fixed configuration, not auto-tuned by this probe.
+
+⚠️ The smoke's encode line prints "648,942 **BRIGHT** docs" — that count is the ReasonIR
+corpus (`gpu_memory_smoke.py:39`), not BRIGHT. Cosmetic bug in the message only.
 
 The startup block reports **`total_epochs`**, not `num_epochs` — the ANCE recipes have no
 `num_epochs` key. Startup now fails before encoding unless PyTorch sees at least two GPUs.
@@ -207,9 +249,15 @@ it trained.
 grep 'GPU(s) detected' logs/ance_<jobid>.out            # must say 2 GPU(s)
 grep 'Initial round committed' logs/ance_<jobid>.out    # base-model round 0
 grep 'round .* — swapping' logs/ance_<jobid>.out        # a refresh was CONSUMED
-grep 'checkpoint-derived round(s) consumed' logs/ance_<jobid>.out
+grep 'distinct checkpoints consumed' logs/ance_<jobid>.out
+grep 'checkpoint opportunit' logs/ance_<jobid>.out      # opportunities/completed/consumed
 grep '\[run\] validated:' logs/ance_<jobid>.out         # assert_training_succeeded
 ```
+
+**Two** rounds from **distinct** checkpoints are now required, each consumed for at least
+`logging_steps`. One refresh followed by static training used to pass; it no longer does.
+A checkpoint opportunity, a completed round and a consumed round are three separate
+counters in `ance_trainer_summary.json` and must not be read as one number.
 
 Any of these is a hard failure, and the job exits nonzero:
 
@@ -220,6 +268,8 @@ Any of these is a hard failure, and the job exits nonzero:
 | `never fabricates a negative` | a query could not supply an ANN negative; round discarded |
 | `non-finite loss` | diverged; no checkpoint written |
 | `non-finite gradient norm` | backward overflowed; no optimizer step or checkpoint written |
+| `TimeoutExpired` | an encode hung past `max_encode_seconds` |
+| `distinct docid(s)` | the encoded corpus and the corpus file disagree |
 
 ⚠️ **Job 9566838 / 0.1683 is quarantined and must not be used as a reference point.**
 See `P-ANCE-01` in `CONSOLIDATION_STATUS.md`.
@@ -359,14 +409,17 @@ about λ. Do not submit nonzero arms on a failed λ=0 run.
 
 ---
 
-## 7. ANCE (MS MARCO) — `train_ance.py --recipe ance_msmarco`
+## 7. MS MARCO data prep — required by `ance_paper`
 
-### 🛑 Blocked on data prep. Do not submit yet. (defect P6)
+The `ance_msmarco` BGE sanity recipe that used to occupy this slot is retired
+(`P-ANCE-03`). The data preparation below is **not** retired: `ance_paper` shares the same
+`setup_mode: tevatron_msmarco`, so nothing on the MS MARCO side runs until this is done.
 
-Defect P1 (the `get_path("temp_ance_msmarco")` `TypeError`) **is fixed**. The remaining
-blocker is data, and the job **cannot fetch it itself**:
+### 🛑 Blocked on data prep. (defect P6)
 
-- `run_ance_msmarco_singularity.sh` exports `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1`;
+The job **cannot fetch its own data**:
+
+- the launcher exports `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1`;
 - `prepare_msmarco_full_corpus` / `_tevatron_train` / `_dev` call `load_dataset()` on
   two separately pinned Tevatron repositories, **two of them with `streaming=True`**;
 - `msmarco_dev_qrels.txt` is not in either dataset at all — the `validation` split has no
@@ -406,27 +459,15 @@ The offline GPU job consumes the generated artifacts and does not contact Huggin
 your local checkout. Everything needed to unblock experiment 7 is inlined above so this
 checklist stands alone.
 
-Then:
-
-```bash
-sbatch scripts/launchers/run_ance_msmarco_singularity.sh
-```
+With those four files in place, the MS MARCO consumer is the paper-fidelity run — see
+**Paper-fidelity ANCE** below for the submit command and its acceptance bar.
 
 | | |
 |---|---|
-| allocation | `gpu-a100`, **2 GPUs**, `--time=24:00:00` (~16–18 h estimated in the launcher) |
-| checkpoint cadence | `save_steps: 1250` |
+| allocation | `gpu-a100`, **2 GPUs**, `--time=24:00:00` |
 | corpus | 8.8M passages; ~35 min per full encode at `per_device_eval_batch_size: 256` |
 
-**This is the only one of the seven never run end to end** — treat the first submission as a
-smoke test.
-
-**Success signal**
-```bash
-grep -A 10 'RESOLVED TRAINING CONFIG' logs/ance_msmarco_<jobid>.out   # recipe: ance_msmarco
-grep 'GPU(s) detected' logs/ance_msmarco_<jobid>.out
-ls $MODELS/ance_msmarco_bge_m3/checkpoint-1250/
-```
+**Never run end to end** — treat the first submission as a smoke test.
 
 ### MS MARCO evaluation
 
@@ -457,51 +498,142 @@ finishes, so a timeout is resumable by passing only the gaps via `EVAL_DOMAINS`.
 
 ---
 
-## Paper-fidelity ANCE — two expanded-triplet epoch equivalents
+## Paper-fidelity ANCE — a fixed step budget, stopping short of 600K
 
-Not a rung of the BRIGHT ladder. This runs our ANCE code from Microsoft's 60K warm-up
-for the optimizer-step budget of two epochs over 20 pairwise triplets/query (~250K
-steps on the expected 400,782 records). A fresh ANN round may restart the shuffled
-loader partway through; the claim is total exposure, not two fixed-pool passes. It is
-an explicitly hardware-constrained validation, not a 600K claim.
+Not a rung of the BRIGHT ladder. This runs our ANCE code from a 60K BM25 warm-up
+on a fixed step budget: the linear decay is computed against `scheduler_max_steps`
+(1,000,000, the supplied command's horizon) while the run stops at `train_stop_steps`.
+600K does not fit one 24 h allocation on a single A100 and there is no cross-job resume,
+so stopping short is an explicit, recorded hardware deviation — not a 600K claim.
+
+⚠️ **Build the warm-up first — Microsoft's is gone.** Both released blob URLs return
+`HTTP 409`, microsoft/ANCE #23/#24/#26 have been open since 2022, and the only mirror is
+bit-identical to the released **600K FINAL** (203/203 tensors, max diff 0), which
+`assert_permitted_init` refuses as an initialization. `run_ance_warmup_singularity.sh` builds
+one from `roberta-base` on the BM25 negatives already in the mixture: **1** GPU, ~2-3 h.
+
+**Preflight it first** — CPU only, no GPU bound, minutes on `compute-p1`. It runs the same
+code on the same data: loads the real 5.2 GB mixture and reports its ragged-negative counts,
+builds the model under the head-freshness guard, takes a few optimization steps, writes a
+rescue checkpoint, saves and reloads through `load_ance_encoder`. Job 70494 burned a GPU
+allocation to die on the mixture 2:30 in.
 
 ```bash
-ANCE_RECIPE=ance_paper sbatch scripts/launchers/run_ance_msmarco_singularity.sh
+sbatch scripts/launchers/run_ance_warmup_preflight_singularity.sh   # then, only if it passes:
+sbatch scripts/launchers/run_ance_warmup_singularity.sh
+```
 
-EVAL_RECIPE=ance_paper EVAL_MODEL_PATH=<released-ANCE-600K> \
-  sbatch scripts/launchers/eval_msmarco_singularity.sh
-EVAL_RECIPE=ance_paper EVAL_MODEL_PATH=<released-BM25-warm-up-60K> \
-  sbatch scripts/launchers/eval_msmarco_singularity.sh
-EVAL_RECIPE=ance_paper EVAL_MODEL_PATH=$MODELS/ance_paper_roberta \
+The GPU launcher also runs the preflight as its own stage 1, so a regression fails in minutes
+rather than at the 5 h wall. Re-running it **refuses to overwrite a finished warm-up** unless
+`ANCE_WARMUP_OVERWRITE=1`; `save_steps` writes `interim-<step>/` as a rescue artifact, so a
+wall-clock kill still leaves usable weights.
+
+Optionally **gate it** — expect MRR@10 around 0.311. `EVAL_ALLOW_DRIFT=1` is **required**:
+the warm-up trains at q128/p128 but is consumed at q64/p512, so without it `eval_msmarco.py`
+exits on encoding-contract drift before encoding anything. q64/p512 is the deliberate choice
+— it is the contract `ance_paper` uses the warm-up under, and the one upstream's 0.311 refers
+to.
+
+```bash
+EVAL_ALLOW_DRIFT=1 EVAL_MODEL_PATH=$MODELS/ance_bm25_warmup_60k \
   sbatch scripts/launchers/eval_msmarco_singularity.sh
 ```
 
-Prerequisites: MS MARCO built on the cluster (`P-PRE-03` blocks it locally), and
-both `data.msmarco_reproduction.{passage,corpus}_revision` values pinned in
+⚠️ **SKIPPED for the current warm-up, by decision** (2026-09-15): it costs a GPU slot and
+does not change what the run does. Instead the weights are pinned by content and re-verified
+on disk (204854, `17e06536…b802cf`), with 76441's own record (loss 15.16 → ~0.1, probe
+`rank_acc` 0.5 → 1.0) as evidence it trained. If the 300K run underperforms, rule this out first.
+
+The training run **refuses to start** until `training.ance_paper.expected_init_sha256` matches
+the warm-up on disk. Produce it on the cluster with:
+
+```bash
+# train_ance_warmup.py PRINTS this on success — copy it from the log. To recompute,
+# note transformers 4.40.2 writes model.safetensors (either name is accepted):
+python -c "import sys;sys.path.insert(0,'src');from utils.helpers import _sha256;\
+           print(_sha256('$MODELS/ance_bm25_warmup_60k/model.safetensors'))"
+```
+
+**Prepare round 0 first — one GPU, outside the training allocation.** It costs ~6h38m, and
+job 204931 spent that *inside* a 24 h two-GPU job, which is why 300K steps (20.5h) could not
+fit. The artifact is reusable: round 0 depends only on the warm-up weights and the corpus.
+Upstream splits the same stage out (`commands/run_train.sh --end_output_num 0`).
+
+```bash
+sbatch scripts/launchers/run_ance_paper_prepare_singularity.sh      # ~6.6h, 1 GPU
+#   stage 1 re-runs --preflight on CPU; stage 2 mines round 0 into
+#   $DATA_BASE_DIR/prepared_rounds/ance_paper_initial (override with ANCE_PREPARE_DIR)
+#   and writes initial_mining_timings.jsonl — the per-phase breakdown.
+```
+
+Its own launcher writes the recipe out, so no unset variable can substitute a different
+model:
+
+```bash
+# ANCE_INITIAL_ROUND adopts the prepared round; without it round 0 is mined inline and
+# the job will not finish 300K steps. Adoption is refused unless the initialization,
+# corpus, queries, qrels, mixture, mining settings and seed all match.
+# ANCE_OVERWRITE=1 is required when the output dir still holds checkpoints (ANCE cannot
+# resume, so starting fresh deletes them) — an explicit choice, never silent.
+sbatch --export=ALL,ANCE_INITIAL_ROUND=$DATA_BASE_DIR/prepared_rounds/ance_paper_initial \
+       scripts/launchers/run_ance_paper_singularity.sh
+
+# Chain them in one go — the training job accrues queue priority while preparation runs:
+#   sbatch --dependency=afterok:<prepare-jobid> --kill-on-invalid-dep=yes \
+#     --export=ALL,ANCE_INITIAL_ROUND=...,ANCE_OVERWRITE=1 \
+#     scripts/launchers/run_ance_paper_singularity.sh
+
+# EVAL_RECIPE defaults to ance_paper; all three go through the same evaluator.
+EVAL_MODEL_PATH=<released-ANCE-600K>       sbatch scripts/launchers/eval_msmarco_singularity.sh
+EVAL_MODEL_PATH=$MODELS/ance_bm25_warmup_60k sbatch scripts/launchers/eval_msmarco_singularity.sh
+EVAL_MODEL_PATH=$MODELS/ance_paper_roberta   sbatch scripts/launchers/eval_msmarco_singularity.sh
+```
+
+Prerequisites: MS MARCO built on the cluster (`P-PRE-03` blocks it locally) — **done**, all
+five artifacts including `msmarco_dev_qrels.txt` are on scratch — `roberta-base` in the offline
+hub cache, and both `data.msmarco_reproduction.{passage,corpus}_revision` values pinned in
 `config/config.yaml`. No checkpoint conversion is needed.
 
-**Success signals:** the released 600K evaluator preflight has `reproduction_pass: true`;
-our trained checkpoint beats the locally evaluated warm-up MRR@10, retains Recall@1000
->= 0.949, consumes at least one checkpoint-derived ANN round, and prints
-`[run] validated:` after the full runtime-derived budget.
+⚠️ The released 600K checkpoint is still worth having as the **evaluator** reference
+(`castorini/ance-msmarco-passage` mirrors it): scoring it through our path and recovering
+0.330 / 0.959 proves the measurement is right before any of our own numbers are trusted.
 
-A miss by the **released 600K checkpoint preflight** means the evaluator or artifact
-setup is wrong, and the same fault would corrupt `ance_msmarco`. A local checkpoint
-that passes that preflight but misses the local acceptance criteria is a training result,
-not an evaluator failure.
+**Step 1 — validate the evaluator, before trusting any number it produces.** Run the
+released 600K checkpoint through the evaluator first. It must report
+`within_paper_tolerance: true`, i.e. MRR@10 within ±0.005 of **0.330** and Recall@1000
+within ±0.005 of **0.959**, on the official Dev small split (6,980 judged queries).
+**Do not proceed if it misses:** that means the evaluator or the pinned artifacts are
+wrong, and every later number is meaningless. A checkpoint that passes this preflight
+but misses the acceptance bar below is a training result, not an evaluator failure.
+
+**Step 2 — acceptance for our own run.** `within_paper_tolerance` is a diagnostic here,
+not a verdict: at `train_stop_steps` against a 600K reference, our run is *expected* to
+land outside the band, and that is a recorded budget deviation rather than a failed
+reproduction. What it must actually clear:
+
+- MRR@10 above the locally evaluated 60K warm-up (the warm-up is ~0.311 upstream;
+  use the number *your* evaluator produced for it, not the published one);
+- Recall@1000 >= 0.949;
+- `min_fresh_rounds` (2) consumed rounds from DISTINCT checkpoints in the run manifest, plus the achieved refresh cadence reported beside the configured one;
+- `[run] validated:` printed after the full runtime-derived budget.
+
+**There is no resume.** If the job hits the 24 h wall clock it does not continue, and a
+timeout is a failed run, not a partial one. 300K steps fits **only because round 0 is
+prepared separately**: job 204931 measured 0.246 s/step (300K = 20.5h) plus 6h38m of
+inline initial mining = ~27h, and was killed. With `--initial-round` the training job
+starts at step 1 and the arithmetic works.
 
 ---
 
 ## What is unchanged from pre-consolidation
 
-Verified by `AC-SURFACE-01` (`SURFACE_ALLOWLIST_OK`) against `archive/main-post-promotion`:
+`AC-SURFACE-01` used to verify this against `archive/main-post-promotion`; it is retired
+(`P-ANCE-03`). The list below is now a description, not a checked invariant:
 
 - **no pre-existing `scripts/*.sh` launcher changed by a single byte** — job scripts, SLURM
   headers, `--bind` mounts and env assumptions are exactly as they were. One deliberate
   exception, made after that verification and narrowly allowlisted: `run_inbatch_singularity.sh`'s
   `--time` was restored from its temporary `14:00:00` smoke value to `24:00:00`;
-- the only new launchers are `eval_msmarco_singularity.sh` and `run_ance_msmarco_singularity.sh`;
-- `config/config.yaml` differs only by the added `training.ance_msmarco` block;
 - every entry point's CLI flags, recipe names, config path keys, environment keys and
   `sys.path` handling are byte-for-byte unchanged — the Step-6 logging added output only.
 

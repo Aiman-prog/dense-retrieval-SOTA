@@ -18,17 +18,22 @@ import json
 import math
 import subprocess
 import argparse
+import datetime
 from pathlib import Path
 
 # Resolve project root and add to sys.path
 project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root / 'src'))
+from utils.eval_attempt import configure_cache, model_identity, identity_digest
+if __name__ == '__main__':
+    configure_cache()  # datasets reads its cache location at import time
 
 # Import your helpers and classes
 from utils.helpers import (load_config, get_data_base_dir, get_path,
                            model_run_tag, load_training_manifest, RUN_MANIFEST_NAME,
+                           require_completed_training_manifest,
                            encoding_contract_drift, training_provenance,
-                           eval_artifact_hashes)
+                           eval_artifact_hashes, _code_revision, atomic_write)
 from data.preprocessor import BRIGHTPreprocessor
 from data.bright_loader import BRIGHTLoader
 
@@ -90,7 +95,7 @@ def _num_queries(domain):
         return sum(1 for line in f if line.strip())
 
 
-def collect_results(model_path, domains, config):
+def collect_results(model_path, domains, config, *, attempt=None, result_dir=None):
     """Read back the per-domain JSONs `evaluate.py` wrote; returns (rows, invalid).
 
     A result file is only this run's if it says so. The directory is keyed by the
@@ -101,6 +106,8 @@ def collect_results(model_path, domains, config):
     """
     base = (Path(get_data_base_dir()) / config['paths']['results_dir']
             / model_run_tag(model_path))
+    if result_dir is not None:
+        base = Path(result_dir)
     wanted = Path(model_path).resolve()
     rows, invalid = [], []
     for domain in domains:
@@ -108,7 +115,16 @@ def collect_results(model_path, domains, config):
         if not f.exists():
             invalid.append(domain)
             continue
-        d = json.loads(f.read_text())
+        try:
+            d = json.loads(f.read_text())
+        except (ValueError, OSError):
+            invalid.append(domain)
+            continue
+        if attempt is not None and (d.get('attempt_id') != attempt['attempt_id'] or
+                d.get('identity_sha256') != identity_digest(attempt['identity']) or
+                not d.get('completed_at')):
+            invalid.append(domain)
+            continue
 
         recorded = d.get('model_path')
         if recorded is None or Path(recorded).resolve() != wanted:
@@ -135,7 +151,8 @@ def collect_results(model_path, domains, config):
     return rows, invalid
 
 
-def validate_bm25_comparison(bm25, domains, artifact_hashes, summary_path):
+def validate_bm25_comparison(bm25, domains, artifact_hashes, summary_path,
+                              primary_metric):
     """Return durable comparison provenance, or reject an unprovable comparison."""
     bm25_domains = bm25.get('domains', [])
     if set(bm25_domains) != set(domains):
@@ -156,14 +173,34 @@ def validate_bm25_comparison(bm25, domains, artifact_hashes, summary_path):
             "The two runs scored different evaluation artifacts, so their macro "
             f"scores are not comparable. Differing domains: {differing}")
 
+    if bm25.get('primary_metric') != primary_metric:
+        raise ValueError(
+            "Primary metrics differ, so the two runs are not comparable. "
+            f"dense={primary_metric!r}, bm25={bm25.get('primary_metric')!r}")
+    primary_score = bm25.get('primary_score')
+    if not isinstance(primary_score, (int, float)) or not math.isfinite(primary_score):
+        raise ValueError(
+            "BM25 summary has no finite primary_score; regenerate it with the current "
+            "runner.")
+
     return {'run_tag': bm25.get('run_tag'), 'model': bm25.get('model'),
+            'primary_metric': primary_metric,
+            'primary_score': float(primary_score),
             'macro_ndcg_cut_10': bm25.get('macro_ndcg_cut_10'),
+            'macro_recall_1000': bm25.get('macro_recall_1000'),
+            'macro_recip_rank': bm25.get('macro_recip_rank'),
             'summary': str(Path(summary_path).resolve()),
             'eval_artifacts_verified': True}
 
 
 def main():
     config = load_config()
+    primary_metric = config['evaluation']['primary_metric']
+    metric_keys = {'recall_1000', 'ndcg_cut_10', 'recip_rank'}
+    if primary_metric not in metric_keys:
+        raise ValueError(
+            f"unsupported evaluation.primary_metric {primary_metric!r}; "
+            f"expected one of {sorted(metric_keys)}")
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model_path", type=str, help="Path to model")
@@ -209,6 +246,26 @@ def main():
         print(f"❌ ERROR: Evaluation script not found at {eval_script}")
         sys.exit(1)
 
+    # Fail before preparing data or launching any domain process. A manifested run is
+    # reportable only after training validation stamped finished_at; legacy checkpoints
+    # remain evaluable. Check the encoding contract at the same preflight boundary.
+    train_manifest = load_training_manifest(model_path)
+    require_completed_training_manifest(train_manifest, model_path)
+    model_cfg = config['model']
+    drift = encoding_contract_drift(train_manifest, model_cfg)
+    if train_manifest is None:
+        print(f"⚠️  No {RUN_MANIFEST_NAME} for {model_path}; this checkpoint predates "
+              f"run manifests. Recording training_manifest: null.")
+    if drift and not args.allow_config_drift:
+        print("\n❌ Evaluation settings differ from the checkpoint's training contract:")
+        for key, vals in sorted(drift.items()):
+            print(f"   {key}: trained={vals['checkpoint']!r}  evaluating={vals['evaluation']!r}")
+        print("   Re-run with matching config/config.yaml model settings, or pass "
+              "--allow-config-drift to accept it (the difference is recorded).")
+        sys.exit(1)
+    if drift:
+        print(f"⚠️  Proceeding with --allow-config-drift: {sorted(drift)}")
+
     all_domains = config['evaluation'].get('eval_domains', [])
     if args.domains:
         domains = [d.strip() for d in args.domains.split(',') if d.strip()]
@@ -229,6 +286,28 @@ def main():
     missing = check_and_prepare_data(domains, config,
                                      require_existing=args.require_existing)
 
+    if missing:
+        raise FileNotFoundError(f'Missing evaluation domains: {missing}')
+    if len(domains) != len(set(domains)):
+        raise ValueError('Duplicate evaluation domains')
+    attempt_id = configure_cache()
+    artifact_hashes = eval_artifact_hashes(get_path('processed'), domains)
+    identity = {'model': model_identity(model_path), 'model_config': config['model'],
+                'evaluation_config': config['evaluation'],
+                'artifacts': artifact_hashes, 'evaluator_revision': _code_revision()}
+    if (model_path / 'adapter_config.json').exists():
+        from utils.helpers import get_training_context
+        identity['adapter_base'] = model_identity(get_training_context('crossbatch')['base_model'])
+    attempt = {'attempt_id': attempt_id, 'identity': identity,
+               'started_at': datetime.datetime.now(datetime.timezone.utc).isoformat()}
+    result_dir = (Path(get_data_base_dir()) / config['paths']['results_dir'] /
+                  model_run_tag(model_path) / attempt_id)
+    result_dir.mkdir(parents=True, exist_ok=False)
+    attempt_path = result_dir / 'attempt.json'
+    with atomic_write(attempt_path) as handle:
+        json.dump(attempt, handle, indent=2)
+    print(f'Evaluation attempt: {attempt_path}', flush=True)
+
     failed = list(missing)
     for domain in domains:
         if domain in missing:
@@ -238,6 +317,7 @@ def main():
             sys.executable, str(eval_script),
             "--model_path", str(model_path),
             "--domain", domain,
+            '--attempt_manifest', str(attempt_path),
         ]
 
         try:
@@ -250,7 +330,7 @@ def main():
             continue
 
     rows, absent = collect_results(model_path, [d for d in domains if d not in failed],
-                                   config)
+                                   config, attempt=attempt, result_dir=result_dir)
     run_tag = model_run_tag(model_path)
 
     # Fail BEFORE anything is computed, printed or written: a failed retry must not
@@ -260,35 +340,13 @@ def main():
               f"missing or invalid results: {absent}")
         sys.exit(1)
 
-    # The checkpoint's encoding contract. A model trained with CLS pooling at
-    # passage_max_len 512 does not mean the same thing encoded mean-pooled at 128,
-    # and nothing else was catching that. Training DATA hashes are recorded but not
-    # enforced: a checkpoint stays valid when its mixture is no longer on disk.
-    train_manifest = load_training_manifest(model_path)
-    model_cfg = config['model']
-    drift = encoding_contract_drift(train_manifest, model_cfg)
-    if train_manifest is None:
-        print(f"⚠️  No {RUN_MANIFEST_NAME} for {model_path}; this checkpoint predates "
-              f"run manifests. Recording training_manifest: null.")
-    if drift and not args.allow_config_drift:
-        print("\n❌ Evaluation settings differ from the checkpoint's training contract:")
-        for key, vals in sorted(drift.items()):
-            print(f"   {key}: trained={vals['checkpoint']!r}  evaluating={vals['evaluation']!r}")
-        print("   Re-run with matching config/config.yaml model settings, or pass "
-              "--allow-config-drift to accept it (the difference is recorded).")
-        sys.exit(1)
-    if drift:
-        print(f"⚠️  Proceeding with --allow-config-drift: {sorted(drift)}")
-
-    artifact_hashes = eval_artifact_hashes(get_path("processed"), domains)
-
     # Before anything is computed or written, exactly like the incomplete-run guard.
     compared_to = None
     if args.compare_bm25:
         bm25 = json.loads(Path(args.compare_bm25).read_text())
         try:
             compared_to = validate_bm25_comparison(
-                bm25, domains, artifact_hashes, args.compare_bm25)
+                bm25, domains, artifact_hashes, args.compare_bm25, primary_metric)
         except ValueError as exc:
             print(f"\n❌ {exc}")
             sys.exit(1)
@@ -305,6 +363,11 @@ def main():
     macro = _macro('ndcg_cut_10')
     macro_recall = _macro('recall_1000')
     macro_mrr = _macro('recip_rank')
+    primary_score = {
+        'ndcg_cut_10': macro,
+        'recall_1000': macro_recall,
+        'recip_rank': macro_mrr,
+    }[primary_metric]
 
     def _fmt(v):
         return f"{v:.4f}" if v is not None else "  n/a "
@@ -312,24 +375,30 @@ def main():
     print("\n" + "=" * 72)
     print(f"  {run_tag}")
     print("=" * 72)
-    print(f"  {'domain':<22} {'NDCG@10':>9} {'R@1000':>9} {'MRR':>9}   queries")
+    print(f"  {'domain':<22} {'R@1000':>9} {'NDCG@10':>9} {'MRR':>9}   queries")
     print("-" * 72)
     for r in rows:
-        print(f"  {r['domain']:<22} {_fmt(r.get('ndcg_cut_10')):>9} "
-              f"{_fmt(r.get('recall_1000')):>9} {_fmt(r.get('recip_rank')):>9}   "
+        print(f"  {r['domain']:<22} {_fmt(r.get('recall_1000')):>9} "
+              f"{_fmt(r.get('ndcg_cut_10')):>9} {_fmt(r.get('recip_rank')):>9}   "
               f"{r['num_queries']}")
     print("-" * 72)
-    print(f"  {'MACRO':<22} {_fmt(macro):>9} {_fmt(macro_recall):>9} "
+    print(f"  {'MACRO':<22} {_fmt(macro_recall):>9} {_fmt(macro):>9} "
           f"{_fmt(macro_mrr):>9}   over {len(rows)} domains")
+    print(f"  PRIMARY ({primary_metric}): {_fmt(primary_score)}")
     print("=" * 72)
 
     # Default under the run tag, so two models of the same basename cannot
     # overwrite each other's summary. Only ever written for a complete run.
-    out = Path(args.results_json) if args.results_json else (
-        Path(get_data_base_dir()) / config['paths']['results_dir'] / run_tag
-        / "summary.json")
+    if set(domains) != set(all_domains) or len(domains) != 12:
+        print('Subset complete; domain results retained, no reportable summary.json.')
+        return
+    out = Path(args.results_json) if args.results_json else result_dir / 'summary.json'
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps({
+    summary = {
+        'attempt_id': attempt_id,
+        'identity_sha256': identity_digest(identity),
+        'evaluation_identity': identity,
+        'completed_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
         'model': str(Path(model_path).resolve()),
         'model_name': Path(model_path).name,
         'run_tag': run_tag,
@@ -338,11 +407,15 @@ def main():
         'macro_ndcg_cut_10': macro,
         'macro_recall_1000': macro_recall,
         'macro_recip_rank': macro_mrr,
+        'primary_metric': primary_metric,
+        'primary_score': primary_score,
         'compared_to': compared_to,
         'training_manifest': training_provenance(train_manifest),
         'eval_artifact_sha256': artifact_hashes,
         'config_drift': drift or None,
-    }, indent=2))
+    }
+    with atomic_write(out) as handle:
+        json.dump(summary, handle, indent=2)
     print(f"📄 Summary written to {out}")
 
     print("\n🏁 All evaluations complete.")

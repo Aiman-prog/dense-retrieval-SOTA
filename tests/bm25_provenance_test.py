@@ -198,7 +198,11 @@ def test_search_depth_is_clamped_to_the_corpus():
 
 def test_results_carry_provenance():
     src = (project_root / 'scripts' / 'run_bm25_evals.py').read_text()
-    for field in ('"bm25": {"k1": k1, "b": b}', '"run_tag": run_tag', '**provenance'):
+    for field in ('"bm25": {"k1": k1, "b": b}', '"run_tag": run_tag', '**provenance',
+                  "'macro_recall_1000': macro_recall",
+                  "'macro_recip_rank': macro_mrr",
+                  "'primary_metric': primary_metric",
+                  "'primary_score': primary_score"):
         assert field in src, field
 
 

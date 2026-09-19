@@ -825,7 +825,12 @@ def test_mixed_training_consumers_validate_the_file_set():
     assert not missing, f"mixed-data consumers do not validate their file set: {missing}"
 
 
-def test_ance_msmarco_partial_train_set_is_rebuilt():
+def test_ance_paper_partial_train_set_is_rebuilt():
+    """A half-built MS MARCO train set is rebuilt as a set, not left partial.
+
+    Shared by every `setup_mode: tevatron_msmarco` recipe; `ance_paper` is the only
+    one left since `ance_msmarco` was retired (P-ANCE-03).
+    """
     sys.path.insert(0, str(project_root / 'scripts'))
     import train_ance
 
@@ -860,6 +865,7 @@ def test_ance_msmarco_partial_train_set_is_rebuilt():
             'train_qrels_file': 'msmarco_train_qrels.txt',
             'mixture_dir': 'msmarco_training_mixture',
             'eval_queries_file': None,
+            'eval_qrels_file': None,
         })
     finally:
         train_ance.get_path = original_get_path
@@ -1035,7 +1041,7 @@ TESTS = [
     ("consume: trainers never import the builder", test_consumers_never_import_the_builder),
     ("consume: mixture validator is recipe-aware", test_require_mixture_files_is_recipe_aware_and_strict),
     ("consume: every mixed trainer validates files", test_mixed_training_consumers_validate_the_file_set),
-    ("ance-ms: partial train set rebuilt", test_ance_msmarco_partial_train_set_is_rebuilt),
+    ("ance-paper: partial train set rebuilt", test_ance_paper_partial_train_set_is_rebuilt),
 
     ("msmarco: reaches count despite collisions", test_msmarco_reaches_requested_count_despite_collisions),
     ("msmarco: exhaustion raises, publishes nothing", test_msmarco_exhaustion_raises_and_publishes_nothing),

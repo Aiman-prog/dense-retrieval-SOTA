@@ -13,12 +13,15 @@
 #SBATCH --chdir=/home/aimanabdulwaha/dense-retrieval-SOTA
 
 # --- Environment Setup ---
+source scripts/launchers/runtime_provenance.sh || exit 1
 export DATA_BASE_DIR="/scratch/${USER}/dense-retrieval-SOTA"
-export PYTHONPATH="/home/${USER}/dense-retrieval-SOTA/src:${PYTHONPATH}"
+export PYTHONPATH="$PWD/src:$PWD/scripts:${PYTHONPATH:-}"
 export APPTAINER_CACHEDIR=/scratch/${USER}/.apptainer
 
 # Offline Mode
 export HF_HOME="${DATA_BASE_DIR}/data/bright"
+export EVAL_CACHE_ROOT="${DATA_BASE_DIR}/data/evaluation/hf_datasets"
+export SINGULARITYENV_EVAL_CACHE_ROOT="$EVAL_CACHE_ROOT"
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 

@@ -9,6 +9,7 @@ it sets `DATA_BASE_DIR`, binds `/scratch`, and runs the entry point inside the c
 | 1 | in-batch negatives | `train_inbatch.py` | `run_inbatch_singularity.sh` |
 | 2 | cross-batch (GradCache) | `train_crossbatch.py` | `run_crossbatch_singularity.sh` |
 | 3 | ANCE (periodic full-corpus refresh) | `train_ance.py` | `run_ance_singularity.sh` |
+| 3b | ANCE round-0 preparation (1 GPU, MS MARCO arm) | `train_ance.py --prepare-initial` | `run_ance_paper_prepare_singularity.sh` |
 | 4 | naive GRASS | `run_grass.py` | `run_grass_singularity.sh` |
 | 5 | sequential Fast-GRASS | `run_fast_grass.py` | `run_fast_grass_singularity.sh` |
 | 6 | async Fast-GRASS (2 GPUs) | `train_async_fast_grass.py` | `run_async_fast_grass_singularity.sh` |
@@ -24,14 +25,42 @@ the BRIGHT comparison about mining, but it is not Microsoft's pairwise RoBERTa/L
 reproduction. Optimizer parity is currently guaranteed only for ANCE versus **naive GRASS**;
 Fast-GRASS and async Fast-GRASS retain their own optimizer paths.
 
-The paper's own recipe is reachable as `train_ance.py --recipe ance_paper` — the same entry
+The paper's own recipe is reachable as `train_ance.py --recipe ance_paper`, via its own
+`run_ance_paper_singularity.sh` — the same entry
 point, miner and round handoff, with RoBERTa + a projection head, pairwise NLL over raw dot
 and LAMB swapped in (`scripts/ance_paper.py`). It is **not a rung of the ladder**: it is a
 separate MS MARCO experiment whose job is to show this implementation is faithful, so that
-the BRIGHT row can keep GRASS's objective and stay a comparison of mining. It runs two
-epoch-equivalent budgets over 20 expanded triplets/query (~250K steps), not Microsoft's
-600K, because DelftBlue supplies one miner GPU and a 24-hour allocation; this limitation
-must accompany its result.
+the BRIGHT row can keep GRASS's objective and stay a comparison of mining. It stops at a
+fixed 300K optimizer steps while retaining Microsoft's one-million-step scheduler horizon,
+not at the released 600K checkpoint, because DelftBlue supplies one miner GPU and a 24-hour
+allocation; this limitation must accompany its result.
+
+It also has a prerequisite of its own. `ance_paper` initializes from a 60K BM25 warm-up, and
+Microsoft's release is no longer downloadable — both blob URLs return HTTP 409, the issues
+have been open since 2022, and the one mirror is bit-identical to the released 600K *final*,
+which `assert_permitted_init` refuses precisely so a finished model cannot "reproduce" 0.330
+by construction. `train_ance_warmup.py` (`run_ance_warmup_singularity.sh`, recipe
+`ance_paper_warmup`) builds the warm-up from `roberta-base` on the BM25 negatives already in
+the mixture: one GPU, ~2-3 h, no mining and no rounds. Gate it at MRR@10 ≈ 0.311 (with
+`EVAL_ALLOW_DRIFT=1` — it trains at q128/p128 and is consumed at q64/p512), record the hash it
+prints as `ance_paper.expected_init_sha256`, then run the reproduction. The substituted
+initialization is a second recorded deviation alongside the step budget.
+
+**Prepare round 0 before the training job.** `run_ance_paper_prepare_singularity.sh` mines it
+on one GPU (~6.6h) and writes a reusable artifact; the training job adopts it with
+`ANCE_INITIAL_ROUND=<dir>` and refuses it unless every input hash matches. Mining it inline
+costs the training allocation 6h38m, which is why job 204931 could not fit 300K steps.
+`ANCE_OVERWRITE=1` is required when the output directory still holds checkpoints — ANCE
+cannot resume, so starting fresh deletes them, and that is now an explicit choice.
+
+`scripts/launchers/run_ance_refresh_repro_singularity.sh` reproduces the refresh-encoder crash
+(`P-ANCE-05`) in 2m23s and is kept as that defect's regression probe.
+
+Run `run_ance_warmup_preflight_singularity.sh` before the GPU job. It executes the same code
+on the same data with no GPU and no writes, on `compute-p1` in minutes, and the GPU launcher
+repeats it as stage 1. The warm-up reads the mixture with `ANCEDataset(ragged=True)`, because
+upstream has no per-query negative count and ~1.8% of `Tevatron/msmarco-passage` records carry
+fewer than 30 — the strict path stays in force for mined rounds.
 
 ## Comparing rows 0, 1 and 2 honestly
 

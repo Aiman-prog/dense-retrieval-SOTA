@@ -10,6 +10,7 @@ import os
 import sys
 import json
 import math
+import bisect
 import argparse
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -23,7 +24,7 @@ sys.path.append(str(project_root / 'scripts'))
 from utils.helpers import get_training_context, append_jsonl, set_seed, \
                           ranking_probe, probe_triples_from_mixture, build_adamw, \
                           retry_io, TRAINING_LOG_NAME, atomic_write
-from ance_mining import RoundError, latest_committed_round, read_round, INITIAL_ROUND
+from ance_mining import latest_committed_round, read_round, INITIAL_ROUND
 
 os.environ["TRANSFORMERS_ATTENTION_IMPLEMENTATION"] = "eager"
 
@@ -31,99 +32,73 @@ TRAINER_SUMMARY_NAME = "ance_trainer_summary.json"
 
 
 class NonFiniteOptimization(RuntimeError):
-    """Optimization diverged; stopping rather than saving poisoned weights."""
+    """Optimization diverged; stopping rather than saving poisoned weights.
 
-
-class NonFiniteLoss(NonFiniteOptimization):
-    """The forward pass produced a non-finite loss."""
-
-
-class NonFiniteGradNorm(NonFiniteOptimization):
-    """The backward pass produced non-finite gradients."""
-
-
-def check_finite_loss(value, step):
-    """Raise on a non-finite loss BEFORE it reaches backward().
-
-    One NaN backward pass poisons every parameter. The old loop stepped the
-    optimizer unconditionally, saved the diverged checkpoint, exited 0 and let the
-    evaluation score it. The loss is only logged every `logging_steps`, so nothing
-    downstream would have seen the NaN either.
+    One NaN backward pass poisons every parameter. The old loop stepped the optimizer
+    unconditionally, saved the diverged checkpoint, exited 0 and let the evaluation
+    score it. Deliberately stricter than `helpers.assert_training_succeeded`, which
+    only WARNS on a non-finite grad_norm: that is post-hoc analysis of HF-Trainer runs
+    where clipping already handled the value, while this loop is hand-rolled with no
+    GradScaler and nothing downstream would catch the step it would otherwise take.
     """
-    if not math.isfinite(float(value)):
-        raise NonFiniteLoss(
+
+
+def optimization_step(model, optimizer, scheduler, loss, *, max_grad_norm, step):
+    """Check, backward, clip, step. Returns (loss value, pre-clipping grad norm).
+
+    One function so the ORDER is testable: the finite checks must sit before
+    `optimizer.step()`, and a test can assert parameters are unchanged after a raise.
+    `error_if_nonfinite` is what rejects a non-finite norm -- clipping cannot rescue
+    one, because the coefficient `max_norm / (total_norm + 1e-6)` is itself non-finite
+    and the bad gradients survive into the step.
+    """
+    value = float(loss.item())
+    if not math.isfinite(value):
+        raise NonFiniteOptimization(
             f"non-finite loss={value} at step {step}; the optimization diverged. "
             f"No optimizer step is taken and no checkpoint is written.")
-    return float(value)
-
-
-def check_finite_grad_norm(value, step):
-    """Raise on a non-finite gradient norm BEFORE optimizer.step().
-
-    `clip_grad_norm_` returns the PRE-clipping norm, and clipping does not rescue a
-    non-finite one: the coefficient is `max_norm / (total_norm + 1e-6)`, so an inf or
-    NaN total norm yields a non-finite coefficient and non-finite gradients survive
-    into the step. A finite loss is no protection -- the loss can be finite while a
-    single parameter's gradient overflows.
-
-    Deliberately stricter than `helpers.assert_training_succeeded`, which only WARNS
-    on a non-finite `grad_norm`. That is post-hoc log analysis of HF-Trainer runs,
-    where the value is a record of something clipping already handled. This loop is
-    hand-rolled bf16 with no GradScaler, so a non-finite norm here is a real
-    divergence rather than a loss-scaling artefact, and there is nothing downstream
-    that would catch the step it would otherwise take.
-    """
-    if not math.isfinite(float(value)):
-        raise NonFiniteGradNorm(
-            f"non-finite gradient norm={value} at step {step} (pre-clipping); the "
-            f"gradients are already non-finite, so clipping cannot rescue them and "
-            f"the step would write NaN into every parameter. No optimizer step is "
-            f"taken and no checkpoint is written.")
-    return float(value)
-
-
-def apply_gradients(model, optimizer, scheduler, *, max_grad_norm, step):
-    """Clip, verify, then step. Returns the pre-clipping gradient norm.
-
-    One function so the ORDER is testable: the guard must run between clipping and
-    `optimizer.step()`, and a test can assert that parameters are unchanged after a
-    raise rather than asserting the ordering by reading the source.
-    """
-    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-    value = check_finite_grad_norm(float(grad_norm), step)
+    loss.backward()
+    try:
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            model.parameters(), max_grad_norm, error_if_nonfinite=True)
+    except RuntimeError as exc:
+        raise NonFiniteOptimization(
+            f"non-finite gradient norm at step {step} (pre-clipping): {exc}. "
+            f"No optimizer step is taken and no checkpoint is written.") from exc
     optimizer.step()
     scheduler.step()
     optimizer.zero_grad(set_to_none=True)
-    return value
+    return value, float(grad_norm)
 
 
 class ANCEDataset(Dataset):
     """Load JSONL training examples from a committed round directory."""
 
-    def __init__(self, data_dir, tokenizer, max_q_len, max_p_len, train_group_size,
-                 paper_mode=False):
+    def __init__(self, data_dir, train_group_size, paper_mode=False, ragged=False):
         self.examples = []
         # Paper mode (data/msmarco_data.py:337-362, run_train.sh --triplet): the round
         # stores 20 mined negatives per query and each becomes its OWN
         # (query, positive, negative) instance. Every loss term still sees exactly one
         # positive and one negative; the group is not widened into an in-batch softmax.
         self.paper_mode = paper_mode
-        self.triplets = []
         for f_path in sorted(Path(data_dir).glob("*.jsonl")):
             with open(f_path) as f:
                 for line in f:
                     if line.strip():
                         self.examples.append(json.loads(line))
-        self.tokenizer = tokenizer
-        self.max_q_len = max_q_len
-        self.max_p_len = max_p_len
+        # No tokenizer here: both modes hand TEXT to the collate function so padding
+        # reaches the longest sequence in the batch rather than the configured cap.
         self.train_group_size = train_group_size
-        self._validate()
-        if paper_mode:
-            for ex in self.examples:
-                pos = ex['positive_passages'][0]['text']
-                for neg in ex['negative_passages'][:train_group_size - 1]:
-                    self.triplets.append((ex['query'], pos, neg['text']))
+        self.n_negs = train_group_size - 1
+        self.ragged = ragged
+        if ragged:
+            if not paper_mode:
+                raise ValueError("ragged indexing yields one (query, positive, "
+                                 "negative) triplet per negative, which only paper "
+                                 "mode consumes; pass paper_mode=True.")
+            self._build_ragged_index()
+        else:
+            self._validate()
 
     def _validate(self):
         """Every record must carry its full complement of real negatives.
@@ -133,44 +108,96 @@ class ANCEDataset(Dataset):
         document away from its own query. The miner now refuses to publish a round
         that cannot supply the negatives, so a short record here means the round was
         written by something other than the current miner.
+
+        Paper mode also relies on this: `__getitem__` addresses negative `i` of record
+        `n` by `divmod`, which is only well defined because every record is guaranteed
+        at least `n_negs` of them.
         """
-        need = self.train_group_size - 1
         for i, ex in enumerate(self.examples):
             if not ex.get('positive_passages'):
                 raise ValueError(f"record {i} has no positive_passages")
-            if len(ex.get('negative_passages') or []) < need:
+            if len(ex.get('negative_passages') or []) < self.n_negs:
                 raise ValueError(
                     f"record {i} (query {ex.get('query_id')!r}) carries "
                     f"{len(ex.get('negative_passages') or [])} negative(s), needs "
-                    f"{need}. ANCE never pads a group with the positive.")
+                    f"{self.n_negs}. ANCE never pads a group with the positive.")
+
+    def _build_ragged_index(self):
+        """Index every (query, positive, negative) the mixture actually holds.
+
+        Upstream has no notion of "negatives per query". Its warm-up reads
+        triples.train.small.tsv one triplet per LINE (drivers/run_warmup.py:743,
+        data/process_fn.py:48-70 -- exactly three tab cells), and its ANN path yields
+        one instance per negative (data/msmarco_data.py:355-360, `for neg_pid in
+        neg_pids: yield`). A query with 8 negatives is simply 8 lines.
+
+        The uniform-count requirement is OURS: it comes from Tevatron's grouped record
+        shape plus divmod addressing. ~1.8% of Tevatron/msmarco-passage records carry
+        fewer than 30 BM25 negatives (min 1), passed through verbatim by the
+        preprocessor, so demanding 30 aborts the warm-up on upstream's own data.
+
+        ONLY for a static mixture. A mined round must stay on _validate: there a short
+        record means the miner published a round it should have discarded, and the
+        strict check is the thing that catches it.
+        """
+        offsets, total = [], 0
+        for i, ex in enumerate(self.examples):
+            if not ex.get('positive_passages'):
+                raise ValueError(f"record {i} has no positive_passages")
+            # Capped, not required: train_group_size stays the per-query ceiling.
+            n = min(len(ex.get('negative_passages') or []), self.n_negs)
+            if n < 1:
+                raise ValueError(
+                    f"record {i} (query {ex.get('query_id')!r}) carries no negatives. "
+                    f"ANCE never pads a group with the positive.")
+            offsets.append(total)
+            total += n
+        self._offsets, self._n_triplets = offsets, total
 
     def __len__(self):
-        return len(self.triplets) if self.paper_mode else len(self.examples)
+        if self.ragged:
+            return self._n_triplets
+        if self.paper_mode:
+            return len(self.examples) * self.n_negs
+        return len(self.examples)
 
     def __getitem__(self, idx):
+        # Both modes return TEXT and let the collate function tokenize the batch, so
+        # padding reaches the longest sequence present rather than the cap. q1024/p1024
+        # against a training-mixture median of 41 query and 114 passage word-pieces
+        # meant the old `padding='max_length'` paid for roughly an order of magnitude
+        # of pad tokens on every step.
+        if self.ragged:
+            # Same addressing idea as paper mode, over a cumulative count instead of a
+            # fixed stride, because the per-record count varies. On uniform data the
+            # two agree exactly.
+            rec = bisect.bisect_right(self._offsets, idx) - 1
+            ex = self.examples[rec]
+            return (ex['query'], ex['positive_passages'][0]['text'],
+                    ex['negative_passages'][idx - self._offsets[rec]]['text'])
         if self.paper_mode:
-            # Dynamic padding is applied by the collate function, not here: MS MARCO
-            # passages average ~75 word-pieces against a 512 cap, so padding each item
-            # to the cap would multiply the step cost several-fold.
-            return self.triplets[idx]
+            # Addressed, not materialized. A shard of 80k MS MARCO queries at 20
+            # negatives is 1.6M triplets, and holding them as tuples bought nothing
+            # that this arithmetic does not.
+            rec, neg = divmod(idx, self.n_negs)
+            ex = self.examples[rec]
+            return (ex['query'], ex['positive_passages'][0]['text'],
+                    ex['negative_passages'][neg]['text'])
         ex = self.examples[idx]
         passages = (ex['positive_passages'][:1]
-                    + ex['negative_passages'][:self.train_group_size - 1])
-        q = self.tokenizer(ex['query'], max_length=self.max_q_len,
-                           truncation=True, padding='max_length', return_tensors='pt')
-        ps = [self.tokenizer(p['text'], max_length=self.max_p_len,
-                             truncation=True, padding='max_length', return_tensors='pt')
-              for p in passages]
-        return {
-            'q_input_ids':      q['input_ids'].squeeze(0),
-            'q_attention_mask': q['attention_mask'].squeeze(0),
-            'p_input_ids':      torch.stack([p['input_ids'].squeeze(0)  for p in ps]),
-            'p_attention_mask': torch.stack([p['attention_mask'].squeeze(0) for p in ps]),
-        }
+                    + ex['negative_passages'][:self.n_negs])
+        # Tevatron's TrainCollator indexes the query and every passage as a sequence
+        # (collator.py:31-32), so each is wrapped in a one-element list.
+        return [ex['query']], [[p['text']] for p in passages]
 
 
 def make_paper_collate(tokenizer, max_q, max_p):
-    """Pad to the longest sequence in the batch, not to the cap."""
+    """Pad to the longest sequence in the batch, not to the cap.
+
+    The BGE arm uses Tevatron's own TrainCollator; this one exists because the paper
+    arm's objective is pairwise and needs the positive and the negative kept apart,
+    which the grouped collator cannot express.
+    """
     def collate(batch):
         q, p, n = zip(*batch)
         enc = lambda texts, ml: tokenizer(list(texts), padding=True, truncation=True,
@@ -179,16 +206,106 @@ def make_paper_collate(tokenizer, max_q, max_p):
     return collate
 
 
+def make_bge_collate(tokenizer, max_q, max_p):
+    """Tevatron's pinned TrainCollator, configured from the recipe's lengths.
+
+    The same collator the in-batch and cross-batch arms get through Tevatron's driver,
+    so all three BGE arms tokenize identically. It returns a flat (B*G, L) passage
+    batch, which is exactly what `EncoderModel.forward` wants -- it derives the group
+    width itself from `p_reps.size(0) // q_reps.size(0)`. The custom collator this
+    replaces built (B, G, L) only for the training step to `view` it straight back.
+    """
+    from tevatron.retriever.arguments import DataArguments
+    from tevatron.retriever.collator import TrainCollator
+    return TrainCollator(
+        data_args=DataArguments(query_max_len=max_q, passage_max_len=max_p),
+        tokenizer=tokenizer)
+
+
 def make_dataloader(data_dir, tokenizer, ctx, batch_size, generator=None):
     paper = bool(ctx['args'].get('paper_fidelity'))
     # Lengths come from ctx, which has already applied any recipe override.
-    ds = ANCEDataset(data_dir, tokenizer, ctx['max_q'], ctx['max_p'],
-                     ctx['args']['train_group_size'], paper_mode=paper)
+    ds = ANCEDataset(data_dir, ctx['args']['train_group_size'], paper_mode=paper)
+    make_collate = make_paper_collate if paper else make_bge_collate
     return DataLoader(ds, batch_size=batch_size, shuffle=True,
                       num_workers=ctx['args']['dataloader_num_workers'],
                       drop_last=True, generator=generator,
-                      collate_fn=(make_paper_collate(tokenizer, ctx['max_q'],
-                                                     ctx['max_p']) if paper else None))
+                      collate_fn=make_collate(tokenizer, ctx['max_q'], ctx['max_p']))
+
+
+def write_trainer_summary(path, payload):
+    """Durably write the refresh-accounting record, or raise.
+
+    Critical, not best-effort: train_ance.py fails the run outright when this file is
+    missing, so a lost write must end the run rather than leave it unvalidatable. The
+    'critical caller' half of retry_io's contract -- retry, then check and raise.
+    """
+    def _write():
+        with atomic_write(path) as f:
+            json.dump(payload, f, indent=2, default=str)
+
+    if not retry_io(_write, f"write {Path(path).name}"):
+        raise OSError(
+            f"could not write {path} after repeated attempts. It is the only "
+            f"record of which ANN rounds were consumed, so the run cannot be "
+            f"validated without it.")
+
+
+def build_schedule(optimizer, warmup_steps, max_steps, scheduler_max_steps):
+    """Linear warmup then decay toward the HORIZON, which is not the stopping step.
+
+    Upstream's --single_warmup builds one decay over --max_steps (default 1,000,000)
+    while the released comparison point is checkpoint 600K (run_ann.py:174-178).
+    Collapsing the two would change the learning rate at every step, so the run would
+    not be the same optimization even at an identical stop.
+
+    Returns (scheduler, horizon).
+    """
+    horizon = scheduler_max_steps or max_steps
+    scheduler = get_linear_schedule_with_warmup(optimizer, warmup_steps, horizon)
+    if horizon != max_steps:
+        print(f"[Trainer] linear decay toward step {horizon}; training stops at "
+              f"{max_steps} (a labelled deviation, not a shortened schedule)",
+              flush=True)
+    return scheduler, horizon
+
+
+def build_trainer_summary(*, run_id, work_root, optimizer, max_steps,
+                          scheduler_max_steps, save_steps, final_step, rounds,
+                          rounds_completed):
+    """Build the durable refresh-accounting record from trainer state.
+
+    Everything countable is DERIVED here from the final step and the consumed-round
+    list, rather than maintained as parallel counters in the loop that could drift
+    apart from it.
+
+    The three round numbers stay separate in the output, because they answer different
+    questions. A checkpoint OPPORTUNITY is a step at which a save happened; a COMPLETED
+    round is one the miner published; a CONSUMED round is one this loop actually
+    trained on. Reporting a checkpoint opportunity as a refresh is exactly how a static
+    run came to be described as ANCE.
+    """
+    consumed = [r['ann_no'] for r in rounds if r['ann_no'] != INITIAL_ROUND]
+    last_ann_no = max(consumed, default=0)
+    # A save fires on every save_steps boundary, plus once at max_steps when that is
+    # not itself a boundary.
+    opportunities = final_step // save_steps
+    if final_step == max_steps and final_step % save_steps:
+        opportunities += 1
+    return {
+        'run_id': run_id, 'work_root': str(work_root), 'optimizer': optimizer,
+        'max_steps': max_steps, 'scheduler_max_steps': scheduler_max_steps,
+        'final_step': final_step, 'rounds': rounds,
+        'checkpoint_opportunities': opportunities,
+        'rounds_completed': rounds_completed,
+        'rounds_consumed': len(consumed),
+        # Published while an earlier round was still training, so never seen. The
+        # trainer consumes latest-only; this is normal, and recorded so the refresh
+        # count cannot be misread as the publication count.
+        'rounds_skipped': last_ann_no - len(consumed),
+        'terminal_unconsumed': (rounds_completed
+                                if rounds_completed > last_ann_no else None),
+    }
 
 
 def main():
@@ -198,6 +315,11 @@ def main():
     parser.add_argument('--run_id',     required=True)
     parser.add_argument('--output_dir', required=True)
     parser.add_argument('--max_steps',  type=int, required=True)
+    # The horizon the linear decay is computed against, which is NOT the step the run
+    # stops at. Upstream's --single_warmup builds one schedule over --max_steps
+    # (default 1,000,000) while the released comparison point is checkpoint 600K, so
+    # collapsing the two would change the LR at every step (run_ann.py:174-178).
+    parser.add_argument('--scheduler_max_steps', type=int, default=None)
     parser.add_argument('--seed',       type=int, default=42)
     parser.add_argument('--recipe',     default='ance')
     args = parser.parse_args()
@@ -213,6 +335,11 @@ def main():
         # DenseModel.build goes through AutoModel, which yields a bare RoBERTa and
         # silently drops embeddingHead/norm -- the paper checkpoint cannot load
         # through Tevatron at all. load_ance_encoder refuses anything left random.
+        #
+        # FP32 parameters with bf16 autocast, deliberately NOT the bf16 weights the
+        # BGE arm uses. Upstream runs fp32, and LAMB at lr 1e-6 moves a weight by far
+        # less than bf16 can represent, so bf16 master weights would round most
+        # updates to zero and the reproduction would silently barely train.
         from ance_paper import load_ance_encoder
         model = load_ance_encoder(args.model_name_or_path,
                                   attn_implementation='eager').cuda()
@@ -230,8 +357,25 @@ def main():
             pooling=ctx['pooling'], normalize=ctx['normalize'],
             temperature=ctx['temperature'], attn_implementation='eager')
         train_args = TrainingArguments(output_dir=args.output_dir, bf16=bf16)
+        # torch_dtype must be passed EXPLICITLY. EncoderModel.build ignores train_args
+        # entirely (tevatron/retriever/modeling/encoder.py:114), so bf16=True on the
+        # TrainingArguments above sets no dtype. Tevatron's own driver derives it from
+        # training_args.bf16 (driver/train.py:71-84), which is how the in-batch and
+        # cross-batch arms get bf16 WEIGHTS; without this line ANCE would train fp32
+        # weights under autocast and the BRIGHT comparison would straddle two
+        # numerical paths.
         model = DenseModel.build(model_args, train_args,
-                                 attn_implementation='eager').cuda()
+                                 attn_implementation='eager',
+                                 torch_dtype=torch.bfloat16 if bf16
+                                 else torch.float32).cuda()
+
+    if ctx['args']['gradient_checkpointing']:
+        # DenseModel holds the transformer at `.encoder`; calling
+        # gradient_checkpointing_enable() on the wrapper hits Tevatron's own broken
+        # override (see train_inbatch.py:37-46). The paper encoder wraps RobertaModel
+        # the same way. This is the memory fix that makes batch 64 at q1024/p1024 fit.
+        (model.roberta if paper else model.encoder).gradient_checkpointing_enable()
+        print("[Trainer] gradient checkpointing enabled", flush=True)
 
     batch_size    = ctx['args']['batch_size']
     logging_steps = ctx['args']['logging_steps']       # also the round-poll interval
@@ -252,7 +396,11 @@ def main():
     train_iter  = iter(train_dataloader)
     last_ann_no = 0
     rounds = [{'ann_no': INITIAL_ROUND, 'checkpoint': initial_meta.get('checkpoint'),
-               'checkpoint_step': 0, 'consumed_at_step': 0, 'consumed_steps': 0}]
+               'checkpoint_step': 0, 'consumed_at_step': 0, 'stale_steps': 0,
+               'consumed_steps': 0,
+               'shard_index': initial_meta.get('shard_index'),
+               'n_shards': initial_meta.get('n_shards'),
+               'n_shard_queries': initial_meta.get('n_shard_queries')}]
 
     if paper:
         # utils/lamb.py, --optimizer lamb (run_train.sh:110). Absolute warmup_steps,
@@ -274,7 +422,8 @@ def main():
             weight_decay=ctx['args']['weight_decay'], label='ance')
         # Paper: linear warmup (5000 steps at MARCO scale); scaled by warmup_ratio.
         warmup_steps = int(args.max_steps * ctx['args']['warmup_ratio'])
-    scheduler = get_linear_schedule_with_warmup(optimizer, warmup_steps, args.max_steps)
+    scheduler, horizon = build_schedule(optimizer, warmup_steps, args.max_steps,
+                                        args.scheduler_max_steps)
 
     log_path = output_dir / TRAINING_LOG_NAME
     mixture_dir = Path(ctx['processed_dir']) / ctx['args']['mixture_dir']
@@ -293,33 +442,32 @@ def main():
         append_jsonl(log_path, {"global_step": step, "phase": phase, **result})
 
     def _write_summary(step):
-        """Critical, not best-effort: this file is the ONLY evidence of round
-        consumption, and train_ance.py fails the run outright when it is missing. One
-        EREMOTEIO on BeeGFS (P11/P14) would otherwise discard a completed run's
-        evidence, or leave a stale summary under-reporting the rounds consumed. This
-        is the 'critical caller' half of retry_io's contract: retry, then VERIFY the
-        postcondition and raise."""
+        """Written ONCE, after the loop completes. Critical, not best-effort: this file
+        is the only evidence of round consumption, and train_ance.py fails the run
+        outright when it is missing, so one EREMOTEIO on BeeGFS (P11/P14) would discard
+        a completed run's evidence. This is the 'critical caller' half of retry_io's
+        contract: retry, then VERIFY the postcondition and raise.
+
+        There is no resume, so a periodic summary was only ever crash forensics, and
+        training_log.jsonl plus the SLURM log already carry those. At logging_steps 100
+        over a 300K-step budget it was 3,000 full-payload writes and 3,000 directory
+        globs for nothing.
+        """
         path = output_dir / TRAINER_SUMMARY_NAME
-        payload = {'run_id': args.run_id, 'work_root': str(work_root),
-                   'optimizer': optimizer_spec, 'max_steps': args.max_steps,
-                   'final_step': step, 'rounds': rounds}
+        payload = build_trainer_summary(
+            run_id=args.run_id, work_root=work_root, optimizer=optimizer_spec,
+            max_steps=args.max_steps, scheduler_max_steps=horizon,
+            save_steps=save_steps, final_step=step, rounds=rounds,
+            rounds_completed=latest_committed_round(work_root))
 
-        def _write():
-            with atomic_write(path) as f:
-                json.dump(payload, f, indent=2, default=str)
-
-        if not retry_io(_write, f"write {path.name}"):
-            raise OSError(
-                f"could not write {path} after repeated attempts. It is the only "
-                f"record of which ANN rounds were consumed, so the run cannot be "
-                f"validated without it.")
+        write_trainer_summary(path, payload)
 
     if args.max_steps < 1:
         raise ValueError(f"--max_steps must be >= 1, got {args.max_steps}")
 
     global_step = 0
+    interval_loss_sum, interval_loss_n = 0.0, 0
     _probe("begin", 0)
-    _write_summary(0)
     model.train()
     print(f"[Trainer] Starting: max_steps={args.max_steps}, "
           f"logging_steps={logging_steps}, save_steps={save_steps}", flush=True)
@@ -332,25 +480,41 @@ def main():
         if global_step > 0 and global_step % logging_steps == 0:
             ann_no = latest_committed_round(work_root)
             if ann_no > last_ann_no:
-                try:
-                    data_dir, meta = read_round(work_root, ann_no, run_id=args.run_id)
-                except RoundError as exc:
-                    # Refused, not consumed: a round that cannot prove it belongs to
-                    # this run is another experiment's data.
-                    print(f"[Trainer] REFUSED round {ann_no}: {exc}", flush=True)
-                else:
-                    print(f"[Trainer] Step {global_step}: round {ann_no} "
-                          f"(checkpoint-{meta.get('checkpoint_step')}) — swapping",
-                          flush=True)
-                    train_dataloader = make_dataloader(data_dir, tokenizer, ctx,
-                                                       batch_size, generator)
-                    train_iter  = iter(train_dataloader)
-                    last_ann_no = ann_no
-                    rounds.append({'ann_no': ann_no,
-                                   'checkpoint': meta.get('checkpoint'),
-                                   'checkpoint_step': int(meta.get('checkpoint_step') or 0),
-                                   'consumed_at_step': global_step,
-                                   'consumed_steps': 0})
+                # No refusal path. A committed round that cannot prove it belongs to
+                # this run is another experiment's data, and continuing past it means
+                # training to max_steps on stale negatives -- the P-ANCE-01 failure.
+                # read_round raises RoundError and the run ends here.
+                data_dir, meta = read_round(work_root, ann_no, run_id=args.run_id)
+                print(f"[Trainer] Step {global_step}: round {ann_no} "
+                      f"(checkpoint-{meta.get('checkpoint_step')}) — swapping",
+                      flush=True)
+                train_dataloader = make_dataloader(data_dir, tokenizer, ctx,
+                                                   batch_size, generator)
+                train_iter  = iter(train_dataloader)
+                if ann_no > last_ann_no + 1:
+                    # Latest-only consumption: rounds published while this one was
+                    # being trained are never seen. Normal, and derived into
+                    # rounds_skipped so the refresh count cannot be misread as the
+                    # publication count.
+                    print(f"[Trainer] skipped round(s) "
+                          f"{list(range(last_ann_no + 1, ann_no))} — superseded "
+                          f"before the next poll", flush=True)
+                last_ann_no = ann_no
+                ckpt_step = int(meta.get('checkpoint_step') or 0)
+                rounds.append({'ann_no': ann_no,
+                               'checkpoint': meta.get('checkpoint'),
+                               'checkpoint_step': ckpt_step,
+                               'consumed_at_step': global_step,
+                               # negative age: how far the trainer had moved past
+                               # the checkpoint that produced these negatives
+                               'stale_steps': global_step - ckpt_step,
+                               'consumed_steps': 0,
+                               'dev_ndcg_cut_10': meta.get('dev_ndcg_cut_10'),
+                               'shard_index': meta.get('shard_index'),
+                               'n_shards': meta.get('n_shards'),
+                               'n_shard_queries': meta.get('n_shard_queries'),
+                               'mining_seconds': {k: v for k, v in meta.items()
+                                                  if k.endswith('_s')}})
 
         try:
             batch = next(train_iter)
@@ -367,39 +531,39 @@ def main():
             with torch.autocast('cuda', dtype=torch.bfloat16, enabled=bf16):
                 loss = pairwise_nll(model(**q), model(**pos), model(**neg))
         else:
-            # DenseModel.forward(query, passage) calls self.encoder(**query, ...).
-            batch = {k: v.cuda() for k, v in batch.items()}
-            B, G, L = batch['p_input_ids'].shape
-
+            # TrainCollator hands back the flat (query, passage) pair Tevatron's own
+            # trainer passes to DenseModel.forward. No reshaping: forward recovers the
+            # group width from p_reps.size(0) // q_reps.size(0).
+            q_batch, p_batch = ({k: v.cuda() for k, v in b.items()} for b in batch)
             with torch.autocast('cuda', dtype=torch.bfloat16, enabled=bf16):
-                outputs = model(
-                    query={'input_ids':      batch['q_input_ids'],
-                           'attention_mask': batch['q_attention_mask']},
-                    passage={'input_ids':      batch['p_input_ids'].view(B * G, L),
-                             'attention_mask': batch['p_attention_mask'].view(B * G, L)},
-                )
-                loss = outputs.loss
+                loss = model(query=q_batch, passage=p_batch).loss
 
-        loss_value = check_finite_loss(loss.item(), global_step)
-        loss.backward()
-
-        # Clips, rejects a non-finite norm, then steps. The returned value is the
-        # PRE-clipping norm -- the diagnostic one.
-        grad_norm = apply_gradients(model, optimizer, scheduler,
-                                    max_grad_norm=ctx['args']['max_grad_norm'],
-                                    step=global_step)
+        # Checks, backwards, clips, rejects a non-finite norm, then steps. The
+        # returned norm is the PRE-clipping one -- the diagnostic value.
+        loss_value, grad_norm = optimization_step(
+            model, optimizer, scheduler, loss,
+            max_grad_norm=ctx['args']['max_grad_norm'], step=global_step)
         global_step += 1
         rounds[-1]['consumed_steps'] += 1
+        interval_loss_sum += loss_value
+        interval_loss_n += 1
 
         if global_step % logging_steps == 0:
+            # Both, because they answer different questions. Upstream logs only the
+            # interval mean (run_ann.py:296) -- the comparable series -- while the
+            # latest batch loss is what the finite-loss guard actually saw.
+            interval_mean = interval_loss_sum / max(interval_loss_n, 1)
+            interval_loss_sum, interval_loss_n = 0.0, 0
             append_jsonl(log_path, {
                 "global_step": global_step, "loss": loss_value,
+                "loss_interval_mean": interval_mean,
                 "learning_rate": scheduler.get_last_lr()[0],
                 "grad_norm": float(grad_norm), "ann_no": last_ann_no,
+                "stale_steps": global_step - rounds[-1]['checkpoint_step'],
             })
             print(f"[Trainer] step={global_step}/{args.max_steps} "
-                  f"loss={loss_value:.4f} ann_no={last_ann_no}", flush=True)
-            _write_summary(global_step)
+                  f"loss={loss_value:.4f} mean={interval_mean:.4f} "
+                  f"ann_no={last_ann_no}", flush=True)
 
         # Saving a checkpoint is what triggers the next ANN refresh, so save_steps
         # IS the paper's refresh interval m ("update the ANN index once every m
@@ -421,8 +585,11 @@ def main():
     # 10300 against a planned 10312 and rejects a run that completed.
     append_jsonl(log_path, {
         "global_step": global_step, "loss": loss_value,
+        "loss_interval_mean": (interval_loss_sum / interval_loss_n
+                               if interval_loss_n else loss_value),
         "learning_rate": scheduler.get_last_lr()[0],
-        "grad_norm": float(grad_norm), "ann_no": last_ann_no, "terminal": True,
+        "grad_norm": float(grad_norm), "ann_no": last_ann_no,
+        "stale_steps": global_step - rounds[-1]['checkpoint_step'], "terminal": True,
     })
     _probe("end", global_step)
     _write_summary(global_step)

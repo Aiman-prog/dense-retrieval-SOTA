@@ -60,10 +60,9 @@ def get_path(key: str, model_name: str = None) -> Path:
         "models": base / p_cfg['models_dir'],
         "results": base / p_cfg['results_dir'],
         "temp_ance": base / "temp_ance_workdir",
-        # ance_msmarco sets temp_workdir: "temp_ance_msmarco"; without this key
-        # get_path returned None and train_ance.py:161 raised TypeError on
-        # `None / "ann_data"` seconds into the job.
-        "temp_ance_msmarco": base / "temp_ance_msmarco_workdir",
+        # Every recipe's temp_workdir needs a key here. A missing one made get_path
+        # return None and train_ance.py raise TypeError on `None / "ann_data"`
+        # seconds into the job.
         "temp_ance_paper": base / "temp_ance_paper_workdir",
         "temp_grass": base / "temp_grass_workdir",
         # async Fast-GRASS handoff root: temp_fast_grass_workdir/async_mining/
@@ -159,7 +158,9 @@ def log_startup_config(recipe_name: str, ctx: Dict[str, Any], recipe: Dict[str, 
 
     batch_key, batch_value = first_present("batch_size", "per_device_batch_size",
                                            "target_batch_size")
-    epoch_key, epoch_value = first_present("num_epochs", "total_epochs")
+    # ance_paper is step-budgeted and declares no epoch count at all.
+    epoch_key, epoch_value = first_present("num_epochs", "total_epochs",
+                                           "train_stop_steps")
 
     rows = [
         ("recipe", recipe_name),
@@ -180,7 +181,23 @@ def log_startup_config(recipe_name: str, ctx: Dict[str, Any], recipe: Dict[str, 
 
 
 
-def encode_to_pickle(model_path, input_file, output_pkl, is_query, ctx, config):
+def _encode_child_env():
+    """Environment for an encode child, pinning MKL's threading layer to GNU.
+
+    Job 204931 lost 7h when its refresh child died at import: MKL bound INTEL against
+    libgomp and mkl-service exited 1 with no traceback. It reproduces only from a real
+    parent (the Inferencer holds the corpus lookup at 5.7 GB RSS when it spawns), so
+    two synthetic import matrices came back clean; job 220386 reproduced it in 2m23s and
+    220456 confirmed this fix. NOT MKL_SERVICE_FORCE_INTEL, which silences the guard
+    instead of resolving the conflict. setdefault, so a caller can still override.
+    """
+    env = dict(os.environ)
+    env.setdefault('MKL_THREADING_LAYER', 'GNU')
+    return env
+
+
+def encode_to_pickle(model_path, input_file, output_pkl, is_query, ctx, config,
+                     timeout=None):
     """Run Tevatron encode subprocess and save embeddings to a pickle file.
 
     The paper-fidelity ANCE arm branches here and nowhere else. Its encoder carries a
@@ -189,14 +206,29 @@ def encode_to_pickle(model_path, input_file, output_pkl, is_query, ctx, config):
     be a bare CLS. Because BOTH sides emit the same ``(embeddings, ids)`` pickle, this
     single branch serves every consumer: the ANCE miner, the MS MARCO evaluator and the
     BRIGHT evaluators all call this function and none of them needs a paper branch.
+
+    ``timeout`` (seconds, default None = wait forever) is the ANCE Inferencer's stall
+    detector, and the only one that works: a full-corpus encode blocks for hours, so a
+    heartbeat written alongside it keeps ticking through a deadlock and proves nothing.
+    A timeout raises, the Inferencer exits nonzero, and the existing supervision
+    terminates the trainer instead of letting it finish on stale negatives. Default
+    None keeps every non-ANCE caller -- GRASS, Fast-GRASS, both evaluators -- unchanged.
+
+    Every spawn goes through ``_encode_child_env`` -- see there for why.
     """
     if (ctx.get('args') or {}).get('paper_fidelity'):
-        sys.path.append(str(Path(__file__).resolve().parent.parent.parent / 'scripts'))
-        from ance_paper import encode_jsonl_to_pickle
-        encode_jsonl_to_pickle(
-            model_path, input_file, output_pkl, is_query=is_query,
-            max_len=ctx['max_q'] if is_query else ctx['max_p'],
-            batch_size=ctx['args']['per_device_eval_batch_size'])
+        script = Path(__file__).resolve().parent.parent.parent / 'scripts' / 'ance_paper.py'
+        cmd = [
+            sys.executable, str(script),
+            '--model_path', str(model_path),
+            '--input_file', str(input_file),
+            '--output_pkl', str(output_pkl),
+            '--max_len', str(ctx['max_q'] if is_query else ctx['max_p']),
+            '--batch_size', str(ctx['args']['per_device_eval_batch_size']),
+        ]
+        if is_query:
+            cmd.append('--is_query')
+        subprocess.run(cmd, check=True, timeout=timeout, env=_encode_child_env())
         return
 
     cmd = [
@@ -217,23 +249,43 @@ def encode_to_pickle(model_path, input_file, output_pkl, is_query, ctx, config):
     # the recipe's, and nothing downstream would notice.
     if is_query:
         q_len = str(ctx.get('max_q') or config['model'].get('query_max_len', 128))
-        try:
-            subprocess.run(cmd + ['--encode_is_query', '--query_max_len', q_len], check=True)
-        except subprocess.CalledProcessError:
-            subprocess.run(cmd + ['--encode_is_qry', '--q_max_len', q_len], check=True)
+        subprocess.run(cmd + ['--encode_is_query', '--query_max_len', q_len],
+                       check=True, timeout=timeout, env=_encode_child_env())
     else:
         p_len = str(ctx.get('max_p') or config['model'].get('passage_max_len', 512))
-        subprocess.run(cmd + ['--passage_max_len', p_len], check=True)
+        subprocess.run(cmd + ['--passage_max_len', p_len], check=True, timeout=timeout,
+                       env=_encode_child_env())
 
 
-def build_faiss_index(corpus_pkl_path):
-    """Load corpus pickle and build a FAISS IndexFlatIP. Returns (index, embeddings, ids)."""
+def build_faiss_index(corpus_pkl_path, *, backend='cpu', batch_size=8192, phase=None):
+    """Load corpus pickle and build a FAISS IndexFlatIP. Returns (index, embeddings, ids).
+
+    `asarray`, not `astype`: the encoders already write float32, and `astype` copies
+    unconditionally. At MS MARCO scale that copy is 27 GiB for nothing, on top of the
+    copy `index.add` makes into FAISS's own storage. ANCE callers that do not need the
+    array afterwards should `del` their reference once the index is built.
+    """
+    phase = phase or (lambda name: None)
+    phase('pickle_read')
     with open(corpus_pkl_path, 'rb') as f:
         c_data = pickle.load(f)
-    embeddings = c_data[0].astype(np.float32)
+    embeddings = np.asarray(c_data[0], dtype=np.float32)
     ids = [str(x) for x in c_data[1]]
-    index = faiss.IndexFlatIP(embeddings.shape[1])
-    index.add(embeddings)
+    phase('index_build')
+    if backend == 'cpu':
+        index = faiss.IndexFlatIP(embeddings.shape[1])
+    elif backend == 'gpu':
+        resources = faiss.StandardGpuResources()
+        options = faiss.GpuIndexFlatConfig()
+        options.device, options.useFloat16 = 0, False
+        index = faiss.GpuIndexFlatIP(resources, embeddings.shape[1], options)
+        index._gpu_resources = resources
+    else:
+        raise ValueError(f'Unknown exact FAISS backend: {backend}')
+    if batch_size < 1:
+        raise ValueError('FAISS batch_size must be positive')
+    for start in range(0, len(embeddings), batch_size):
+        index.add(embeddings[start:start + batch_size])
     return index, embeddings, ids
 
 
@@ -796,7 +848,17 @@ def evaluate_bright(ctx, config, model_path, temp_workdir_key=None):
         check_eval_artifacts(domain, qrels, excluded, queries_file=d_queries)
         prepared[domain] = (d_corpus, d_queries, qrels, excluded)
 
-    eval_summary = []
+    eval_top_k = config['evaluation']['top_k']
+    if eval_top_k < 1000:
+        raise ValueError(
+            "evaluation.top_k must be at least 1000 to report Recall@1000")
+    primary_metric = config['evaluation']['primary_metric']
+    metric_keys = ('recall_1000', 'ndcg_cut_10', 'recip_rank')
+    if primary_metric not in metric_keys:
+        raise ValueError(
+            f"unsupported evaluation.primary_metric {primary_metric!r}; "
+            f"expected one of {list(metric_keys)}")
+    eval_summary = {metric: [] for metric in metric_keys}
     for domain in domains:
         d_corpus, d_queries, qrels, excluded = prepared[domain]
         eval_dir = temp_dir / "final_eval" / run_tag / domain
@@ -810,7 +872,6 @@ def evaluate_bright(ctx, config, model_path, temp_workdir_key=None):
                              encoded_query_ids=q_ids)
         idx_e = faiss.IndexFlatIP(dc[0].shape[1])
         idx_e.add(dc[0].astype(np.float32))
-        eval_top_k = args.get('eval_top_k', 10)
         # Filter BRIGHT exclusions before the top-k cut, as evaluate.py does.
         depth = min(search_depth(eval_top_k, excluded), len(dc[1]))
         s_e, i_e = idx_e.search(dq[0].astype(np.float32), depth)
@@ -821,13 +882,17 @@ def evaluate_bright(ctx, config, model_path, temp_workdir_key=None):
         }
         results = apply_exclusions(results, excluded, eval_top_k)
         evaluator = TrecEvalWrapper(qrels)
-        metrics = evaluator.evaluate(results, {'recip_rank', 'ndcg_cut_10'})
-        eval_summary.append(metrics.get('ndcg_cut_10', 0))
-        print(f"[Eval] {domain}: NDCG@10={metrics.get('ndcg_cut_10', 0):.4f}", flush=True)
+        metrics = evaluator.evaluate(results, set(metric_keys))
+        for metric in metric_keys:
+            eval_summary[metric].append(metrics.get(metric, 0))
+        print(f"[Eval] {domain}: Recall@1000={metrics.get('recall_1000', 0):.4f}  "
+              f"NDCG@10={metrics.get('ndcg_cut_10', 0):.4f}  "
+              f"MRR={metrics.get('recip_rank', 0):.4f}", flush=True)
 
-    mean_ndcg = sum(eval_summary) / len(eval_summary)
-    print(f"\n📈 Final Mean NDCG@10: {mean_ndcg:.4f} over {len(eval_summary)} domains",
-          flush=True)
+    macro = {metric: sum(values) / len(values)
+             for metric, values in eval_summary.items()}
+    print(f"\n📈 Primary BRIGHT metric — {primary_metric}="
+          f"{macro[primary_metric]:.4f} over {len(domains)} domains", flush=True)
 
 
 # ── Run identity: manifest, fresh-start gate, success validation ─────────────
@@ -874,19 +939,39 @@ def _package_versions(names=_MANIFEST_PACKAGES) -> Dict[str, Any]:
 
 
 def _code_revision() -> Dict[str, Any]:
-    """Git HEAD and whether the tree is dirty, or nulls outside a checkout."""
+    """Host-supplied provenance works even when the container has no git binary."""
+    supplied = os.environ.get('SOURCE_GIT_SHA')
+    if supplied is not None:
+        dirty = os.environ.get('SOURCE_GIT_DIRTY')
+        status_sha = os.environ.get('SOURCE_GIT_STATUS_SHA')
+        # Older launchers supplied SHA/dirty but not the status digest. Keep those
+        # manifests readable while new reportable launchers always provide it.
+        if status_sha is None:
+            status_sha = '0' * 64
+        if (len(supplied) != 40 or any(c not in '0123456789abcdef' for c in supplied)
+                or dirty not in ('0', '1')
+                or status_sha is None or len(status_sha) != 64
+                or any(c not in '0123456789abcdef' for c in status_sha)):
+            raise ValueError('Invalid launcher source provenance')
+        return {'git_sha': supplied, 'git_dirty': dirty == '1',
+                'git_status_sha256': status_sha, 'source': 'launcher'}
     root = Path(__file__).resolve().parent.parent.parent
+    errors = []
     def git(*args):
         try:
             out = subprocess.run(["git", "-C", str(root), *args],
                                  capture_output=True, text=True, check=False)
+            if out.returncode:
+                errors.append(out.stderr.strip())
             return out.stdout.strip() if out.returncode == 0 else None
-        except Exception:                                          # noqa: BLE001
+        except Exception as exc:                                   # noqa: BLE001
+            errors.append(f'{type(exc).__name__}: {exc}')
             return None
     head = git("rev-parse", "HEAD")
     status = git("status", "--porcelain")
     return {"git_sha": head,
-            "git_dirty": None if status is None else bool(status.strip())}
+            "git_dirty": None if status is None else bool(status.strip()),
+            "source": "git", "lookup_errors": errors}
 
 
 def build_run_manifest(recipe_name, ctx, recipe, *, data_files, world_size,
@@ -983,6 +1068,7 @@ def prepare_output_dir(output_dir, manifest, *, resume=False, overwrite=False) -
             prior, unreadable = {}, True
     same = prior is not None and prior.get('fingerprint') == manifest['fingerprint']
     checkpoints = sorted(output_dir.glob("checkpoint-*"))
+    contents = list(output_dir.iterdir())
 
     # Only a run that FINISHED is worth protecting. `finished_at` is stamped by
     # assert_training_succeeded and by nothing else, so its absence means the run died
@@ -1043,40 +1129,37 @@ def prepare_output_dir(output_dir, manifest, *, resume=False, overwrite=False) -
             f"configuration. Pass --overwrite to discard them, or move them aside "
             f"first. (--resume needs a manifest and cannot be used here.)")
 
+    if prior is None and contents and not overwrite:
+        raise RunDirectoryError(
+            f"{output_dir} is not empty and has no {RUN_MANIFEST_NAME}, so its "
+            f"artifacts cannot be identified. Pass --overwrite to discard them, or "
+            f"move them aside first.")
+
     if prior is not None and not prior_completed and not same:
         print(f"[run] discarding an unfinished run's manifest "
               f"(differing: {_fingerprint_diff(prior, manifest)})", flush=True)
 
-    # ignore_errors=True used to hide this: on EREMEOTEIO (P11) the directory stayed,
-    # get_last_checkpoint() returned its step number, Tevatron resumed from it and the
-    # run still printed "fresh run". Removal is retried, and then VERIFIED by
-    # re-globbing -- the claim being made is that nothing is left to resume from.
-    for ckpt in checkpoints:
-        retry_io(lambda c=ckpt: shutil.rmtree(c), f"remove {ckpt.name}")
-    survivors = sorted(p.name for p in output_dir.glob("checkpoint-*"))
-    if survivors:
-        raise RunDirectoryError(
-            f"could not remove stale checkpoint(s) from {output_dir}: "
-            f"{', '.join(survivors)}. Tevatron would resume from the highest of "
-            f"these and shadow every new save, so this is not a fresh run. Remove "
-            f"them by hand and re-submit.")
-    if checkpoints:
-        print(f"[run] removed {len(checkpoints)} stale checkpoint(s) from "
-              f"{output_dir.name}", flush=True)
+    # A fresh run owns the whole model directory. Deleting only checkpoint-* and the
+    # append-only log left root model.safetensors/config/tokenizer files behind; if the
+    # replacement run died before its final save, those old weights sat beside the new
+    # manifest and could be evaluated as the new run. Remove the directory as one unit
+    # after the gates above, then verify the removal before recreating it.
+    if contents:
+        def _clear_output():
+            if output_dir.exists():
+                shutil.rmtree(output_dir)
 
-    # The log is append-only, so a fresh run into a used directory would inherit the
-    # previous attempt's records. assert_training_succeeded reads max(global_step)
-    # from it, so a run that died at step 50 would report the old run's 3000 and pass.
-    # Kept on --resume, where the earlier records belong to the same run.
-    stale_log = output_dir / TRAINING_LOG_NAME
-    if stale_log.exists():
-        retry_io(stale_log.unlink, f"remove stale {stale_log.name}")
-    if stale_log.exists():
-        raise RunDirectoryError(
-            f"could not remove stale {stale_log.name} from {output_dir}. Its old "
-            f"optimizer steps and ranking probes would be indistinguishable from "
-            f"this fresh invocation and could validate a zero-step run. Remove it "
-            f"by hand and re-submit.")
+        if not retry_io(_clear_output,
+                        f"clear fresh output directory {output_dir}"):
+            raise RunDirectoryError(
+                f"could not clear {output_dir}; a fresh run cannot safely share its "
+                f"directory with old model artifacts.")
+        if output_dir.exists():
+            raise RunDirectoryError(
+                f"{output_dir} still exists after fresh-run cleanup; refusing to mix "
+                f"old and new model artifacts.")
+        output_dir.mkdir(parents=True)
+        print(f"[run] cleared stale artifacts from {output_dir.name}", flush=True)
 
     _record_invocation(manifest, manifest_path, 0)
     print(f"[run] fresh run in {output_dir.name}; fingerprint "
@@ -1143,7 +1226,7 @@ def effective_model_config(config, recipe=None):
 
     Sequence lengths are global by default because every BGE arm shares one encoding
     contract. The paper-fidelity ANCE arm does not: RoBERTa on MS MARCO wants q64/p512
-    where BRIGHT wants q1024/p512, and inheriting the global caps would make the
+    where BRIGHT wants q1024/p1024, and inheriting the global caps would make the
     reproduction cost BGE-M3 money.
 
     The same applies to the objective's geometry. `normalize` and `temperature` are
@@ -1193,6 +1276,21 @@ def load_training_manifest(model_path):
         if not model_path.name.startswith("checkpoint-"):
             break
     return None
+
+
+def require_completed_training_manifest(manifest, model_path):
+    """Refuse a manifested checkpoint whose training invocation never validated.
+
+    Legacy checkpoints have no manifest and remain evaluable. Once a manifest exists,
+    however, ``finished_at`` is the durable success signal written only by
+    ``assert_training_succeeded``; accepting an unfinished one can evaluate stale or
+    partially-written root weights after a failed run.
+    """
+    if manifest is not None and not manifest.get('finished_at'):
+        raise RunDirectoryError(
+            f"{model_path} belongs to a training run without finished_at; the run did "
+            f"not validate successfully, so its weights are not reportable.")
+    return manifest
 
 
 def encoding_contract_drift(manifest, model_cfg):

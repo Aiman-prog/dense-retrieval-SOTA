@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
 #SBATCH --job-name=eval-bm25
-#SBATCH --partition=compute
-#SBATCH --time=02:00:00
+#SBATCH --partition=compute-p1      # `compute` is drained (sinfo: 0 nodes); p1 is the live CPU partition
+#SBATCH --time=04:00:00             # ~1h expected, but the index build has never run here
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem-per-cpu=3900M

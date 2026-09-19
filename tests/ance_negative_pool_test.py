@@ -28,7 +28,8 @@ sys.path.insert(0, str(project_root / 'src'))
 sys.path.insert(0, str(project_root / 'scripts'))
 
 from ance_mining import (                                          # noqa: E402
-    SamplingFailure, build_round_records, record_positives, select_ance_negatives,
+    RoundError, SamplingFailure, assert_corpus_ids_unique, build_round_records,
+    query_shard, record_positives, select_ance_negatives,
 )
 
 
@@ -189,6 +190,95 @@ def test_wrong_negative_count_is_a_failure():
             contains="0 negative(s)")
 
 
+# ---- query sharding ---------------------------------------------------------
+#
+# Upstream: drivers/run_ann_data_gen.py:281-295.
+#
+#     queries_per_chunk = num_queries // chunk_factor
+#     q_start_idx = queries_per_chunk * effective_idx
+#     q_end_idx   = num_queries if effective_idx == chunk_factor - 1
+#                              else q_start_idx + queries_per_chunk
+#
+# Expected values below are derived from THAT arithmetic, not from ours.
+
+def _all_shards(ids, k):
+    return [ids[start:end] for start, end in
+            (query_shard(ids, n, k)[1:] for n in range(k))]
+
+
+def test_the_shard_partition_matches_upstreams_arithmetic():
+    """One table over the whole partition property, at several chunk factors.
+
+    For every k the shards must be disjoint, ordered, and cover the query set exactly;
+    `//` floors, so the remainder goes to shard k-1 rather than being spread. A
+    "fairer" split would be a different partition and a different set of mined rounds.
+    Expected sizes are derived from upstream's arithmetic, not from ours.
+    """
+    cases = [
+        (1000, 1, [1000]),
+        (1000, 2, [500, 500]),
+        (1000, 5, [200] * 5),
+        (1002, 5, [200, 200, 200, 200, 202]),       # remainder -> last shard
+        (1000, 7, [142] * 6 + [148]),
+        (37, 1, [37]),                              # BRIGHT: one shard, whole set
+        (3, 5, [0, 0, 0, 0, 3]),                    # fewer queries than shards
+    ]
+    for n, k, sizes in cases:
+        ids = [f"q{i}" for i in range(n)]
+        shards = _all_shards(ids, k)
+        assert [len(x) for x in shards] == sizes, (n, k, [len(x) for x in shards])
+        flat = [q for shard in shards for q in shard]
+        assert flat == ids, (n, k)                  # ordered, nothing dropped
+        assert len(set(flat)) == n, (n, k)          # and nothing mined twice
+
+
+def test_shard_index_rotates_modulo_the_chunk_factor():
+    """ann_no 0 is the initial round, which is why it takes shard 0.
+
+    Upstream generates it with --end_output_num 0 from ann_no = -1, so output_num is
+    0 and the refresh rounds continue 1, 2, ...
+    """
+    ids = [f"q{i}" for i in range(100)]
+    assert [query_shard(ids, n, 5)[0] for n in range(12)] == \
+        [0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 0, 1]
+    # chunk_factor 1 never rotates: every round is the whole set.
+    assert {query_shard(ids, n, 1) for n in (0, 1, 9)} == {(0, 0, 100)}
+
+
+def test_sharding_skips_other_shards_but_still_fails_on_an_unmined_member():
+    """Sharding must not become a silent way to drop a query the miner could not serve."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _mixture(tmp, n=4)
+        corpus = {f"n{i}": f"neg {i}" for i in range(4)}
+        mined = {'q0': ['n0'], 'q1': ['n1']}
+        # q2/q3 belong to another shard: skipped, not an error.
+        out = dict(build_round_records([path], mined, corpus, n_negs=1,
+                                       shard_qids={'q0', 'q1'}))
+        assert [r['query_id'] for r in out[Path(path).name]] == ['q0', 'q1']
+        # q1 IS in the shard but was not mined: still a failure.
+        _assert_raises(
+            SamplingFailure,
+            lambda: list(build_round_records([path], {'q0': ['n0']}, corpus,
+                                             n_negs=1, shard_qids={'q0', 'q1'})),
+            contains="q1")
+
+
+# ---- corpus id uniqueness ---------------------------------------------------
+
+def test_repeated_corpus_ids_are_refused_before_mining():
+    """Selection treats an ANN result as distinct documents; FirstP makes that true.
+
+    A repeated id means the encoded pickle and the corpus disagree, which silently
+    changes what "top 200" and "20 retained negatives" mean. Checked once per round
+    instead of deduplicated per query -- per-query dedup would paper over it and only
+    a multi-vector (MaxP) index would actually need it.
+    """
+    assert assert_corpus_ids_unique(["d0", "d1", "d2"]) == 3
+    _assert_raises(RoundError,
+                   lambda: assert_corpus_ids_unique(["d0", "d1", "d0", "d2", "d1"]),
+                   contains="d0")
+
+
 TESTS = [
     ("select: returns the requested count", test_returns_requested_count),
     ("select: no duplicates in a multi-negative draw", test_multi_negative_draw_has_no_duplicates),
@@ -204,6 +294,10 @@ TESTS = [
     ("round: missing corpus text fails", test_missing_corpus_text_is_a_failure_not_an_empty_passage),
     ("round: uncovered query fails", test_uncovered_query_is_a_failure_not_a_stale_negative),
     ("round: wrong negative count fails", test_wrong_negative_count_is_a_failure),
+    ("shard: partition matches upstream arithmetic", test_the_shard_partition_matches_upstreams_arithmetic),
+    ("shard: rotates modulo chunk_factor", test_shard_index_rotates_modulo_the_chunk_factor),
+    ("shard: skips others, fails on an unmined member", test_sharding_skips_other_shards_but_still_fails_on_an_unmined_member),
+    ("corpus: repeated docids refused", test_repeated_corpus_ids_are_refused_before_mining),
 ]
 
 

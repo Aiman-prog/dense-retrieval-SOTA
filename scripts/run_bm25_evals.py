@@ -274,6 +274,12 @@ def main():
     b = bm25_cfg.get('b', 0.4)
     top_k = config['evaluation']['top_k']
     domains = config['evaluation']['eval_domains']
+    primary_metric = config['evaluation']['primary_metric']
+    metric_keys = {'recall_1000', 'ndcg_cut_10', 'recip_rank'}
+    if primary_metric not in metric_keys:
+        raise ValueError(
+            f"unsupported evaluation.primary_metric {primary_metric!r}; "
+            f"expected one of {sorted(metric_keys)}")
     # Distinct per parameterisation, so two BM25 sweeps cannot overwrite each other's
     # summary -- the same reason the dense path keys results by model_run_tag.
     run_tag = f"bm25_k1-{k1}_b-{b}"
@@ -390,12 +396,12 @@ def main():
     if summary:
         print("=" * 62)
         print("SUMMARY  BM25")
-        print(f"{'Domain':<28} {'MRR':>8} {'NDCG@10':>9} {'R@1000':>8}")
+        print(f"{'Domain':<28} {'R@1000':>8} {'NDCG@10':>9} {'MRR':>8}")
         print("-" * 62)
         for dom, m in summary.items():
             print(
-                f"{dom:<28} {m.get('recip_rank', 0):.4f}  "
-                f"{m.get('ndcg_cut_10', 0):.4f}  {m.get('recall_1000', 0):.4f}"
+                f"{dom:<28} {m.get('recall_1000', 0):.4f}  "
+                f"{m.get('ndcg_cut_10', 0):.4f}  {m.get('recip_rank', 0):.4f}"
             )
         print("=" * 62)
 
@@ -408,6 +414,14 @@ def main():
     # Same schema as run_all_evals.py's dense summary, and written only for a complete
     # run, so `--compare_bm25` can require the two domain sets to agree.
     macro = sum(r['ndcg_cut_10'] for r in per_domain) / len(per_domain)
+    macro_recall = sum(r['recall_1000'] for r in per_domain) / len(per_domain)
+    macro_mrr = sum(r['recip_rank'] for r in per_domain) / len(per_domain)
+    primary_score = {
+        'ndcg_cut_10': macro,
+        'recall_1000': macro_recall,
+        'recip_rank': macro_mrr,
+    }[primary_metric]
+    print(f"PRIMARY ({primary_metric}): {primary_score:.4f}")
     summary_path = results_dir / run_tag / "summary.json"
     with atomic_write(summary_path) as f:
         json.dump({
@@ -418,6 +432,10 @@ def main():
             'bm25': {'k1': k1, 'b': b},
             'per_domain': per_domain,
             'macro_ndcg_cut_10': macro,
+            'macro_recall_1000': macro_recall,
+            'macro_recip_rank': macro_mrr,
+            'primary_metric': primary_metric,
+            'primary_score': primary_score,
             # What --compare_bm25 checks alongside the domain set: same domains over
             # regenerated corpora is still not a comparable pair of macro scores.
             'eval_artifact_sha256': eval_artifact_hashes(get_path("processed"), domains),

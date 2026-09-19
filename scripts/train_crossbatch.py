@@ -16,6 +16,7 @@ Runs start FRESH by default; see train_inbatch.py for why that needs saying.
 import sys
 import os
 import argparse
+import torch as _torch
 from pathlib import Path
 
 # Setup pathing
@@ -50,6 +51,24 @@ def _tevatron_gc_enable(self, **kwargs):
     self.encoder.gradient_checkpointing_enable(
         gradient_checkpointing_kwargs=gc_kwargs, **kwargs)
 DenseModel.gradient_checkpointing_enable = _tevatron_gc_enable
+
+# 🩹 --resume only. transformers 4.40.2 calls torch.load(rng_file) with no
+# weights_only= (trainer.py:2699 _load_rng_state); torch 2.10 defaults it to True, so
+# job 237230 died 3m in unpickling checkpoint-600/rng_state_*.pth. This allowlists what
+# that file needs beyond torch's own set -- NOT a blanket weights_only=False, which would
+# drop the check for the model and optimizer shards too.
+import numpy as _np
+import codecs as _codecs
+import collections as _collections
+if hasattr(_torch.serialization, "add_safe_globals"):
+    _allow = [_codecs.encode, _collections.OrderedDict,
+              _np.dtype, _np.ndarray, _np.core.multiarray._reconstruct]
+    # numpy's MT19937 state is a uint32 array, and its dtype CLASS is rebuilt through
+    # numpy.dtype('u4')'s reduce -- no GLOBAL opcode names it, so reading the pickle
+    # does not reveal it. Job 244653 is how it surfaced. Add every scalar dtype class
+    # rather than just UInt32DType, so a different generator does not repeat this.
+    _allow += [getattr(_np.dtypes, n) for n in dir(_np.dtypes) if n.endswith("DType")]
+    _torch.serialization.add_safe_globals(_allow)
 
 CONSUMED_KEYS = (
     'model_name', 'target_batch_size', 'per_device_batch_size',
