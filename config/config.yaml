@@ -616,10 +616,15 @@ evaluation:
     - "NDCG@10"
     - "Recall@1000"
   top_k: 1000
-  batch_size: 64            # 128 -> 64 with passage_max_len 1024. Encode-only
-                            # throughput: it is not part of the encoding contract and
-                            # moves no metric, but 128 x 1024 tokens on the 413k-doc
-                            # leetcode corpus is where evaluation would OOM.
+  passage_max_len: 8192     # EVAL ONLY: each document is encoded whole, up to BGE-M3's
+                            # 8,192-token limit, as BRIGHT's own retrievers do (each model
+                            # reads up to its own limit, no chunking). Training stays at
+                            # model.passage_max_len 512: there the contrastive batch must
+                            # sit on the GPU together and backward re-runs every layer
+                            # (~550 GB at 8192). Inference has neither.
+  batch_size: 8             # Eager attention at 8,192 tokens is ~4.3 GB per document per
+                            # layer, so 8 ~= 35 GB on an 80 GB A100. Tevatron pads a batch
+                            # to its longest document. Encode-only: moves no metric.
   trec_eval_path: "trec_eval"
   bf16: True
   dataloader_num_workers: 4

@@ -31,7 +31,6 @@ from utils.helpers import (load_config, get_data_base_dir, load_excluded_ids,
                            _load_qrels, require_eval_files, check_eval_artifacts,
                            atomic_write, eval_artifact_hashes, _code_revision)
 from evaluation.trec_eval_wrapper import TrecEvalWrapper
-from data.preprocessor import CHUNK_SEP, make_chunker
 
 def main():
     config = load_config()
@@ -116,16 +115,9 @@ def main():
 
     # --- STEP 1: ENCODE ---
     print(f"🚀 Step 1: Encoding with Tevatron Driver...", flush=True)
-    # Every document is split with the training splitter into `<docid>__c<j>` pieces;
-    # a document later scores as its best piece.
-    pieces_file, chunk = eval_dir / 'corpus_pieces.jsonl', make_chunker(config)
-    with open(corpus_file) as src, open(pieces_file, 'w') as dst:
-        for doc in map(json.loads, src):
-            for j, piece in enumerate(chunk(doc['text'])):
-                dst.write(json.dumps({'docid': f"{doc['docid']}{CHUNK_SEP}{j}",
-                                      'text': piece}, ensure_ascii=False) + '\n')
 
-    for input_f, output_p, is_q in [(pieces_file, corpus_pkl, False), (queries_file, query_pkl, True)]:
+
+    for input_f, output_p, is_q in [(corpus_file, corpus_pkl, False), (queries_file, query_pkl, True)]:
         output_p.parent.mkdir(parents=True, exist_ok=True)
         cmd = [
             sys.executable, '-m', 'tevatron.retriever.driver.encode',
@@ -150,7 +142,7 @@ def main():
             q_len = str(config['model'].get('query_max_len', 128))
             subprocess.run(cmd + ['--encode_is_query', '--query_max_len', q_len], check=True)
         else:
-            p_len = str(config['model'].get('passage_max_len', 512))
+            p_len = str(config['evaluation']['passage_max_len'])
             subprocess.run(cmd + ['--passage_max_len', p_len], check=True)
 
     # --- STEP 2: LOAD ---
@@ -167,8 +159,11 @@ def main():
 
     # --- STEP 3: FAISS SEARCH (Standard CPU) ---
     
-    # BRIGHT removes each query's excluded documents before truncating to k, so
-    # every piece is scored and exclusions are applied to the document ranking.
+    # TODO(evaluation review): verify this exclusion path against the official
+    # BRIGHT protocol before approving or reporting evaluation results.
+    # BRIGHT removes each query's excluded documents before scoring, so retrieve
+    # deeper than k and filter afterwards -- otherwise excluded hits consume result
+    # slots and nothing refills them (aops excludes up to 11,224 docs for one query).
     excluded = load_excluded_ids(args.domain, processed_dir)
     qrels = _load_qrels(qrels_file)
     # Query ids == exclusion keys, qrels covered by the query set, and the encoder
@@ -176,23 +171,30 @@ def main():
     # without moving anything visible.
     check_eval_artifacts(args.domain, qrels, excluded, queries_file=queries_file,
                          encoded_query_ids=query_ids)
-    print(f"🔍 Step 3: Running FAISS IndexFlatIP (CPU) over all {len(corpus_ids):,} pieces "
-          f"for top-{args.k}...", flush=True)
+    depth = min(search_depth(args.k, excluded), len(corpus_ids))
+    print(f"🔍 Step 3: Running FAISS IndexFlatIP (CPU), depth={depth} for top-{args.k}...",
+          flush=True)
     index = faiss.IndexFlatIP(corpus_embs.shape[1])
     index.add(corpus_embs)
-    scores_mat, indices_mat = index.search(query_embs, len(corpus_ids))
+    scores_mat, indices_mat = index.search(query_embs, depth)
 
-    # --- STEP 4: EVALUATION ---
-    print("📊 Step 4: Running Evaluation Wrapper...", flush=True)
+    # --- STEP 4: VIGILANTE CHECK ---
+    # Guarded: an empty query set or zero depth used to raise IndexError here.
+    if query_ids and depth:
+        print("\n" + "="*60 + "\n🕵️  VIGILANTE CHECK: QUERY 0\n" + "="*60, flush=True)
+        q0_id = str(query_ids[0])
+        top_doc_id = str(corpus_ids[indices_mat[0][0]])
+        truth_docs = qrels.get(q0_id, set())
+        print(f"Query ID: {q0_id} | Top Result: {top_doc_id} | Match: {top_doc_id in truth_docs}", flush=True)
+        print("="*60 + "\n", flush=True)
+
+    # --- STEP 5: EVALUATION ---
+    print("📊 Step 5: Running Evaluation Wrapper...", flush=True)
     run_results = {}
-    for qid, row, scores in zip(query_ids, indices_mat, scores_mat):
-        # Hits come best-first, so a document's first piece is its best; stop once
-        # enough documents remain for top-k after this query's exclusions.
-        hits = run_results[qid] = {}
-        for j, score in zip(row, scores):
-            hits.setdefault(corpus_ids[j].rsplit(CHUNK_SEP, 1)[0], float(score))
-            if len(hits) == search_depth(args.k, excluded, qid):
-                break
+    for i in range(len(query_ids)):
+        qid_str = str(query_ids[i])
+        run_results[qid_str] = {str(corpus_ids[indices_mat[i][j]]): float(scores_mat[i][j])
+                               for j in range(depth) if indices_mat[i][j] >= 0}
     run_results = apply_exclusions(run_results, excluded, args.k)
 
     evaluator = TrecEvalWrapper(qrels)
