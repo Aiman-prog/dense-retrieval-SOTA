@@ -10,6 +10,7 @@ import os
 import sys
 import json
 import math
+import time
 import bisect
 import argparse
 import torch
@@ -471,6 +472,9 @@ def main():
     model.train()
     print(f"[Trainer] Starting: max_steps={args.max_steps}, "
           f"logging_steps={logging_steps}, save_steps={save_steps}", flush=True)
+    # Training-stage clock: starts after round `initial` is committed, so it never
+    # includes the initial mining, whose phases are timed in its round meta.
+    train_t0 = time.monotonic()
 
     # ── MAIN TRAINING LOOP ───────────────────────────────────────────────────
     while global_step < args.max_steps:
@@ -554,16 +558,19 @@ def main():
             # latest batch loss is what the finite-loss guard actually saw.
             interval_mean = interval_loss_sum / max(interval_loss_n, 1)
             interval_loss_sum, interval_loss_n = 0.0, 0
+            train_seconds = round(time.monotonic() - train_t0, 1)
             append_jsonl(log_path, {
                 "global_step": global_step, "loss": loss_value,
                 "loss_interval_mean": interval_mean,
                 "learning_rate": scheduler.get_last_lr()[0],
                 "grad_norm": float(grad_norm), "ann_no": last_ann_no,
                 "stale_steps": global_step - rounds[-1]['checkpoint_step'],
+                "train_seconds": train_seconds,
             })
             print(f"[Trainer] step={global_step}/{args.max_steps} "
                   f"loss={loss_value:.4f} mean={interval_mean:.4f} "
-                  f"ann_no={last_ann_no}", flush=True)
+                  f"ann_no={last_ann_no} "
+                  f"train_s={train_seconds:.0f}", flush=True)
 
         # Saving a checkpoint is what triggers the next ANN refresh, so save_steps
         # IS the paper's refresh interval m ("update the ANN index once every m
@@ -590,6 +597,7 @@ def main():
         "learning_rate": scheduler.get_last_lr()[0],
         "grad_norm": float(grad_norm), "ann_no": last_ann_no,
         "stale_steps": global_step - rounds[-1]['checkpoint_step'], "terminal": True,
+        "train_seconds": round(time.monotonic() - train_t0, 1),
     })
     _probe("end", global_step)
     _write_summary(global_step)
