@@ -94,3 +94,5 @@ docs/crossbatch.md
 docs/evaluation.md
 docs/preprocessor.md
 docs/ance_implementation_details.md
+docs/async_fast_grass_architecture.md
+docs/async_fast_grass_implementation_details.md
