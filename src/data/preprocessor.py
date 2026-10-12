@@ -113,6 +113,16 @@ def _chunk_text(text, tokenizer, size) -> list:
     return [text[a:b] for a, b in zip(bounds, bounds[1:])]
 
 
+def make_chunker(config):
+    """The one splitter training and evaluation share: `text -> [chunks]`."""
+    from transformers import AutoTokenizer
+    # -2 for <s></s>, -2 more because a slice can re-tokenize a token longer at
+    # its edges (BGE-M3: 0 of 683 chunks over 512 at -3, 81 at -2).
+    tokenizer = AutoTokenizer.from_pretrained(config['model']['base_model'])
+    size = config['model']['passage_max_len'] - 4
+    return lambda text: _chunk_text(text, tokenizer, size)
+
+
 def _trec_safe_docid(value) -> str:
     """Escape a document ID only when whitespace would break TREC columns."""
     docid = _text(value)
@@ -606,9 +616,9 @@ def _load_mixture(files) -> list:
     return records
 
 
-def _chunk_positive_mixture(src_dir, dst_dir, tokenizer, size) -> None:
-    """Split every long positive into `size`-token chunks, one row per chunk carrying the
-    record's query and negatives unchanged. Nothing is dropped; the rows only grow."""
+def _chunk_positive_mixture(src_dir, dst_dir, chunk) -> None:
+    """Split every long positive with `chunk` (`make_chunker`), one row per chunk carrying
+    the record's query and negatives unchanged. Nothing is dropped; the rows only grow."""
     def digest(passage):
         return hashlib.md5(_text(passage['text']).strip().encode()).hexdigest()
 
@@ -617,13 +627,13 @@ def _chunk_positive_mixture(src_dir, dst_dir, tokenizer, size) -> None:
         records, rows = _load_mixture([Path(src_dir) / name]), []
         for qid, record in records:
             (pos,) = record['positive_passages']
-            chunks = _chunk_text(_text(pos['text']), tokenizer, size)
+            chunks = chunk(_text(pos['text']))
             if len(chunks) == 1:
                 owners.setdefault(digest(pos), pos)
                 rows.append(record)
                 continue
-            for j, chunk in enumerate(chunks):
-                own = {**pos, 'text': chunk, 'docid': f"{pos['docid']}{CHUNK_SEP}{j}"}
+            for j, piece in enumerate(chunks):
+                own = {**pos, 'text': piece, 'docid': f"{pos['docid']}{CHUNK_SEP}{j}"}
                 # A chunk repeating an earlier positive's text takes that passage, and
                 # every docid is written TREC-safe, so _derive never remaps it: async
                 # GRASS resolves positives by docid and would fall back to a sibling.
@@ -780,12 +790,7 @@ def _generate_training_mixture(preprocessor, loader, config, chunk_from=None):
     staged = BRIGHTPreprocessor(output_dir=staging)
     try:
         if chunk_from is not None:
-            from transformers import AutoTokenizer
-            # -2 for <s></s>, -2 more because a slice can re-tokenize a token longer at
-            # its edges (BGE-M3: 0 of 683 chunks over 512 at -3, 81 at -2).
-            tokenizer = AutoTokenizer.from_pretrained(config['model']['base_model'])
-            _chunk_positive_mixture(chunk_from, staging, tokenizer,
-                                    config['model']['passage_max_len'] - 4)
+            _chunk_positive_mixture(chunk_from, staging, make_chunker(config))
         else:
             print("\n[1/3] MS MARCO Data")
             msmarco_cfg = config['data'].get('msmarco', {})

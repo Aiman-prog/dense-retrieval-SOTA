@@ -1019,7 +1019,7 @@ def test_chunk_mixture_splits_long_positives():
     root = _tmp()
     src = _chunk_fixture(root)
     (root / "dst").mkdir()
-    _chunk_positive_mixture(src, root / "dst", _WordTokenizer(), 3)
+    _chunk_positive_mixture(src, root / "dst", lambda t: _chunk_text(t, _WordTokenizer(), 3))
     original = {r['query_id']: r for n in MIXTURE_FILES for r in _read_jsonl(src / n)}
     rows = {r['query_id']: r for n in MIXTURE_FILES for r in _read_jsonl(root / "dst" / n)}
     chunk_rows = [rows.pop(f"hq_long{CHUNK_SEP}{j}") for j in range(4)]
@@ -1041,7 +1041,8 @@ def test_run_setup_on_chunked_mixture():
     source_corpus, _, _ = run_setup(mixture_dir=src, output_dir=root / "base")
     dst = root / "processed"
     (dst / "training_mixture").mkdir(parents=True)
-    _chunk_positive_mixture(src, dst / "training_mixture", _WordTokenizer(), 3)
+    _chunk_positive_mixture(src, dst / "training_mixture",
+                            lambda t: _chunk_text(t, _WordTokenizer(), 3))
     corpus_path, _, qrels_path = run_setup(mixture_dir=dst / "training_mixture",
                                            output_dir=dst)
     corpus = {r['docid']: r['text'] for r in _read_jsonl(corpus_path)}
