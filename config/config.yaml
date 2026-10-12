@@ -622,9 +622,12 @@ evaluation:
                             # model.passage_max_len 512: there the contrastive batch must
                             # sit on the GPU together and backward re-runs every layer
                             # (~550 GB at 8192). Inference has neither.
-  batch_size: 8             # Eager attention at 8,192 tokens is ~4.3 GB per document per
-                            # layer, so 8 ~= 35 GB on an 80 GB A100. Tevatron pads a batch
-                            # to its longest document. Encode-only: moves no metric.
+  batch_size: 6             # Encoding runs bf16 weights under fp16 autocast, where softmax
+                            # outputs fp32: a full 8,192-token document peaks at ~8.6 GB
+                            # per layer (scores 2.1 + fp32 probs 4.3 + fp16 copy 2.1), so
+                            # 6 ~= 53 GB on an 80 GB A100 (8 ~= 70 GB left too little
+                            # headroom). Tevatron pads a batch to its longest document.
+                            # Encode-only: moves no metric.
   trec_eval_path: "trec_eval"
   bf16: True
   dataloader_num_workers: 4
