@@ -54,10 +54,6 @@ MSMARCO_ONLY_FILES = ("train_msmarco.jsonl",)
 
 REBUILD_HINT = "regenerate with `python src/data/preprocessor.py`"
 
-# A positive split into chunks becomes one row per chunk: `<qid>__c<j>` with positive
-# `<docid>__c<j>`. _derive groups rows by the part before it to write sibling qrels.
-CHUNK_SEP = "__c"
-
 
 class PreprocessingError(RuntimeError):
     """The inputs cannot be preprocessed as given."""
@@ -102,25 +98,6 @@ def _is_valid(query, positives, negatives) -> bool:
     if any(not t.strip() for t in positives + negatives):
         return False
     return not ({t.strip() for t in positives} & {t.strip() for t in negatives})
-
-
-def _chunk_text(text, tokenizer, size) -> list:
-    """Split `text` every `size` tokens, slicing the original string so the chunks
-    concatenate back to it exactly. A text that fits comes back as `[text]`."""
-    offsets = tokenizer(text, add_special_tokens=False,
-                        return_offsets_mapping=True)['offset_mapping']
-    bounds = [0, *(offsets[i - 1][1] for i in range(size, len(offsets), size)), len(text)]
-    return [text[a:b] for a, b in zip(bounds, bounds[1:])]
-
-
-def make_chunker(config):
-    """The one splitter training and evaluation share: `text -> [chunks]`."""
-    from transformers import AutoTokenizer
-    # -2 for <s></s>, -2 more because a slice can re-tokenize a token longer at
-    # its edges (BGE-M3: 0 of 683 chunks over 512 at -3, 81 at -2).
-    tokenizer = AutoTokenizer.from_pretrained(config['model']['base_model'])
-    size = config['model']['passage_max_len'] - 4
-    return lambda text: _chunk_text(text, tokenizer, size)
 
 
 def _trec_safe_docid(value) -> str:
@@ -616,38 +593,6 @@ def _load_mixture(files) -> list:
     return records
 
 
-def _chunk_positive_mixture(src_dir, dst_dir, chunk) -> None:
-    """Split every long positive with `chunk` (`make_chunker`), one row per chunk carrying
-    the record's query and negatives unchanged. Nothing is dropped; the rows only grow."""
-    def digest(passage):
-        return hashlib.md5(_text(passage['text']).strip().encode()).hexdigest()
-
-    owners = {}  # positive text digest -> the passage _derive will keep as canonical
-    for name in MIXTURE_FILES:
-        records, rows = _load_mixture([Path(src_dir) / name]), []
-        for qid, record in records:
-            (pos,) = record['positive_passages']
-            chunks = chunk(_text(pos['text']))
-            if len(chunks) == 1:
-                owners.setdefault(digest(pos), pos)
-                rows.append(record)
-                continue
-            for j, piece in enumerate(chunks):
-                own = {**pos, 'text': piece, 'docid': f"{pos['docid']}{CHUNK_SEP}{j}"}
-                # A chunk repeating an earlier positive's text takes that passage, and
-                # every docid is written TREC-safe, so _derive never remaps it: async
-                # GRASS resolves positives by docid and would fall back to a sibling.
-                owner = owners.setdefault(digest(own), own)
-                rows.append({**record, 'query_id': f"{qid}{CHUNK_SEP}{j}",
-                             'positive_passages': [
-                                 {**owner, 'docid': _trec_safe_docid(owner['docid'])}]})
-        with atomic_write(Path(dst_dir) / name) as f:
-            for row in rows:
-                f.write(json.dumps(row, ensure_ascii=False) + '\n')
-        print(f"  {name}: {len(records):,} rows in, {len(rows):,} out "
-              f"(+{len(rows) - len(records):,} chunk rows)", flush=True)
-
-
 # ---- run_setup --------------------------------------------------------------
 
 def run_setup(mixture_dir=None,
@@ -747,18 +692,12 @@ def _derive(records, preprocessor, corpus_file, queries_file, qrels_file) -> Non
     print(f"  Queries: {len(queries_df):,} unique training queries", flush=True)
 
     # --- Qrels ---
-    # Every chunk row of a split positive lists all its sibling chunks, so mining cannot
-    # pick a sibling as a hard negative. An unsplit row is a group of one.
-    group_positives = {}
+    pos_pairs = []
+    seen_pairs = set()
     for qid, record in records:
         for passage in record['positive_passages']:
             docid = str(passage['docid'])
-            group_positives.setdefault(qid.split(CHUNK_SEP)[0], []).append(
-                docid_remap.get(docid, docid))
-    pos_pairs = []
-    seen_pairs = set()
-    for qid, _ in records:
-        for docid in group_positives[qid.split(CHUNK_SEP)[0]]:
+            docid = docid_remap.get(docid, docid)
             if (qid, docid) in seen_pairs:
                 continue
             seen_pairs.add((qid, docid))
@@ -769,12 +708,10 @@ def _derive(records, preprocessor, corpus_file, queries_file, qrels_file) -> Non
 
 # ---- CLI --------------------------------------------------------------------
 
-def _generate_training_mixture(preprocessor, loader, config, chunk_from=None):
+def _generate_training_mixture(preprocessor, loader, config):
     """Build every component in staging, then publish the mixture as one unit.
 
-    A source that fails part way must not leave a mixture that looks complete. With
-    `chunk_from`, the components are that existing mixture with its long positives
-    chunked (`_chunk_positive_mixture`) instead of a fresh Hugging Face build.
+    A source that fails part way must not leave a mixture that looks complete.
     """
     if any((preprocessor.output_dir / n).exists() for n in (CORPUS_FILE, QUERIES_FILE, QRELS_FILE)):
         raise PreprocessingError("refusing to replace the mixture while derived artifacts exist")
@@ -789,25 +726,22 @@ def _generate_training_mixture(preprocessor, loader, config, chunk_from=None):
     staging = Path(tempfile.mkdtemp(dir=mixture_dir, prefix=".staging_"))
     staged = BRIGHTPreprocessor(output_dir=staging)
     try:
-        if chunk_from is not None:
-            _chunk_positive_mixture(chunk_from, staging, make_chunker(config))
-        else:
-            print("\n[1/3] MS MARCO Data")
-            msmarco_cfg = config['data'].get('msmarco', {})
-            staged.prepare_msmarco_train_data(
-                dataset_name=msmarco_cfg['name'], subset=msmarco_cfg['subset'],
-                filename="train_msmarco.jsonl", limit=mixed['msmarco_samples'])
+        print("\n[1/3] MS MARCO Data")
+        msmarco_cfg = config['data'].get('msmarco', {})
+        staged.prepare_msmarco_train_data(
+            dataset_name=msmarco_cfg['name'], subset=msmarco_cfg['subset'],
+            filename="train_msmarco.jsonl", limit=mixed['msmarco_samples'])
 
-            print("\n[2/3] VL Data")
-            staged.prepare_vl_train_data(
-                dataset_name=config['data']['reasonir']['name'],
-                filename="train_vl.jsonl", limit=mixed['vl_samples'])
+        print("\n[2/3] VL Data")
+        staged.prepare_vl_train_data(
+            dataset_name=config['data']['reasonir']['name'],
+            filename="train_vl.jsonl", limit=mixed['vl_samples'])
 
-            print("\n[3/3] HQ Data")
-            staged.prepare_hq_train_data(
-                id2doc=loader.get_all_documents_id_map(),
-                dataset_name=config['data']['reasonir']['name'],
-                filename="train_hq.jsonl", limit=mixed['hq_samples'])
+        print("\n[3/3] HQ Data")
+        staged.prepare_hq_train_data(
+            id2doc=loader.get_all_documents_id_map(),
+            dataset_name=config['data']['reasonir']['name'],
+            filename="train_hq.jsonl", limit=mixed['hq_samples'])
 
         _publish(staging, mixture_dir, MIXTURE_FILES)
     finally:
@@ -837,20 +771,13 @@ def main(argv=None) -> int:
                         help="rebuild only the corpus/queries/qrels from the existing "
                              "training_mixture/, skipping the hours of downloading and "
                              "regenerating the mixture and eval files")
-    parser.add_argument('--chunk-positives', metavar='DST_ROOT',
-                        help="write the existing training_mixture/ with every long positive "
-                             "split into chunk rows, plus its derived files, into DST_ROOT; "
-                             "the source is not modified")
     args = parser.parse_args(argv)
 
     config = load_config()
-    preprocessor = BRIGHTPreprocessor(output_dir=args.chunk_positives)
+    preprocessor = BRIGHTPreprocessor()
 
     loader = None
-    if args.chunk_positives:
-        _generate_training_mixture(preprocessor, None, config,
-                                   chunk_from=get_path("processed") / "training_mixture")
-    elif not args.derive_only:
+    if not args.derive_only:
         from data.bright_loader import BRIGHTLoader
         loader = BRIGHTLoader()
         loader.load_dataset()
@@ -861,7 +788,7 @@ def main(argv=None) -> int:
     print("\n" + "=" * 80)
     print("🧾 Deriving corpus / queries / qrels from the mixture")
     print("=" * 80)
-    run_setup(output_dir=preprocessor.output_dir)
+    run_setup()
 
     if loader is not None:
         _generate_eval_data(preprocessor, loader, config)

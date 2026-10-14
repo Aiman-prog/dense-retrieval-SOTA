@@ -13,7 +13,6 @@ Run: python tests/preprocessor_test.py      (KMP_DUPLICATE_LIB_OK=TRUE on macOS)
 """
 import json
 import os
-import re
 import sys
 import tempfile
 import traceback
@@ -26,14 +25,11 @@ sys.path.insert(0, str(project_root / 'src'))
 
 from data.preprocessor import (  # noqa: E402
     BRIGHTPreprocessor,
-    CHUNK_SEP,
     MIXTURE_FILES,
     MSMARCO_ONLY_FILES,
     PreprocessingError,
     require_derived_artifacts,
     require_mixture_files,
-    _chunk_positive_mixture,
-    _chunk_text,
     run_setup,
 )
 from utils.helpers import atomic_write, _load_qrels  # noqa: E402
@@ -981,84 +977,6 @@ def test_reproduction_records_load_in_pinned_tevatron():
 
 # ---- runner -----------------------------------------------------------------
 
-# ---- positive chunking ------------------------------------------------------
-
-class _WordTokenizer:
-    """Whitespace tokens with real character offsets, standing in for BGE-M3's fast
-    tokenizer so the chunking tests need no model download."""
-
-    def __call__(self, text, add_special_tokens=False, return_offsets_mapping=False):
-        return {'offset_mapping': [m.span() for m in re.finditer(r'\S+', text)]}
-
-
-def _words(n, tag="w"):
-    # Ragged whitespace on purpose: chunks must rejoin to the exact original string.
-    return "".join(f"{tag}{i}" + (" " if i % 3 else "\n  ") for i in range(n)).rstrip()
-
-
-_LONG = _words(10)  # 4 chunks of <= 3 words
-
-
-def _chunk_fixture(root):
-    """A long HQ positive under a whitespace docid, an earlier row whose positive equals
-    one of its chunks, and short rows that stay unsplit."""
-    dup = _chunk_text(_LONG, _WordTokenizer(), 3)[2]
-    return _write_mixture(Path(root) / "src_mixture", {
-        "train_hq.jsonl": [
-            _mix_record("hq_dup", "dup query", [("dup_doc", dup)], [("hn_dup", "neg dup")]),
-            _mix_record("hq_long", "long query", [("doc/long file.txt", _LONG)],
-                        [("hn_long", "the long negative")])],
-        "train_vl.jsonl": [_mix_record(f"vl_{i}", f"vl {i}", [(f"vp{i}", _words(3, f"v{i}_"))],
-                                       [(f"vn{i}", f"vl neg {i}")]) for i in range(2)],
-        "train_msmarco.jsonl": [_mix_record("ms_0", "ms", [("mp0", "ms pos")],
-                                            [("mn0", "ms neg")])],
-    })
-
-
-def test_chunk_mixture_splits_long_positives():
-    root = _tmp()
-    src = _chunk_fixture(root)
-    (root / "dst").mkdir()
-    _chunk_positive_mixture(src, root / "dst", lambda t: _chunk_text(t, _WordTokenizer(), 3))
-    original = {r['query_id']: r for n in MIXTURE_FILES for r in _read_jsonl(src / n)}
-    rows = {r['query_id']: r for n in MIXTURE_FILES for r in _read_jsonl(root / "dst" / n)}
-    chunk_rows = [rows.pop(f"hq_long{CHUNK_SEP}{j}") for j in range(4)]
-    long = original.pop("hq_long")
-    assert rows == original, "unsplit rows must come out unchanged"
-    texts = [r['positive_passages'][0]['text'] for r in chunk_rows]
-    assert "".join(texts) == _LONG, texts
-    assert all(len(_WordTokenizer()(t)['offset_mapping']) <= 3 for t in texts), texts
-    assert all(r['query'] == long['query'] and
-               r['negative_passages'] == long['negative_passages'] for r in chunk_rows)
-
-
-def test_run_setup_on_chunked_mixture():
-    """Every row's positive resolves by docid to its own text, chunk rows list all their
-    siblings as qrels, and no source passage is dropped from the corpus."""
-    root = _tmp()
-    src = _chunk_fixture(root)
-    (root / "base").mkdir()
-    source_corpus, _, _ = run_setup(mixture_dir=src, output_dir=root / "base")
-    dst = root / "processed"
-    (dst / "training_mixture").mkdir(parents=True)
-    _chunk_positive_mixture(src, dst / "training_mixture",
-                            lambda t: _chunk_text(t, _WordTokenizer(), 3))
-    corpus_path, _, qrels_path = run_setup(mixture_dir=dst / "training_mixture",
-                                           output_dir=dst)
-    corpus = {r['docid']: r['text'] for r in _read_jsonl(corpus_path)}
-    rows = [r for n in MIXTURE_FILES for r in _read_jsonl(dst / "training_mixture" / n)]
-    for r in rows:
-        pos = r['positive_passages'][0]
-        assert corpus.get(pos['docid']) == pos['text'], (r['query_id'], pos['docid'])
-    qrels = _load_qrels(qrels_path)
-    siblings = {r['positive_passages'][0]['docid'] for r in rows
-                if r['query_id'].startswith(f"hq_long{CHUNK_SEP}")}
-    assert len(siblings) == 4 and all(
-        qrels[f"hq_long{CHUNK_SEP}{j}"] == siblings for j in range(4)), qrels
-    for r in _read_jsonl(source_corpus):
-        if r['text'] != _LONG:  # the split positive is replaced by its chunks
-            assert corpus.get(r['docid']) == r['text'], f"{r['docid']} was dropped"
-
 TESTS = [
     ("tevatron: corpus JSONL is exactly {docid,text}", test_corpus_jsonl_has_exactly_docid_and_text),
     ("tevatron: queries JSONL is exactly {query_id,query}", test_queries_jsonl_has_exactly_queryid_and_query),
@@ -1131,8 +1049,6 @@ TESTS = [
     ("gen: existing derived output blocks source work", test_full_generation_refuses_existing_derived_before_source_work),
     ("repro: records without negatives skipped", test_reproduction_skips_records_without_negatives),
     ("repro: records load in pinned tevatron", test_reproduction_records_load_in_pinned_tevatron),
-    ("chunk: long positives split into chunk rows", test_chunk_mixture_splits_long_positives),
-    ("chunk: derived files resolve, siblings, nothing dropped", test_run_setup_on_chunked_mixture),
 ]
 
 
