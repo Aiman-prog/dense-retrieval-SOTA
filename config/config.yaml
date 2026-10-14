@@ -25,6 +25,11 @@ model:
                          # Changing this forks EVERY arm: it is part of the encoding
                          # contract, so checkpoints at the other cap are refused at
                          # evaluation, and the Fast-GRASS stale index must be rebuilt.
+  max_passages: 4        # MaxP (ANCE NLL_MultiChunk): a document is its first 4 non-overlapping
+                         # passage_max_len passages, each with its own special tokens, and
+                         # scores as its best passage. Read by train_maxp.py and evaluation;
+                         # passage 0 is exactly the FirstP-512 input. Covers ~99.89% of
+                         # training positives. Not in ENCODING_CONTRACT: other arms ignore it.
 
 # --- Paths Configuration ---
 paths:
@@ -79,6 +84,24 @@ training:
     save_total_limit: 6
     save_fraction: 0.2        # checkpoint every 20% of total steps
     gradient_checkpointing: true   # THE memory fix at query_max_len 1024 + eager attention
+  maxp:                       # in-batch recipe with a MaxP objective (scripts/train_maxp.py):
+                              # every document is up to model.max_passages passages and scores
+                              # as its best one, per query-document pair, before the loss.
+    model_name: "maxp_mixed_bge_m3"
+    batch_size: 64
+    learning_rate: 1e-5
+    num_epochs: 2
+    train_group_size: 2
+    bf16: True
+    dataloader_num_workers: 4
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+    max_grad_norm: 1.0
+    logging_steps: 100
+    save_fraction: 0.2
+    gradient_checkpointing: true
+    gc_q_chunk_size: 32       # GradCache bounds peak memory by chunk: a batch holds 128
+    gc_p_chunk_size: 32       # documents but up to 512 passages, so the batch varies in size
   crossbatch:
     model_name: "crossbatch_mixed_bge_m3_epoch2"
     target_batch_size: 1024   # = per_device_batch_size * num_gpus (negative pool); accum does NOT enlarge it
@@ -616,18 +639,8 @@ evaluation:
     - "NDCG@10"
     - "Recall@1000"
   top_k: 1000
-  passage_max_len: 8192     # EVAL ONLY: each document is encoded whole, up to BGE-M3's
-                            # 8,192-token limit, as BRIGHT's own retrievers do (each model
-                            # reads up to its own limit, no chunking). Training stays at
-                            # model.passage_max_len 512: there the contrastive batch must
-                            # sit on the GPU together and backward re-runs every layer
-                            # (~550 GB at 8192). Inference has neither.
-  batch_size: 6             # Encoding runs bf16 weights under fp16 autocast, where softmax
-                            # outputs fp32: a full 8,192-token document peaks at ~8.6 GB
-                            # per layer (scores 2.1 + fp32 probs 4.3 + fp16 copy 2.1), so
-                            # 6 ~= 53 GB on an 80 GB A100 (8 ~= 70 GB left too little
-                            # headroom). Tevatron pads a batch to its longest document.
-                            # Encode-only: moves no metric.
+  batch_size: 64            # passages per encode batch (each <= passage_max_len). Encode-only
+                            # throughput: not part of the encoding contract, moves no metric.
   trec_eval_path: "trec_eval"
   bf16: True
   dataloader_num_workers: 4

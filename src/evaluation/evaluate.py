@@ -1,21 +1,22 @@
 """
-Reverted Evaluation Script.
+BRIGHT evaluation of one domain, MaxP (utils/maxp.py): each document is its first
+model.max_passages passages and ranks by its best one. FirstP, from each document's
+passage 0, is recorded alongside as the control.
 LOGIC: Uses standard FAISS CPU indexing.
 DIAGNOSTICS: Kept prints to monitor environment status in .out file.
 """
 
 import os
 import sys
-import pickle
 import argparse
-import subprocess
-import numpy as np 
+import numpy as np
 from pathlib import Path
 import json
 import datetime
 import faiss
-import shutil
-import torch 
+import torch
+from transformers import AutoTokenizer
+from tevatron.retriever.modeling import DenseModel
 
 # Hardware Fix
 os.environ["TRANSFORMERS_ATTENTION_IMPLEMENTATION"] = "eager"
@@ -31,6 +32,7 @@ from utils.helpers import (load_config, get_data_base_dir, load_excluded_ids,
                            _load_qrels, require_eval_files, check_eval_artifacts,
                            atomic_write, eval_artifact_hashes, _code_revision)
 from evaluation.trec_eval_wrapper import TrecEvalWrapper
+from utils.maxp import doc_text, split_passages, encode_ids, collapse_to_docs
 
 def main():
     config = load_config()
@@ -78,7 +80,7 @@ def main():
     qrels_file = processed_dir / f"{args.domain}_qrels.txt"
 
     # Preflight before any encoding: a missing corpus otherwise surfaces as an opaque
-    # Tevatron subprocess failure, an hour of GPU time later.
+    # failure an hour of GPU time later.
     require_eval_files(args.domain, [
         corpus_file, queries_file, qrels_file,
         processed_dir / f"{args.domain}_excluded.json"])
@@ -98,9 +100,6 @@ def main():
             'evaluator_revision': _code_revision()}}
         results_base = base_dir / config['paths']['results_dir'] / model_tag / attempt_id
     
-    corpus_pkl = eval_dir / 'corpus_emb' / 'corpus.pkl'
-    query_pkl = eval_dir / 'query_emb' / 'query.pkl'
-
     # --- Detect LoRA checkpoint ---
     is_lora = (Path(args.model_path) / "adapter_config.json").exists()
     if is_lora:
@@ -113,54 +112,51 @@ def main():
         encode_model_path = args.model_path
         lora_adapter_path = None
 
-    # --- STEP 1: ENCODE ---
-    print(f"🚀 Step 1: Encoding with Tevatron Driver...", flush=True)
+    # --- STEP 1: SPLIT + ENCODE (MaxP, utils/maxp.py) ---
+    # Every document is its first max_passages passages, tokenized once and sliced on
+    # tokens, each with its own special tokens -- the passages train_maxp.py trains on.
+    # Encoded in-process: Tevatron's encode driver takes text, and re-tokenizing a
+    # sliced string shifts its edges.
+    p_len, max_p = config['model']['passage_max_len'], config['model']['max_passages']
+    q_len = config['model']['query_max_len']
+    print(f"🚀 Step 1: MaxP encoding, {max_p} x {p_len}-token passages per document...",
+          flush=True)
+    device = torch.device('cuda' if cuda_available else 'cpu')
+    tokenizer = AutoTokenizer.from_pretrained(encode_model_path)
+    model = DenseModel.load(
+        encode_model_path, pooling=config['model'].get('pooling', 'cls'),
+        normalize=config['model'].get('normalize', False),
+        lora_name_or_path=lora_adapter_path, attn_implementation='eager',
+        torch_dtype=torch.bfloat16 if args.bf16 else torch.float32).to(device).eval()
 
+    with open(corpus_file) as f:
+        docs = [json.loads(line) for line in f]
+    passages, parents, firsts, n_full = [], [], [], 0
+    for start in range(0, len(docs), 1024):
+        batch = docs[start:start + 1024]
+        for doc, ps in zip(batch, split_passages(tokenizer, [doc_text(d) for d in batch],
+                                                 p_len, max_p)):
+            firsts.append(len(passages))
+            passages.extend(ps)
+            parents.extend([str(doc['docid'])] * len(ps))
+            n_full += len(ps) < max_p or len(ps[-1]) < p_len
+    corpus_ids = [str(d['docid']) for d in docs]
+    print(f"   {len(docs):,} documents -> {len(passages):,} passages; "
+          f"{100 * n_full / len(docs):.2f}% of documents fully inside {max_p} passages",
+          flush=True)
+    corpus_embs = encode_ids(model, tokenizer, passages, args.batch_size, device)
 
-    for input_f, output_p, is_q in [(corpus_file, corpus_pkl, False), (queries_file, query_pkl, True)]:
-        output_p.parent.mkdir(parents=True, exist_ok=True)
-        cmd = [
-            sys.executable, '-m', 'tevatron.retriever.driver.encode',
-            '--output_dir', str(output_p.parent),
-            '--model_name_or_path', encode_model_path,
-            '--bf16', str(args.bf16),
-            '--fp16', 'False',
-            '--per_device_eval_batch_size', str(args.batch_size),
-            '--dataset_name', 'json',
-            '--dataset_path', str(input_f),
-            '--dataset_cache_dir', os.environ['HF_DATASETS_CACHE'],
-            '--encode_output_path', str(output_p),
-            '--attn_implementation', 'eager',
-            '--dataloader_num_workers', str(args.dataloader_num_workers),
-            '--pooling', config['model'].get('pooling', 'cls'),
-            '--normalize', str(config['model'].get('normalize', False)),
-        ]
-        if lora_adapter_path:
-            cmd += ['--lora_name_or_path', lora_adapter_path]
-        
-        if is_q:
-            q_len = str(config['model'].get('query_max_len', 128))
-            subprocess.run(cmd + ['--encode_is_query', '--query_max_len', q_len], check=True)
-        else:
-            p_len = str(config['evaluation']['passage_max_len'])
-            subprocess.run(cmd + ['--passage_max_len', p_len], check=True)
+    with open(queries_file) as f:
+        queries = [json.loads(line) for line in f]
+    query_ids = [str(q['query_id']) for q in queries]
+    query_tok = tokenizer([q.get('query_text', q.get('query', '')) for q in queries],
+                          truncation=True, max_length=q_len)['input_ids']
+    query_embs = encode_ids(model, tokenizer, [np.asarray(t, dtype=np.int32) for t in query_tok],
+                            args.batch_size, device)
+    del model
+    torch.cuda.empty_cache()
 
-    # --- STEP 2: LOAD ---
-    print(f"\n📂 Step 2: Loading embeddings...", flush=True)
-    with open(corpus_pkl, 'rb') as f:
-        c_data = pickle.load(f)
-        corpus_embs = c_data[0].astype(np.float32)
-        corpus_ids = [str(x) for x in c_data[1]]
-
-    with open(query_pkl, 'rb') as f:
-        q_data = pickle.load(f)
-        query_embs = q_data[0].astype(np.float32)
-        query_ids = [str(x) for x in q_data[1]]
-
-    # --- STEP 3: FAISS SEARCH (Standard CPU) ---
-    
-    # TODO(evaluation review): verify this exclusion path against the official
-    # BRIGHT protocol before approving or reporting evaluation results.
+    # --- STEP 2: FAISS SEARCH (Standard CPU) ---
     # BRIGHT removes each query's excluded documents before scoring, so retrieve
     # deeper than k and filter afterwards -- otherwise excluded hits consume result
     # slots and nothing refills them (aops excludes up to 11,224 docs for one query).
@@ -172,38 +168,32 @@ def main():
     check_eval_artifacts(args.domain, qrels, excluded, queries_file=queries_file,
                          encoded_query_ids=query_ids)
     depth = min(search_depth(args.k, excluded), len(corpus_ids))
-    print(f"🔍 Step 3: Running FAISS IndexFlatIP (CPU), depth={depth} for top-{args.k}...",
-          flush=True)
-    index = faiss.IndexFlatIP(corpus_embs.shape[1])
-    index.add(corpus_embs)
-    scores_mat, indices_mat = index.search(query_embs, depth)
+    print(f"🔍 Step 2: FAISS IndexFlatIP (CPU), {max_p * depth:,} passages deep "
+          f"for {depth:,} documents, top-{args.k}...", flush=True)
 
-    # --- STEP 4: VIGILANTE CHECK ---
-    # Guarded: an empty query set or zero depth used to raise IndexError here.
-    if query_ids and depth:
-        print("\n" + "="*60 + "\n🕵️  VIGILANTE CHECK: QUERY 0\n" + "="*60, flush=True)
-        q0_id = str(query_ids[0])
-        top_doc_id = str(corpus_ids[indices_mat[0][0]])
-        truth_docs = qrels.get(q0_id, set())
-        print(f"Query ID: {q0_id} | Top Result: {top_doc_id} | Match: {top_doc_id in truth_docs}", flush=True)
-        print("="*60 + "\n", flush=True)
+    def evaluate_run(embs, rows_parent, search_k):
+        index = faiss.IndexFlatIP(embs.shape[1])
+        index.add(embs)
+        scores_mat, indices_mat = index.search(query_embs, min(search_k, len(embs)))
+        run = {qid: collapse_to_docs(rows, scores, rows_parent,
+                                     search_depth(args.k, excluded, qid))
+               for qid, rows, scores in zip(query_ids, indices_mat, scores_mat)}
+        return TrecEvalWrapper(qrels).evaluate(apply_exclusions(run, excluded, args.k),
+                                               {'recip_rank', 'ndcg_cut_10', 'recall_1000'})
 
-    # --- STEP 5: EVALUATION ---
-    print("📊 Step 5: Running Evaluation Wrapper...", flush=True)
-    run_results = {}
-    for i in range(len(query_ids)):
-        qid_str = str(query_ids[i])
-        run_results[qid_str] = {str(corpus_ids[indices_mat[i][j]]): float(scores_mat[i][j])
-                               for j in range(depth) if indices_mat[i][j] >= 0}
-    run_results = apply_exclusions(run_results, excluded, args.k)
-
-    evaluator = TrecEvalWrapper(qrels)
-    metrics = evaluator.evaluate(run_results, {'recip_rank', 'ndcg_cut_10', 'recall_1000'})
+    # --- STEP 3: EVALUATION ---
+    # MaxP is the reported run. FirstP reuses each document's passage 0 -- the exact
+    # FirstP-512 input -- as the control, with no second encoding pass.
+    print("📊 Step 3: Running Evaluation Wrapper...", flush=True)
+    metrics = evaluate_run(corpus_embs, parents, max_p * depth)
+    firstp_metrics = evaluate_run(corpus_embs[firsts], corpus_ids, depth)
 
     print(f"\nFINAL RESULTS: {args.domain}\n" + "*"*40, flush=True)
-    print(f"MRR:        {metrics.get('recip_rank', 0):.4f}", flush=True)
-    print(f"NDCG@10:    {metrics.get('ndcg_cut_10', 0):.4f}", flush=True)
-    print(f"Recall@1000: {metrics.get('recall_1000', 0):.4f}\n" + "*"*40, flush=True)
+    for name, m in (('MaxP', metrics), ('FirstP', firstp_metrics)):
+        print(f"{name:<7} MRR {m.get('recip_rank', 0):.4f} | NDCG@10 "
+              f"{m.get('ndcg_cut_10', 0):.4f} | Recall@1000 {m.get('recall_1000', 0):.4f}",
+              flush=True)
+    print("*"*40, flush=True)
 
     # Save results to JSON for downstream aggregation
     results_base.mkdir(parents=True, exist_ok=True)
@@ -214,7 +204,8 @@ def main():
         "domain": args.domain,
         "model_path": str(Path(args.model_path).resolve()),
         "run_tag": model_tag,
-        "metrics": metrics
+        "metrics": metrics,
+        "firstp_metrics": firstp_metrics,
     }
     result_data.update(attempt_id=attempt_id,
                        identity_sha256=identity_digest(attempt['identity']),

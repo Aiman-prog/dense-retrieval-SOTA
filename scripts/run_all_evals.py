@@ -147,7 +147,10 @@ def collect_results(model_path, domains, config, *, attempt=None, result_dir=Non
             invalid.append(domain)
             continue
 
-        rows.append({'domain': domain, 'num_queries': _num_queries(domain), **metrics})
+        # The FirstP control evaluate.py scores from each document's passage 0.
+        firstp = {f'firstp_{m}': d.get('firstp_metrics', {}).get(m) for m in metrics}
+        rows.append({'domain': domain, 'num_queries': _num_queries(domain), **metrics,
+                     **firstp})
     return rows, invalid
 
 
@@ -357,8 +360,8 @@ def main():
     # Recall@100 for the document task (Table 6). ANCE's @10 cutoffs are on MRR and
     # NDCG, never on recall, so a Recall@10 here would be comparable to nothing.
     def _macro(key):
-        vals = [r[key] for r in rows if key in r]
-        return (sum(vals) / len(vals)) if vals else None
+        vals = [r[key] for r in rows if r.get(key) is not None]
+        return (sum(vals) / len(vals)) if len(vals) == len(rows) else None
 
     macro = _macro('ndcg_cut_10')
     macro_recall = _macro('recall_1000')
@@ -384,6 +387,10 @@ def main():
     print("-" * 72)
     print(f"  {'MACRO':<22} {_fmt(macro_recall):>9} {_fmt(macro):>9} "
           f"{_fmt(macro_mrr):>9}   over {len(rows)} domains")
+    firstp_macro = {f'macro_firstp_{m}': _macro(f'firstp_{m}')
+                    for m in ('recall_1000', 'ndcg_cut_10', 'recip_rank')}
+    print(f"  {'FirstP control':<22} "
+          + " ".join(f"{_fmt(v):>9}" for v in firstp_macro.values()))
     print(f"  PRIMARY ({primary_metric}): {_fmt(primary_score)}")
     print("=" * 72)
 
@@ -407,6 +414,7 @@ def main():
         'macro_ndcg_cut_10': macro,
         'macro_recall_1000': macro_recall,
         'macro_recip_rank': macro_mrr,
+        **firstp_macro,
         'primary_metric': primary_metric,
         'primary_score': primary_score,
         'compared_to': compared_to,
