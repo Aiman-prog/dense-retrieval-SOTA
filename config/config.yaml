@@ -98,7 +98,6 @@ training:
     weight_decay: 0.01
     max_grad_norm: 1.0
     logging_steps: 100
-    save_fraction: 0.2
     gradient_checkpointing: true
     gc_q_chunk_size: 32       # GradCache bounds peak memory by chunk: a batch holds 128
     gc_p_chunk_size: 32       # documents but up to 512 passages, so the batch varies in size

@@ -33,22 +33,16 @@ def split_passages(tokenizer, texts, max_len, max_passages):
     return out
 
 
-def maxp_doc_scores(q_reps, p_reps, doc_index, n_docs):
-    """[B, N] query-passage scores -> [B, n_docs], each document its best passage.
-
-    Per query-document pair, so two queries can be won by different passages of the
-    same document. The gradient reaches only each pair's winning passage.
-    """
-    scores = q_reps.float() @ p_reps.float().T
-    out = scores.new_full((scores.size(0), n_docs), float('-inf'))
-    return out.scatter_reduce(1, doc_index.unsqueeze(0).expand_as(scores), scores, 'amax')
-
-
 def maxp_loss(q_reps, p_reps, *, doc_index, target, mask, temperature):
-    """Contrastive loss over documents. `mask[i, j]` drops document j from query i's
-    denominator: another occurrence of its positive, or another known positive."""
-    scores = maxp_doc_scores(q_reps, p_reps, doc_index, mask.size(1))
-    return F.cross_entropy(scores.masked_fill(mask, float('-inf')) / temperature, target)
+    """Contrastive loss over documents, each scoring as its best passage (`doc_index`
+    maps passage -> document). Per query-document pair, so two queries can be won by
+    different passages of one document; the gradient reaches only the winner.
+    `mask[i, j]` drops document j from query i's denominator: another occurrence of
+    its positive, or another known positive."""
+    scores = q_reps.float() @ p_reps.float().T
+    docs = scores.new_full(mask.shape, float('-inf')).scatter_reduce(
+        1, doc_index.unsqueeze(0).expand_as(scores), scores, 'amax')
+    return F.cross_entropy(docs.masked_fill(mask, float('-inf')) / temperature, target)
 
 
 def collapse_to_docs(rows, scores, parents, depth):

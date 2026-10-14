@@ -8,8 +8,9 @@ taken over those document scores. A long positive is ONE training row again, not
 row per fragment: a footer passage is never asserted relevant on its own.
 
 Own loop, not Tevatron's driver: its collator and EncoderModel.forward hard-code one
-vector per passage. GradCache bounds memory, because 128 documents carry between 128
-and 512 passages; its RandContext replays the dropout RNG between its two passes.
+vector per passage. The rows still come from Tevatron's TrainDataset, so this arm samples
+exactly what the in-batch arm samples. GradCache bounds memory, because 128 documents
+carry between 128 and 512 passages; its RandContext replays the dropout RNG.
 
     python scripts/train_maxp.py --preflight    # CPU, no writes: data and passage counts
     python scripts/train_maxp.py --benchmark    # GPU: s/step, peak memory, projected hours
@@ -17,18 +18,16 @@ and 512 passages; its RandContext replays the dropout RNG between its two passes
 """
 import os
 import sys
-import json
 import math
 import time
-import random
 import hashlib
 import argparse
-import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 
 project_root = Path(__file__).resolve().parent.parent
@@ -48,59 +47,37 @@ os.environ["TRANSFORMERS_ATTENTION_IMPLEMENTATION"] = "eager"
 CONSUMED_KEYS = (
     'model_name', 'batch_size', 'learning_rate', 'num_epochs', 'train_group_size',
     'bf16', 'dataloader_num_workers', 'warmup_ratio', 'weight_decay', 'max_grad_norm',
-    'logging_steps', 'save_fraction', 'gradient_checkpointing',
-    'gc_q_chunk_size', 'gc_p_chunk_size',
+    'logging_steps', 'gradient_checkpointing', 'gc_q_chunk_size', 'gc_p_chunk_size',
 )
-MAX_HOURS = 22.0    # the 24h wall, less probes, saves and startup
+MAX_HOURS = 22.0    # the 24h wall, less probes, the final save and startup
 
 
 def _digest(text):
     return hashlib.md5(text.strip().encode()).hexdigest()
 
 
-class MaxPDataset(Dataset):
-    """Mixture rows -> (query, [positive, negatives...], known positive digests).
+def load_train_data(mixture_dir, group_size, seed):
+    """Tevatron's TrainDataset -- the in-batch arm's own sampler -- and known positives.
 
-    Positive and negative choice copy Tevatron's TrainDataset.__getitem__, so this arm
-    sees the documents the in-batch arm sees: a row's negatives are shuffled with a
-    per-row seed and each epoch takes the next window. `epoch` is set by the loop
-    before each epoch's DataLoader is built, so worker copies carry it.
-
-    Known positives are keyed by query TEXT across the whole mixture, not by docid:
-    the mixture holds raw ids that the derived qrels remap.
+    Its __getitem__ reads the epoch and seed from a trainer; this loop has none, so it
+    gets those two fields, and sets `trainer.state.epoch` before each epoch's DataLoader
+    is built (worker copies carry it). Known positives are keyed by query TEXT across the
+    mixture, not by docid: the mixture holds raw ids that the derived qrels remap.
     """
-
-    def __init__(self, files, group_size, seed):
-        self.rows, self.known = [], {}
-        for path in files:
-            with open(path, encoding='utf-8') as f:
-                for line in f:
-                    if line.strip():
-                        row = json.loads(line)
-                        self.rows.append(row)
-                        self.known.setdefault(row['query'], set()).update(
-                            _digest(doc_text(p)) for p in row['positive_passages'])
-        self.group_size, self.seed, self.epoch = group_size, seed, 0
-
-    def __len__(self):
-        return len(self.rows)
-
-    def __getitem__(self, item):
-        row, n_neg = self.rows[item], self.group_size - 1
-        hashed_seed = hash(item + self.seed)
-        positives, negatives = row['positive_passages'], row['negative_passages']
-        docs = [positives[(hashed_seed + self.epoch) % len(positives)]]
-        if len(negatives) < n_neg:
-            docs += random.choices(negatives, k=n_neg)
-        elif n_neg:
-            shuffled = list(negatives)
-            random.Random(hashed_seed).shuffle(shuffled)
-            offset = self.epoch * n_neg % len(negatives)
-            docs += (shuffled * 2)[offset:offset + n_neg]
-        return row['query'], [doc_text(d) for d in docs], self.known[row['query']]
+    from tevatron.retriever.dataset import TrainDataset
+    from tevatron.retriever.arguments import DataArguments
+    data = TrainDataset(DataArguments(dataset_name='json', train_group_size=group_size,
+                                      dataset_path=str(Path(mixture_dir) / '*.jsonl')))
+    data.set_trainer(SimpleNamespace(state=SimpleNamespace(epoch=0),
+                                     args=SimpleNamespace(seed=seed)))
+    known = {}
+    for query, positives in zip(data.train_data['query'],
+                                data.train_data['positive_passages']):
+        known.setdefault(query, set()).update(_digest(doc_text(p)) for p in positives)
+    return data, known
 
 
-def make_collate(tokenizer, max_q, max_p, max_passages):
+def make_collate(tokenizer, max_q, max_p, max_passages, known):
     """A batch -> queries, flat passages sorted by length, and the document geometry.
 
     Row i's positive is document i*G. `mask[i, j]` is True when document j is a known
@@ -108,22 +85,22 @@ def make_collate(tokenizer, max_q, max_p, max_passages):
     another positive of the same query -- so it leaves the denominator.
     """
     def collate(batch):
-        queries, groups, known = zip(*batch)
-        docs = [d for g in groups for d in g]
-        group = len(groups[0])
+        queries = [q[0] for q, _ in batch]
+        docs = [d[0] for _, group in batch for d in group]
+        group = len(batch[0][1])
         split = split_passages(tokenizer, docs, max_p, max_passages)
-        flat = [(len(p), j, p) for j, ps in enumerate(split) for p in ps]
-        flat.sort(key=lambda t: t[0])          # short chunks pad short (see _split_trimmed)
-        passage = tokenizer.pad({'input_ids': [p.tolist() for _, _, p in flat]},
+        flat = sorted(((j, p) for j, ps in enumerate(split) for p in ps),
+                      key=lambda t: len(t[1]))         # short chunks pad short (_split_trimmed)
+        passage = tokenizer.pad({'input_ids': [p.tolist() for _, p in flat]},
                                 return_tensors='pt')
-        query = tokenizer(list(queries), truncation=True, max_length=max_q,
+        query = tokenizer(queries, truncation=True, max_length=max_q,
                           padding=True, return_tensors='pt')
         digests = [_digest(d) for d in docs]
         target = [i * group for i in range(len(queries))]
-        mask = torch.tensor([[j != target[i] and digests[j] in known[i]
-                              for j in range(len(docs))] for i in range(len(queries))])
+        mask = torch.tensor([[j != target[i] and digests[j] in known[q]
+                              for j in range(len(docs))] for i, q in enumerate(queries)])
         return {'query': dict(query), 'passage': dict(passage),
-                'doc_index': torch.tensor([j for _, j, _ in flat]),
+                'doc_index': torch.tensor([j for j, _ in flat]),
                 'target': torch.tensor(target), 'mask': mask}
     return collate
 
@@ -175,7 +152,8 @@ def make_grad_cache(model, recipe, temperature):
 
 
 def train_step(gc, model, optimizer, scheduler, batch, max_grad_norm, step):
-    """One GradCache step; finite checks before the optimizer moves anything."""
+    """One GradCache step; finite checks before the optimizer moves anything. GradCache
+    runs its own backward, so run_ance_train.optimization_step cannot be reused."""
     batch = {k: ({n: t.cuda() for n, t in v.items()} if isinstance(v, dict) else v.cuda())
              for k, v in batch.items()}
     loss = float(gc({'query': batch['query']}, {'passage': batch['passage']},
@@ -193,30 +171,43 @@ def train_step(gc, model, optimizer, scheduler, batch, max_grad_norm, step):
     return loss, float(grad_norm)
 
 
-def preflight(dataset, tokenizer, max_p, max_passages, batch_size):
-    """CPU, no writes: every epoch-0 document splits, and how many passages it costs."""
-    counts = {'positive': [], 'negative': []}
-    full = max_passages * (max_p - tokenizer.num_special_tokens_to_add())
-    over = 0
-    for start in range(0, len(dataset), 2048):
-        items = [dataset[i] for i in range(start, min(start + 2048, len(dataset)))]
-        pos = [g[0] for _, g, _ in items]
-        neg = [d for _, g, _ in items for d in g[1:]]
-        counts['positive'] += [len(p) for p in split_passages(tokenizer, pos, max_p, max_passages)]
-        counts['negative'] += [len(p) for p in split_passages(tokenizer, neg, max_p, max_passages)]
-        over += sum(len(ids) > full for ids in
-                    tokenizer(pos, add_special_tokens=False, verbose=False)['input_ids'])
-    print(f"[preflight] rows: {len(dataset):,}")
-    for kind, c in counts.items():
-        c = np.asarray(c)
-        print(f"[preflight] {kind}: mean {c.mean():.3f} passages/doc; "
-              + ", ".join(f"{n}: {(c == n).mean():.2%}" for n in range(1, max_passages + 1)))
-    per_doc = np.concatenate([counts['positive'], counts['negative']]).mean()
-    print(f"[preflight] positives fully inside {max_passages} passages: "
-          f"{1 - over / len(dataset):.4%}")
-    print(f"[preflight] projected passages per step: {per_doc * 2 * batch_size:.0f} "
-          f"(FirstP: {2 * batch_size}); worst case {max_passages * 2 * batch_size}")
+def preflight(data, tokenizer, max_p, max_passages, batch_size):
+    """CPU, no writes: every epoch-0 document splits, and what it costs in passages."""
+    pos, per_doc = [], []
+    for start in range(0, len(data), 2048):
+        items = [data[i] for i in range(start, min(start + 2048, len(data)))]
+        split = split_passages(tokenizer, [d[0] for _, g in items for d in g],
+                               max_p, max_passages)
+        per_doc += [len(ps) for ps in split]
+        pos += [len(ps) for ps in split[::len(items[0][1])]]     # each row's first doc
+    print(f"[preflight] rows: {len(data):,}")
+    print(f"[preflight] positives at the {max_passages}-passage cap: "
+          f"{np.mean(np.asarray(pos) == max_passages):.4%}")
+    print(f"[preflight] passages per step: {np.mean(per_doc) * 2 * batch_size:.0f} "
+          f"(FirstP {2 * batch_size}, cap {max_passages * 2 * batch_size})")
     print("[preflight] ✅ every document splits. Nothing was written.")
+
+
+def benchmark(n_steps, data, step_args, recipe, total_steps):
+    """Timed real steps and their peak memory -> GO / NO-GO. Writes nothing."""
+    warm, times, counts = 20, [], []
+    torch.cuda.reset_peak_memory_stats()
+    for i, batch in zip(range(n_steps), data):
+        torch.cuda.synchronize()
+        t = time.monotonic()
+        train_step(*step_args, batch, recipe['max_grad_norm'], i)
+        torch.cuda.synchronize()
+        if i >= warm:
+            times.append(time.monotonic() - t)
+            counts.append(len(batch['doc_index']))
+    hours = float(np.mean(times)) * total_steps / 3600
+    print(f"[benchmark] {len(times)} timed steps: {np.mean(times):.2f} s/step, "
+          f"{np.mean(counts):.0f} passages/step (max {max(counts)}), "
+          f"peak {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB")
+    print(f"[benchmark] projected {total_steps:,} steps: {hours:.1f} h "
+          f"(limit {MAX_HOURS} h) -> {'GO' if hours < MAX_HOURS else 'NO-GO'}", flush=True)
+    if hours >= MAX_HOURS:
+        sys.exit(1)
 
 
 def main():
@@ -237,27 +228,26 @@ def main():
     log_startup_config("maxp", ctx)
     max_passages = config['model']['max_passages']
 
-    mixture_files = require_mixture_files(Path(ctx['processed_dir']) / "training_mixture",
-                                          MIXTURE_FILES)
+    mixture_dir = Path(ctx['processed_dir']) / "training_mixture"
+    mixture_files = require_mixture_files(mixture_dir, MIXTURE_FILES)
     tokenizer = AutoTokenizer.from_pretrained(ctx['base_model'])
-    dataset = MaxPDataset(mixture_files, recipe['train_group_size'], seed)
+    data, known = load_train_data(mixture_dir, recipe['train_group_size'], seed)
     batch_size, epochs = recipe['batch_size'], recipe['num_epochs']
-    steps_per_epoch = math.ceil(len(dataset) / batch_size)
+    steps_per_epoch = math.ceil(len(data) / batch_size)
     total_steps = steps_per_epoch * epochs
-    save_steps = max(1, int(total_steps * recipe['save_fraction']))
-    print(f"[MaxP] {len(dataset):,} rows | {steps_per_epoch:,} steps/epoch | "
+    print(f"[MaxP] {len(data):,} rows | {steps_per_epoch:,} steps/epoch | "
           f"{total_steps:,} steps | {max_passages} x {ctx['max_p']} passages/doc", flush=True)
 
     if args.preflight:
-        preflight(dataset, tokenizer, ctx['max_p'], max_passages, batch_size)
+        preflight(data, tokenizer, ctx['max_p'], max_passages, batch_size)
         return
 
-    collate = make_collate(tokenizer, ctx['max_q'], ctx['max_p'], max_passages)
+    collate = make_collate(tokenizer, ctx['max_q'], ctx['max_p'], max_passages, known)
     generator = torch.Generator()
     generator.manual_seed(seed)
 
     def loader():
-        return DataLoader(dataset, batch_size=batch_size, shuffle=True, generator=generator,
+        return DataLoader(data, batch_size=batch_size, shuffle=True, generator=generator,
                           num_workers=recipe['dataloader_num_workers'], collate_fn=collate)
 
     model = build_model(ctx, bool(recipe['bf16']), recipe['gradient_checkpointing']).cuda()
@@ -266,12 +256,10 @@ def main():
                                weight_decay=recipe['weight_decay'], label="maxp")
     scheduler = get_linear_schedule_with_warmup(
         optimizer, math.ceil(recipe['warmup_ratio'] * total_steps), total_steps)
-    gc = make_grad_cache(model, recipe, ctx['temperature'])
-    step_args = (gc, model, optimizer, scheduler)
+    step_args = (make_grad_cache(model, recipe, ctx['temperature']), model, optimizer, scheduler)
 
     if args.benchmark:
-        benchmark(args.benchmark_steps, loader(), step_args, recipe, tokenizer, ctx,
-                  max_passages, total_steps, save_steps)
+        benchmark(args.benchmark_steps, loader(), step_args, recipe, total_steps)
         return
 
     world_size = int(os.environ.get('WORLD_SIZE', '1'))
@@ -293,9 +281,9 @@ def main():
         append_jsonl(log_path, {"global_step": step, "phase": phase, **result})
 
     probe("begin", 0)
-    step, t0, loss, grad_norm = 0, time.monotonic(), float('nan'), float('nan')
+    step, t0 = 0, time.monotonic()
     for epoch in range(epochs):
-        dataset.epoch = epoch
+        data.trainer.state.epoch = epoch
         for batch in loader():
             loss, grad_norm = train_step(*step_args, batch, recipe['max_grad_norm'], step)
             step += 1
@@ -310,73 +298,12 @@ def main():
                       f"train_s={time.monotonic() - t0:.0f}", flush=True)
             if step == total_steps // 2:
                 probe("mid", step)
-            if step % save_steps == 0 and step < total_steps:
-                save_checkpoint(model, tokenizer, optimizer, scheduler,
-                                output_dir / f"checkpoint-{step}")
     probe("end", step)
+    # No intermediate checkpoints: there is no resume, so nothing would read them.
     model.save(str(output_dir))
     tokenizer.save_pretrained(str(output_dir))
     assert_training_succeeded(output_dir, manifest)
     print(f"✅ MaxP training completed. Model saved to: {output_dir}", flush=True)
-
-
-def save_checkpoint(model, tokenizer, optimizer, scheduler, path):
-    path.mkdir(parents=True, exist_ok=True)
-    model.save(str(path))
-    tokenizer.save_pretrained(str(path))
-    torch.save(scheduler.state_dict(), path / "scheduler.pt")
-    torch.save(optimizer.state_dict(), path / "optimizer.pt")   # LAST: the validity flag
-
-
-def benchmark(n_steps, data, step_args, recipe, tokenizer, ctx, max_passages,
-              total_steps, save_steps):
-    """Real steps, one synthetic worst-case batch and one save -> GO / NO-GO.
-
-    Nothing lands in the output dir; the save goes to node-local scratch.
-    """
-    model, optimizer, scheduler = step_args[1], step_args[2], step_args[3]
-    warm, times, counts = 20, [], []
-    torch.cuda.reset_peak_memory_stats()
-    for i, batch in zip(range(n_steps), data):
-        torch.cuda.synchronize()
-        t = time.monotonic()
-        train_step(*step_args, batch, recipe['max_grad_norm'], i)
-        torch.cuda.synchronize()
-        if i >= warm:
-            times.append(time.monotonic() - t)
-            counts.append(len(batch['doc_index']))
-    real_peak = torch.cuda.max_memory_allocated() / 2**30
-
-    # Worst case: every query at the cap and every document at max_passages full passages.
-    b, g = recipe['batch_size'], recipe['train_group_size']
-    ids = lambda n, length: {'input_ids': torch.full((n, length), 1000),
-                             'attention_mask': torch.ones(n, length, dtype=torch.long)}
-    worst = {'query': ids(b, ctx['max_q']), 'passage': ids(b * g * max_passages, ctx['max_p']),
-             'doc_index': torch.arange(b * g).repeat_interleave(max_passages),
-             'target': torch.arange(b) * g, 'mask': torch.zeros(b, b * g, dtype=torch.bool)}
-    torch.cuda.reset_peak_memory_stats()
-    t = time.monotonic()
-    train_step(*step_args, worst, recipe['max_grad_norm'], n_steps)
-    torch.cuda.synchronize()
-    worst_s, worst_peak = time.monotonic() - t, torch.cuda.max_memory_allocated() / 2**30
-
-    with tempfile.TemporaryDirectory() as tmp:
-        t = time.monotonic()
-        save_checkpoint(model, tokenizer, optimizer, scheduler, Path(tmp) / "checkpoint")
-        save_s = time.monotonic() - t
-
-    per_step = float(np.mean(times))
-    hours = (per_step * total_steps + save_s * (total_steps // save_steps)) / 3600
-    print(f"[benchmark] {len(times)} timed steps: {per_step:.2f} s/step "
-          f"(p95 {np.percentile(times, 95):.2f}), {np.mean(counts):.0f} passages/step "
-          f"(max {max(counts)}), peak {real_peak:.1f} GiB")
-    print(f"[benchmark] worst case {b * g * max_passages} passages: {worst_s:.1f} s, "
-          f"peak {worst_peak:.1f} GiB")
-    print(f"[benchmark] checkpoint save {save_s:.0f} s")
-    print(f"[benchmark] projected {total_steps:,} steps: {hours:.1f} h "
-          f"(limit {MAX_HOURS} h) -> {'GO' if hours < MAX_HOURS else 'NO-GO'}", flush=True)
-    if hours >= MAX_HOURS:
-        sys.exit(1)
 
 
 if __name__ == "__main__":
