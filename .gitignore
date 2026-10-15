@@ -96,3 +96,11 @@ docs/preprocessor.md
 docs/ance_implementation_details.md
 docs/async_fast_grass_architecture.md
 docs/async_fast_grass_implementation_details.md
+
+# code only in the repo (README files excepted)
+analysis/
+docs/
+*.md
+!README.md
+!**/README.md
+*.tex
