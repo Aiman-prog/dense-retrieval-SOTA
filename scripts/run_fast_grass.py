@@ -603,10 +603,11 @@ def run_fast_grass_pipeline(cache, c_ids, corpus_lookup, qrels_dict, qid_to_text
 
 # ---- cluster entry point ---------------------------------------------------
 
-def _load_train_items(debug=False):
-    """Load the GRASS training mixture (positive_passages schema)."""
+def _load_train_items(debug=False, root=None):
+    """Load the GRASS training mixture (positive_passages schema) from `root`
+    (default `processed/`; async MaxP passes the versioned training dir)."""
     from data.preprocessor import MIXTURE_FILES, require_mixture_files
-    mix_dir = get_path("processed") / "training_mixture"
+    mix_dir = Path(root or get_path("processed")) / "training_mixture"
     train_items = []
     for f_path in sorted(require_mixture_files(mix_dir, MIXTURE_FILES)):
         with open(f_path) as f:
@@ -624,6 +625,9 @@ def _load_train_items(debug=False):
 
 
 def main():
+    if int(load_config()['model'].get('max_passages', 1)) > 1:
+        raise SystemExit("sequential Fast-GRASS is not migrated to MaxP "
+                         "(model.max_passages > 1); only async Fast-GRASS is.")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--model_suffix',   type=str,   default=None)
     parser.add_argument('--num_epochs',     type=int,   default=None)

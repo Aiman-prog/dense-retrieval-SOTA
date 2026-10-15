@@ -34,7 +34,12 @@ model:
 # --- Paths Configuration ---
 paths:
   data_dir: "data"
-  processed_dir: "data/processed"
+  processed_dir: "data/processed"     # BRIGHT eval files + the MS MARCO paper arm
+  training_data_dir: "data/training_original_v1"   # BRIGHT training mixture + derived corpus/
+                             # queries/qrels for every MaxP arm: the 329,993 original rows,
+                             # copied from data/unchunked_backup by
+                             # scripts/prepare_training_data.py, which writes the manifest
+                             # every consumer requires (helpers.require_training_data).
   bright_cache: "data/bright"
   models_dir: "models"
   results_dir: "results/bright_benchmark"
@@ -98,9 +103,29 @@ training:
     weight_decay: 0.01
     max_grad_norm: 1.0
     logging_steps: 100
+    save_fraction: 0.2        # model-only interim-<step>/ rescue snapshots, never reportable
     gradient_checkpointing: true
     gc_q_chunk_size: 32       # GradCache bounds peak memory by chunk: a batch holds 128
     gc_p_chunk_size: 32       # documents but up to 512 passages, so the batch varies in size
+  crossbatch_maxp:            # cross-batch with the MaxP objective (train_maxp.py under
+                              # torchrun --nproc_per_node 2): 2 x 512 queries pooled into
+                              # one 1,024-query softmax across ranks, as training.crossbatch.
+    model_name: "crossbatch_maxp_mixed_bge_m3"
+    per_device_batch_size: 512
+    world_size: 2
+    learning_rate: 1e-5
+    num_epochs: 2
+    train_group_size: 2
+    bf16: True
+    dataloader_num_workers: 4
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+    max_grad_norm: 1.0
+    logging_steps: 10
+    save_fraction: 0.2
+    gradient_checkpointing: true
+    gc_q_chunk_size: 32
+    gc_p_chunk_size: 32
   crossbatch:
     model_name: "crossbatch_mixed_bge_m3_epoch2"
     target_batch_size: 1024   # = per_device_batch_size * num_gpus (negative pool); accum does NOT enlarge it
@@ -239,7 +264,9 @@ training:
     # checkpoint. See async_fast_grass_architecture.md.
     # Sibling to `fast_grass` above, which stays SEQUENTIAL (lazy top-L MCDP) —
     # these defaults deliberately differ from it.
-    model_name: "async_fast_grass_mixed_bge_m3"
+    model_name: "async_fast_grass_maxp_mixed_bge_m3"   # MaxP; FirstP/chunked runs keep theirs
+    gc_q_chunk_size: 32      # MaxP training step (maxp_training): GradCache, as training.maxp
+    gc_p_chunk_size: 32
     base_model: "BAAI/bge-m3"   # every mining arm starts from the SAME base as the
                                 # in-batch baseline, so the BRIGHT table compares one
                                 # variable: negative selection. Warm-starting these
@@ -289,6 +316,10 @@ training:
     reentry_top_k: 5         # still used: top-k reservoir scores for candidate rank
 
     # --- async handoff ---
+    mine_chunk_factor: 5     # a round mines ONE SHARD, not the whole mixture:
+                             # 330,000/5 = 66,000 queries = 1,031 steps, matched to
+                             # async_mine_every_steps below. Does NOT change the budget
+                             # (every query still mined once per epoch); the pilot inherits 5.
     async_mine_every_steps: 1000  # trainer checkpoint cadence (doc range 1000-2000;
                              # avoid tiny values, checkpoints are large). Retune
                              # after run 1 from async_gap_steps / data_age_steps /
@@ -388,6 +419,7 @@ training:
     B_doc: 512
     T: 3
     cache_update_interval: 1
+    mine_chunk_factor: 2     # 1,024 / 2 = 512 queries = 8 steps, matched to the 10 below
     async_mine_every_steps: 10
     ready_poll_steps: 2
     async_poll_interval: 5
@@ -405,7 +437,7 @@ training:
                                 # variable: negative selection. Warm-starting these
                                 # from inbatch_mixed_bge_m3 gave them ~2x the baseline's
                                 # cumulative optimizer steps.
-    model_name: "ance_mixed_bge_m3"
+    model_name: "ance_maxp_mixed_bge_m3"   # MaxP; the FirstP/chunked runs keep their own dirs
     train_group_size: 2       # 1 explicit mined negative — paper: "uniformly sample one
                               # negative from ANN top 200". Under the shared BGE-M3/
                               # Tevatron objective the effective in-batch pool is 127 = 64*2-1:
@@ -433,6 +465,8 @@ training:
                               # throughput setting does not transfer to a 1024-token cap.
     gradient_checkpointing: true     # THE memory fix at q1024/p512 + eager attention,
                               # matching the in-batch arm this is compared against.
+    gc_q_chunk_size: 32       # MaxP training step (maxp_training): GradCache bounds memory,
+    gc_p_chunk_size: 32       # since 128 documents carry 128-512 passages. As training.maxp.
     ann_chunk_factor: 1       # Mine every BRIGHT training query each round. This smaller
                               # dataset does not need Microsoft's five-way MS MARCO shard;
                               # full coverage maximizes exposure inside the two-epoch budget.

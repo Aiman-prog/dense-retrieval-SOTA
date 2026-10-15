@@ -47,12 +47,14 @@ from utils.helpers import get_path, get_training_context, load_config, \
                           _load_qrels, _load_corpus_lookup, log_startup_config, \
                           build_run_manifest, prepare_output_dir, set_seed, \
                           assert_training_succeeded, require_recipe_keys, _sha256, \
-                          RUN_MANIFEST_NAME, atomic_write, _code_revision
+                          RUN_MANIFEST_NAME, atomic_write, _code_revision, \
+                          require_training_data
 from data.preprocessor import (BRIGHTPreprocessor, MIXTURE_FILES, set_msmarco_revisions,
                                MSMARCO_ONLY_FILES, require_derived_artifacts,
                                require_mixture_files, _trec_safe_docid)
 from ance_mining import (INITIAL_ROUND, adopt_prepared_round, assert_ance_refresh,
-                         build_round_records, encode_and_mine, publish_round)
+                         build_round_records, encode_and_mine, publish_round, is_maxp,
+                         training_data_root, maxp_contract)
 
 # 🩹 Tevatron Bug Patch
 if not hasattr(DenseModel, "_keys_to_ignore_on_save"):
@@ -79,6 +81,9 @@ CONSUMED_KEYS = (
 # declared-but-unread key, so they are listed rather than silently tolerated.
 # `total_epochs` is deliberately absent: the reproduction is step-budgeted against
 # the released checkpoint, not epoch-budgeted against our expanded dataset.
+# Keys only the BGE (MaxP) recipe declares: its GradCache training step.
+MAXP_KEYS = ('gc_q_chunk_size', 'gc_p_chunk_size')
+
 PAPER_KEYS = ('paper_fidelity', 'lamb_eps', 'warmup_steps', 'query_max_len',
               'passage_max_len', 'normalize', 'temperature', 'pooling',
               'expected_init_sha256', 'scheduler_max_steps', 'train_stop_steps')
@@ -180,6 +185,10 @@ def run_setup(recipe_args):
             queries_file=recipe_args['train_queries_file'],
             qrels_file=recipe_args['train_qrels_file'])
 
+    # The BRIGHT mixture is read from the versioned training dir, whose manifest proves
+    # it is the original unsplit data (helpers.require_training_data).
+    p = training_data_root({'args': recipe_args})
+    require_training_data(p)
     require_mixture_files(p / recipe_args['mixture_dir'], MIXTURE_FILES)
     return require_derived_artifacts(
         output_dir=p,
@@ -508,6 +517,10 @@ def initial_round_identity(recipe_name, ctx, recipe, *, base_model, corpus_file,
             'per_device_eval_batch_size': int(recipe['per_device_eval_batch_size']),
             'paper_fidelity': bool(recipe.get('paper_fidelity')),
         },
+        # MaxP: a round 0 mined under any other representation (a FirstP one
+        # included, which carries no contract) is refused on adoption.
+        'representation': (maxp_contract(ctx, load_config(), base_model)
+                           if is_maxp(ctx) else None),
     }
 
 
@@ -755,6 +768,8 @@ def main():
         # fixed stop step rather than an epoch count.
         consumed = tuple(k for k in consumed
                          if k not in ('warmup_ratio', 'total_epochs')) + PAPER_KEYS
+    else:
+        consumed = consumed + MAXP_KEYS
     require_recipe_keys(recipe_name, recipe, consumed)
     log_startup_config(recipe_name, ctx)
     ance_base_model = recipe.get('base_model', ctx['base_model'])
@@ -790,7 +805,7 @@ def main():
         print(f"[ANCE] {n_gpus} GPU(s) detected — Trainer→GPU 0, "
               f"Inferencer→GPU {infer_gpu}", flush=True)
 
-    mixture_dir   = get_path("processed") / recipe['mixture_dir']
+    mixture_dir   = training_data_root(ctx) / recipe['mixture_dir']
     expected      = (MSMARCO_ONLY_FILES if recipe['setup_mode'] == 'tevatron_msmarco'
                      else MIXTURE_FILES)
     mixture_files = list(require_mixture_files(mixture_dir, expected))
@@ -911,6 +926,15 @@ def main():
     # that it is no longer SILENT: job 204931 died at step 10,100 leaving
     # checkpoint-10000, and the next submission would have deleted it without a word.
     # Refuse instead, and make --overwrite the place that decision is taken.
+    if is_maxp(ctx):
+        # A MaxP run never clears a directory: no --overwrite, no occupied output.
+        if args.overwrite:
+            raise RuntimeError("--overwrite is refused for a MaxP run; point "
+                               f"training.{recipe_name}.model_name at a new directory.")
+        if output_model_dir.is_dir() and any(output_model_dir.iterdir()):
+            raise RuntimeError(f"{output_model_dir} is not empty; a MaxP run never "
+                               f"clears a directory. Move it aside or rename "
+                               f"training.{recipe_name}.model_name.")
     stale = sorted(p.name for p in output_model_dir.glob("checkpoint-*")) \
         if output_model_dir.is_dir() else []
     if stale and not args.overwrite:

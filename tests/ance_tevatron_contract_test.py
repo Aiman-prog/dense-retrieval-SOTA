@@ -280,8 +280,10 @@ def test_the_two_ance_arms_choose_their_precision_deliberately():
     paper = src[:src.index('from tevatron.retriever.modeling import DenseModel')]
     assert 'load_ance_encoder' in paper and 'torch_dtype' not in paper
 
-    # Both still autocast, which is orthogonal to the weight dtype.
-    assert src.count("torch.autocast('cuda', dtype=torch.bfloat16, enabled=bf16)") == 2
+    # The paper arm autocasts over its FP32 weights. The BGE arm runs the shared MaxP
+    # step (maxp_training.train_step) on its bf16 weights, as every MaxP arm does.
+    assert src.count("torch.autocast('cuda', dtype=torch.bfloat16, enabled=bf16)") == 1
+    assert 'maxp_train_step(' in src
 
 
 # ---- the BGE collator: dynamic padding, and the (B, G, L) shape it must keep ----

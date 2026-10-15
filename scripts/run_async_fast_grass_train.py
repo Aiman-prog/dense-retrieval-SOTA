@@ -145,12 +145,18 @@ def _collate(batch):
     }
 
 
-def make_dataloader(data_dir, corpus_lookup, m, batch_size, num_workers):
-    """Build a loader, validating the round first. Raises MinedRoundValidationError."""
+def make_dataloader(data_dir, corpus_lookup, m, batch_size, num_workers, collate=None):
+    """Build a loader, validating the round first. Raises MinedRoundValidationError.
+
+    ``collate`` is the MaxP collate (maxp_training.make_collate); rows are adapted to
+    its (query, [positive, negatives...]) shape.
+    """
     ds = MinedRoundDataset(data_dir, corpus_lookup, m, min_batch=batch_size)
+    collate_fn = _collate if collate is None else (lambda batch: collate(
+        [(b['query'], [b['positive']] + b['negatives']) for b in batch]))
     return DataLoader(ds, batch_size=batch_size, shuffle=True,
                       num_workers=num_workers, drop_last=True,
-                      collate_fn=_collate)
+                      collate_fn=collate_fn)
 
 
 def _resolve_bootstrap_step(cfg, cli_value, mine_every):
@@ -293,7 +299,32 @@ def main():
         optimizer, int(cfg.get('warmup_ratio', 0.1) * args.max_steps), args.max_steps)
     loss_fn = TemperatureScaledContrastiveLoss(temperature=ctx['temperature'])
     _student_raw = student
-    if not args.no_compile and device.type == 'cuda':
+
+    # MaxP (model.max_passages > 1): every document is up to P passages and scores as
+    # its best one, through the step every MaxP arm shares. The fresh-loss encodes run
+    # on the UNCOMPILED student under GradCache; the miner's cached states never enter.
+    maxp = int(cfg.get('max_passages', 1)) > 1
+    maxp_collate = None
+    if maxp:
+        from maxp_training import (ClsEncoder, known_positives, make_collate,
+                                   make_grad_cache, write_contract,
+                                   train_step as maxp_train_step)
+        from utils.helpers import _load_qrels
+        from async_fast_grass_cached_mcdp import grass_data_root
+        training_dir = grass_data_root(config)
+        records = (json.loads(line) for f in sorted(
+            (training_dir / "training_mixture").glob("*.jsonl"))
+            for line in open(f) if line.strip())
+        known = known_positives(records, _load_qrels(training_dir / "train_qrels.txt"),
+                                corpus_lookup)
+        maxp_collate = make_collate(tokenizer, q_max, p_max, int(cfg['max_passages']),
+                                    known)
+        _student_raw.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={'use_reentrant': False})
+        maxp_encoder = ClsEncoder(_student_raw).train()
+        gc = make_grad_cache(maxp_encoder, cfg['gc_q_chunk_size'], cfg['gc_p_chunk_size'],
+                             ctx['temperature'])
+    if not maxp and not args.no_compile and device.type == 'cuda':
         try:
             torch._dynamo.config.suppress_errors = True
             student = torch.compile(student, dynamic=True)
@@ -304,7 +335,8 @@ def main():
     # --- start on the step-0 input ---
     active_round = 0
     loader = make_dataloader(resolve_training_data(root, 0), corpus_lookup, m,
-                            batch_size, cfg.get('dataloader_num_workers', 2))
+                            batch_size, cfg.get('dataloader_num_workers', 2),
+                            maxp_collate)
     data_iter = iter(loader)
     consume_step, source_checkpoint_step = 0, 0
     rounds_consumed = rounds_skipped = 0
@@ -330,7 +362,8 @@ def main():
                 try:
                     new_loader = make_dataloader(
                         resolve_training_data(root, latest), corpus_lookup, m,
-                        batch_size, cfg.get('dataloader_num_workers', 2))
+                        batch_size, cfg.get('dataloader_num_workers', 2),
+                        maxp_collate)
                 except MinedRoundValidationError as e:
                     rejected_rounds.add(latest)
                     _log(f"REJECTED round {latest}: {e} — staying on round "
@@ -363,22 +396,28 @@ def main():
             batch = next(data_iter)
 
         # --- fresh-loss step: nothing from the miner's embeddings enters here ---
-        student.train()
-        q_embs = encode_batch_tensor(student, tokenizer, batch['queries'], device,
-                                     q_max, enc_bs, requires_grad=True)
-        d_texts = [t for pos, negs in zip(batch['positives'], batch['negatives'])
-                   for t in [pos] + negs]
-        d_embs = encode_batch_tensor(student, tokenizer, d_texts, device, p_max,
-                                     enc_bs, requires_grad=True)
-        loss = loss_fn(q_embs, d_embs)
+        if maxp:
+            loss_value, _grad_norm = maxp_train_step(
+                gc, maxp_encoder, optimizer, scheduler, batch,
+                cfg.get('max_grad_norm', 1.0), global_step)
+        else:
+            student.train()
+            q_embs = encode_batch_tensor(student, tokenizer, batch['queries'], device,
+                                         q_max, enc_bs, requires_grad=True)
+            d_texts = [t for pos, negs in zip(batch['positives'], batch['negatives'])
+                       for t in [pos] + negs]
+            d_embs = encode_batch_tensor(student, tokenizer, d_texts, device, p_max,
+                                         enc_bs, requires_grad=True)
+            loss = loss_fn(q_embs, d_embs)
 
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        clip_grad_norm_(student.parameters(), cfg.get('max_grad_norm', 1.0))
-        optimizer.step()
-        scheduler.step()
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            clip_grad_norm_(student.parameters(), cfg.get('max_grad_norm', 1.0))
+            optimizer.step()
+            scheduler.step()
+            loss_value = loss.item()
         global_step += 1
-        running_loss += loss.item()
+        running_loss += loss_value
 
         if global_step % logging_steps == 0:
             _log(f"step={global_step}/{args.max_steps} "
@@ -391,11 +430,16 @@ def main():
         if should_checkpoint(global_step, mine_every, args.max_steps, bootstrap_step):
             dt = save_checkpoint(_student_raw, tokenizer, optimizer, scheduler,
                                  output_dir, global_step)
+            if maxp:
+                write_contract(output_dir / f"checkpoint-{global_step}",
+                               cfg['representation'])
             _log(f"saved checkpoint-{global_step} (checkpoint_write_time={dt:.1f}s)")
 
     # final weights next to the checkpoints, for eval
     raw = getattr(student, '_orig_mod', student)
     raw.save_pretrained(str(output_dir))
+    if maxp:
+        write_contract(output_dir, cfg['representation'])
     tokenizer.save_pretrained(str(output_dir))
 
     rounds = summarize_round_consumption(swap_records, global_step)

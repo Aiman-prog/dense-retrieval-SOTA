@@ -56,9 +56,10 @@ import run_fast_grass  # noqa: E402
 from async_fast_grass_cached_mcdp import (  # noqa: E402
     mine_batch_cached_mcdp, maintain_interval_cached_mcdp, QueryMCReservoir,
     MaintenanceDriver, maintenance_interval_mined_queries, build_async_cfg,
-    steps_per_epoch, canonicalize_positives, MiningDiagnostics,
+    steps_per_epoch, canonicalize_positives, MiningDiagnostics, grass_data_root,
 )
 from async_fast_grass_pilot import maybe_apply_manifest  # noqa: E402
+from ance_mining import query_shard  # noqa: E402
 from async_fast_grass_handoff import (  # noqa: E402
     publish_round, reap_orphans, prune_cache_states, resolve_cache_state,
     work_paths, round_paths, newest_valid_checkpoint, read_meta,
@@ -140,10 +141,19 @@ def mine_round(cache, student, tokenizer, train_items, qid_to_text, corpus_looku
     diag = MiningDiagnostics()
     doc_calls_mining = 0
     q_examples = q_batches = 0
-    n_batches = max(int(math.ceil(len(train_items) / batch_size)), 1)
 
-    _log(f"round {round_no}: mining {len(train_items):,} queries in {n_batches:,} "
-         f"batches @ step {source_checkpoint_step:,} | maintain every "
+    # A round covers ONE SHARD, not the whole mixture: the trainer consumes only
+    # `async_mine_every_steps` before a newer checkpoint starts the next round.
+    # Sliced BEFORE encoding, the opposite of ANCE, because here the query encode is the
+    # expensive stage (T dropout passes each); slicing afterwards would save nothing.
+    chunk_factor = max(int(cfg.get('mine_chunk_factor', 1)), 1)
+    shard, start, end = query_shard(train_items, round_no, chunk_factor)
+    round_items = train_items[start:end]
+    n_batches = max(int(math.ceil(len(round_items) / batch_size)), 1)
+
+    _log(f"round {round_no}: mining {len(round_items):,} queries in {n_batches:,} "
+         f"batches @ step {source_checkpoint_step:,} | shard {shard + 1}/{chunk_factor} "
+         f"[{start:,}:{end:,}) of {len(train_items):,} | maintain every "
          f"{driver.threshold:,} mined queries")
 
     t0 = time.perf_counter()
@@ -152,7 +162,7 @@ def mine_round(cache, student, tokenizer, train_items, qid_to_text, corpus_looku
 
     with open(out_path, 'w') as f_out:
         for b in range(n_batches):
-            batch = train_items[b * batch_size:(b + 1) * batch_size]
+            batch = round_items[b * batch_size:(b + 1) * batch_size]
             if not batch:
                 continue
             batch_qids = list(dict.fromkeys(it['query_id'] for it in batch))
@@ -314,7 +324,8 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     root = Path(args.async_dir)
 
-    train_items = run_fast_grass._load_train_items(debug=args.debug)
+    train_items = run_fast_grass._load_train_items(debug=args.debug,
+                                                   root=grass_data_root(config))
     if args.debug:
         train_items = train_items[:512]
     qid_to_text = {it['query_id']: it['query'] for it in train_items}

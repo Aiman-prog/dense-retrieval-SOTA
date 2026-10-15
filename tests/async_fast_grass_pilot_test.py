@@ -299,8 +299,17 @@ def _ctx(recipe):
     return ctx
 
 
-def test_explicit_max_age_steps_wins():
+def _firstp_config():
+    """The live config in P=1 mode. The age/budget schedule does not depend on the
+    passage count, and P=1 keeps build_async_cfg from requiring the real training
+    data manifest (the MaxP cfg path is covered by tests/maxp_test.py)."""
     config = load_config()
+    config['model']['max_passages'] = 1
+    return config
+
+
+def test_explicit_max_age_steps_wins():
+    config = _firstp_config()
     ctx = _ctx('async_fast_grass_pilot')
     cfg = build_async_cfg(config, ctx, steps_per_epoch=516)
     assert cfg['max_age_steps'] == 100, cfg['max_age_steps']
@@ -311,7 +320,7 @@ def test_explicit_max_age_steps_wins():
 
 def test_max_age_epochs_fallback_reproduces_head():
     """Recipes with no explicit key must behave exactly as before this change."""
-    config = load_config()
+    config = _firstp_config()
     ctx = _ctx('async_fast_grass')
     ctx['args'] = {k: v for k, v in ctx['args'].items() if k != 'max_age_steps'}
     cfg = build_async_cfg(config, ctx, steps_per_epoch=5157)
@@ -320,7 +329,7 @@ def test_max_age_epochs_fallback_reproduces_head():
 
 
 def test_missing_both_age_keys_raises():
-    config = load_config()
+    config = _firstp_config()
     ctx = _ctx('async_fast_grass')
     ctx['args'] = {k: v for k, v in ctx['args'].items()
                    if k not in ('max_age_steps', 'max_age_epochs')}
@@ -334,7 +343,7 @@ def test_missing_both_age_keys_raises():
 
 def test_pre_fix_schedule_is_rejected():
     """The exact production bug: max_age_steps == total_steps is a hard error."""
-    config = load_config()
+    config = _firstp_config()
     ctx = _ctx('async_fast_grass')
     ctx['args'] = {k: v for k, v in ctx['args'].items() if k != 'max_age_steps'}
     cfg = build_async_cfg(config, ctx, steps_per_epoch=5157)
@@ -401,12 +410,42 @@ def test_recipe_blocks_match_the_plan():
 
     full = t['async_fast_grass']
     assert full['max_age_steps'] == 1000
+    # a round mines ONE shard; the pilot INHERITS 5 so it stays a scale model of the full run
+    assert full['mine_chunk_factor'] == 5, full.get('mine_chunk_factor')
+    assert p['mine_chunk_factor'] == 5, "pilot must inherit the base chunk factor"
+    assert s['mine_chunk_factor'] == 2, s.get('mine_chunk_factor')
     assert 'pilot_gate_min_steps' not in full, \
         "the full run must have NO pilot gate, or its exit behaviour changes"
     # distinct model names => distinct model dirs => arms cannot collide
     names = {t[n]['model_name'] for n in
              ('async_fast_grass', 'async_fast_grass_pilot', 'async_fast_grass_smoke')}
     assert len(names) == 3, names
+
+
+def test_round_size_tracks_checkpoint_cadence():
+    """A round must cover about what the trainer consumes before the next checkpoint.
+
+    This is the defect the sharding change fixes, and the one that would silently return:
+    the pilot checkpointed every 100 steps while each round mined 516 steps' worth, so
+    ~81% of mining was discarded at full scale. `mine_chunk_factor` is only correct
+    RELATIVE to `async_mine_every_steps`, so pin the derived quantity, not the raw key.
+    """
+    config = load_config()
+    t = config['training']
+    # item counts as pinned by the recipe table in docs/lambda_pilot.md
+    items = {'async_fast_grass': 330_000,
+             'async_fast_grass_pilot': 33_000,
+             'async_fast_grass_smoke': 1_024}
+    for name, n in items.items():
+        r = t[name]
+        k = int(r['mine_chunk_factor'])
+        steps_per_round = (n // k) / int(r['batch_size'])
+        cadence = int(r['async_mine_every_steps'])
+        ratio = steps_per_round / cadence
+        assert 0.5 <= ratio <= 2.0, (
+            f"{name}: a round covers {steps_per_round:.0f} steps against a checkpoint "
+            f"cadence of {cadence} (ratio {ratio:.2f}). Mining far more than the trainer "
+            f"consumes is thrown away; far less starves the trainer.")
 
 
 # ---- lambda grid / probe ----------------------------------------------------
@@ -796,7 +835,7 @@ def test_manifest_is_required_by_pilot_and_smoke_recipes():
 
 def test_budget_collapses_without_a_manifest():
     """The exact arithmetic that failed: full mixture + smoke recipe -> zero budget."""
-    config = load_config()
+    config = _firstp_config()
     ctx = _ctx('async_fast_grass_smoke')
     cfg = build_async_cfg(config, ctx, steps_per_epoch=steps_per_epoch(330000, 64))
     errors, _w, info = validate_refresh_schedule(cfg)
@@ -828,14 +867,39 @@ def test_preflight_does_not_regenerate_data():
 
 
 def test_preflight_reports_missing_inputs():
+    """Resolve against a temp root, never the live one. This read the real processed
+    dir and asserted everything was absent, so it passed only where the data was
+    missing and failed the launcher gate on the cluster, where it is not (job 292541)."""
     import train_async_fast_grass as orch
-    corpus, qrels, missing = orch._preflight_paths()
-    # no processed data in the test environment -> everything is reported missing
-    assert isinstance(missing, list)
-    assert corpus.name == 'reasonir_corpus.jsonl' and qrels.name == 'train_qrels.txt'
-    for name in SOURCE_FILES_EXPECTED:
-        assert any(name in item for item in missing), \
-            f"preflight did not report missing mixture component {name}"
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        orig = orch.get_path
+        orch.get_path = lambda key, *a, **k: base / key
+        try:
+            corpus, qrels, missing = orch._preflight_paths()
+            assert corpus.name == 'reasonir_corpus.jsonl' and qrels.name == 'train_qrels.txt'
+            for name in SOURCE_FILES_EXPECTED:
+                assert any(name in item for item in missing), \
+                    f"preflight did not report missing mixture component {name}"
+            # ...and the other half of the contract: complete inputs report nothing.
+            # the root the live config implies: the validated training dir under
+            # MaxP (whose manifest is then an input), processed/ otherwise
+            maxp = load_config()['model'].get('max_passages', 1) > 1
+            root = base / ('training' if maxp else 'processed')
+            if maxp:
+                assert any('training_data_manifest.json' in m for m in missing)
+                root.mkdir(parents=True)
+                (root / 'training_data_manifest.json').touch()
+            mixture = root / 'training_mixture'
+            mixture.mkdir(parents=True)
+            for name in SOURCE_FILES_EXPECTED:
+                (mixture / name).touch()
+            corpus.touch()
+            qrels.touch()
+            assert orch._preflight_paths()[2] == [], \
+                "complete inputs must report nothing missing"
+        finally:
+            orch.get_path = orig
 
 
 # ---- eval routing + decision ------------------------------------------------
@@ -884,7 +948,7 @@ def test_eval_exits_nonzero_when_a_domain_fails():
     assert 'sys.exit(1)' in tail
     # ...and it must gate PUBLICATION too: a failed retry that still wrote
     # summary.json would overwrite a valid complete summary with a partial one.
-    assert src.index('if failed or absent:') < src.index('out.write_text'), \
+    assert src.index('if failed or absent:') < src.index('atomic_write(out)'), \
         "summary.json is written before the completeness gate"
 
 
@@ -1010,12 +1074,19 @@ def test_debug_mode_unchanged():
         "the validated mixture must remain alphabetically HQ-first in debug mode"
 
 
-def test_base_recipe_only_differs_by_max_age_steps():
-    """The full recipe must be HEAD plus the intentional correction, nothing else."""
+def test_base_recipe_only_differs_by_intended_corrections():
+    """The full recipe must be HEAD plus the intentional corrections, nothing else.
+
+    Two now, each a fix for a measured defect: `max_age_steps` (the derived value equalled
+    total_steps, so over-age refresh was never eligible) and `mine_chunk_factor` (a round
+    mined the whole mixture while the trainer consumed one checkpoint's worth, discarding
+    ~81% of mining at full scale). Plus the MaxP migration: a new model dir, so the
+    FirstP and chunked runs keep theirs, and the GradCache chunk sizes of its step.
+    """
     config = load_config()
     full = config['training']['async_fast_grass']
     expected = {
-        'model_name': 'async_fast_grass_mixed_bge_m3', 'uncertainty': 'cached_mcdp',
+        'model_name': 'async_fast_grass_maxp_mixed_bge_m3', 'uncertainty': 'cached_mcdp',
         'B_doc': 32000, 'T': 3, 'lambda_val': 0.5, 'mc_dropout_p': 0.3, 'm': 1,
         'selection_mode': 'topk', 'beta': 5.0, 'score_chunk_size': 8192,
         'rho_start': 0.50, 'rho_end': 0.25, 'max_age_epochs': 2,
@@ -1032,10 +1103,12 @@ def test_base_recipe_only_differs_by_max_age_steps():
     }
     for k, v in expected.items():
         assert full[k] == v, f"{k}: {full[k]!r} != {v!r}"
-    # exactly ONE new key relative to HEAD
+    # exactly the two intended corrections relative to HEAD, nothing else
     new = set(full) - set(expected) - {'base_model', 'learning_rate'}
-    assert new == {'max_age_steps'}, f"unexpected new keys in the full recipe: {new}"
+    intended = {'max_age_steps', 'mine_chunk_factor', 'gc_q_chunk_size', 'gc_p_chunk_size'}
+    assert new == intended, f"unexpected new keys in the full recipe: {new - intended}"
     assert full['max_age_steps'] == 1000
+    assert full['mine_chunk_factor'] == 5
     # R_doc knobs still absent, so its deferral stays visible
     for absent in ('R_fraction', 'R_size_factor', 'utility_remember_threshold', 'L'):
         assert absent not in full, absent
@@ -1126,7 +1199,8 @@ TESTS = [
     ("decision refuses partial results", test_decision_refuses_partial_results),
     ("run_suffix isolates dir + handoff root", test_run_suffix_isolates_model_dir_and_handoff_root),
     ("--debug behaviour unchanged", test_debug_mode_unchanged),
-    ("full recipe == HEAD + max_age_steps", test_base_recipe_only_differs_by_max_age_steps),
+    ("full recipe == HEAD + intended corrections", test_base_recipe_only_differs_by_intended_corrections),
+    ("round size tracks checkpoint cadence", test_round_size_tracks_checkpoint_cadence),
     ("src/ never imports scripts/", test_src_never_imports_scripts),
 ]
 

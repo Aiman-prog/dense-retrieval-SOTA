@@ -56,6 +56,7 @@ def get_path(key: str, model_name: str = None) -> Path:
         "base": base,
         "data": base / p_cfg['data_dir'],
         "processed": base / p_cfg['processed_dir'],
+        "training": base / p_cfg['training_data_dir'],
         "bright": base / p_cfg['bright_cache'],
         "models": base / p_cfg['models_dir'],
         "results": base / p_cfg['results_dir'],
@@ -113,6 +114,7 @@ def get_training_context(training_type: str = "inbatch") -> Dict[str, Any]:
         "normalize": model_cfg.get('normalize', False),
         "temperature": model_cfg.get('temperature', 0.02),
         "processed_dir": get_path("processed"),
+        "training_dir": get_path("training"),
         "output_dir": get_path("models", recipe['model_name']),
         "cache_dir": str(get_path("bright").resolve())
     }
@@ -197,7 +199,7 @@ def _encode_child_env():
 
 
 def encode_to_pickle(model_path, input_file, output_pkl, is_query, ctx, config,
-                     timeout=None):
+                     timeout=None, maxp=False, data_sha256=None):
     """Run Tevatron encode subprocess and save embeddings to a pickle file.
 
     The paper-fidelity ANCE arm branches here and nowhere else. Its encoder carries a
@@ -215,7 +217,22 @@ def encode_to_pickle(model_path, input_file, output_pkl, is_query, ctx, config,
     None keeps every non-ANCE caller -- GRASS, Fast-GRASS, both evaluators -- unchanged.
 
     Every spawn goes through ``_encode_child_env`` -- see there for why.
+
+    ``maxp=True`` (the BGE-ANCE miner, opt-in) spawns ``scripts/encode_maxp.py``
+    instead: documents become passage vectors under their parent ids, and the pickle
+    carries the representation contract. Every other caller keeps the Tevatron path.
     """
+    if maxp:
+        script = Path(__file__).resolve().parent.parent.parent / 'scripts' / 'encode_maxp.py'
+        cmd = [sys.executable, str(script), '--model_path', str(model_path),
+               '--input_file', str(input_file), '--output_pkl', str(output_pkl),
+               '--batch_size', str(ctx['args']['per_device_eval_batch_size'])]
+        if is_query:
+            cmd.append('--is_query')
+        if data_sha256:
+            cmd += ['--data_sha256', data_sha256]
+        subprocess.run(cmd, check=True, timeout=timeout, env=_encode_child_env())
+        return
     if (ctx.get('args') or {}).get('paper_fidelity'):
         script = Path(__file__).resolve().parent.parent.parent / 'scripts' / 'ance_paper.py'
         cmd = [
@@ -568,6 +585,37 @@ def model_run_tag(model_path) -> str:
     resolved = Path(model_path).resolve()
     digest = hashlib.sha1(str(resolved).encode('utf-8')).hexdigest()[:8]
     return f"{resolved.name}__{digest}"
+
+
+TRAINING_DATA_MANIFEST = "training_data_manifest.json"
+
+
+def require_training_data(training_dir) -> tuple:
+    """The validated training data every MaxP arm reads, or raise.
+
+    `scripts/prepare_training_data.py` writes the manifest only after the copy hashes
+    identically to its source and holds no chunk-row id. Counts alone are not enough
+    (the split mixture has the same files), so the manifest is required and every
+    file it lists must still be present at its recorded size. Returns
+    `(manifest, sha256 of the manifest)`; the digest goes into the representation
+    contract, so a run cannot silently move to different data.
+    """
+    path = Path(training_dir) / TRAINING_DATA_MANIFEST
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"{path} is missing: {training_dir} was not built by "
+            f"scripts/prepare_training_data.py, so it is not known to be the original "
+            f"unsplit training data.")
+    raw = path.read_bytes()
+    manifest = json.loads(raw)
+    if manifest.get('chunk_rows') != 0:
+        raise ValueError(f"{path} records {manifest.get('chunk_rows')} chunk-row id(s)")
+    for name, meta in manifest['files'].items():
+        f = Path(training_dir) / name
+        if not f.is_file() or f.stat().st_size != meta['bytes']:
+            raise ValueError(f"{f} is missing or no longer {meta['bytes']} bytes; the "
+                             f"training data changed after it was validated")
+    return manifest, hashlib.sha256(raw).hexdigest()
 
 
 def require_eval_files(label, files) -> None:

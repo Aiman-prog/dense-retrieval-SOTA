@@ -35,7 +35,9 @@
 
 # --- Environment Setup ---
 export DATA_BASE_DIR="/scratch/${USER}/dense-retrieval-SOTA"
-export PYTHONPATH="/home/${USER}/dense-retrieval-SOTA/src:${PYTHONPATH}"
+# The submitting checkout (sbatch --chdir), never a hardcoded one: an isolated
+# checkout must import its own src/, not the main tree's.
+export PYTHONPATH="$PWD/src:$PWD/scripts:${PYTHONPATH:-}"
 export APPTAINER_CACHEDIR=/scratch/${USER}/.apptainer
 
 # Offline Mode

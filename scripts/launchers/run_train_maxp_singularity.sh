@@ -14,7 +14,8 @@
 
 # --- Environment Setup ---
 export DATA_BASE_DIR="/scratch/${USER}/dense-retrieval-SOTA"
-export PYTHONPATH="/home/${USER}/dense-retrieval-SOTA/src:${PYTHONPATH}"
+# The submitting checkout (sbatch --chdir), never a hardcoded one.
+export PYTHONPATH="$PWD/src:$PWD/scripts:${PYTHONPATH:-}"
 export APPTAINER_CACHEDIR=/scratch/${USER}/.apptainer
 
 # Offline Mode
@@ -30,9 +31,14 @@ export OMP_NUM_THREADS=8
 CONTAINER="/scratch/${USER}/containers/pytorch_2.1.sif"
 
 # --- Experiment Knobs (override via env vars before sbatch) ---
-# MAXP_BENCHMARK=1   # timed steps + worst-case batch + one save; GO/NO-GO, writes nothing
-# MAXP_OVERWRITE=1   # discard an output dir built by a DIFFERENT config
+# MAXP_RECIPE=maxp             in-batch (default), 1 GPU
+# MAXP_RECIPE=crossbatch_maxp  cross-batch: submit with --gpus-per-task=2; runs torchrun x2
+# MAXP_BENCHMARK=1             end-to-end timed steps; GO/NO-GO, writes nothing
+# There is no overwrite: an occupied output dir is refused, never cleared.
 # Preflight is CPU-only, so it is a compute-p1 `sbatch --wrap`, not this launcher.
+MAXP_RECIPE="${MAXP_RECIPE:-maxp}"
+NPROC=1
+[ "$MAXP_RECIPE" = "crossbatch_maxp" ] && NPROC=2
 
 echo "🚀 Starting MaxP training${MAXP_BENCHMARK:+ (benchmark)}..."
 
@@ -40,9 +46,8 @@ singularity exec --nv \
     --bind /scratch/${USER}:/scratch/${USER} \
     --bind /home/${USER}:/home/${USER} \
     ${CONTAINER} \
-    python -u scripts/train_maxp.py \
-        ${MAXP_BENCHMARK:+--benchmark} \
-        ${MAXP_OVERWRITE:+--overwrite}
+    torchrun --standalone --nproc_per_node "$NPROC" scripts/train_maxp.py \
+        --recipe "$MAXP_RECIPE" ${MAXP_BENCHMARK:+--benchmark}
 
 EXIT_CODE=$?
 

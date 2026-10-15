@@ -32,16 +32,8 @@ os.environ["TRANSFORMERS_ATTENTION_IMPLEMENTATION"] = "eager"
 TRAINER_SUMMARY_NAME = "ance_trainer_summary.json"
 
 
-class NonFiniteOptimization(RuntimeError):
-    """Optimization diverged; stopping rather than saving poisoned weights.
-
-    One NaN backward pass poisons every parameter. The old loop stepped the optimizer
-    unconditionally, saved the diverged checkpoint, exited 0 and let the evaluation
-    score it. Deliberately stricter than `helpers.assert_training_succeeded`, which
-    only WARNS on a non-finite grad_norm: that is post-hoc analysis of HF-Trainer runs
-    where clipping already handled the value, while this loop is hand-rolled with no
-    GradScaler and nothing downstream would catch the step it would otherwise take.
-    """
+# Shared with every MaxP arm (maxp_training.train_step); re-exported under this name.
+from maxp_training import NonFiniteOptimization  # noqa: E402
 
 
 def optimization_step(model, optimizer, scheduler, loss, *, max_grad_norm, step):
@@ -223,7 +215,7 @@ def make_bge_collate(tokenizer, max_q, max_p):
         tokenizer=tokenizer)
 
 
-def make_dataloader(data_dir, tokenizer, ctx, batch_size, generator=None):
+def make_dataloader(data_dir, tokenizer, ctx, batch_size, generator=None, collate=None):
     paper = bool(ctx['args'].get('paper_fidelity'))
     # Lengths come from ctx, which has already applied any recipe override.
     ds = ANCEDataset(data_dir, ctx['args']['train_group_size'], paper_mode=paper)
@@ -231,7 +223,8 @@ def make_dataloader(data_dir, tokenizer, ctx, batch_size, generator=None):
     return DataLoader(ds, batch_size=batch_size, shuffle=True,
                       num_workers=ctx['args']['dataloader_num_workers'],
                       drop_last=True, generator=generator,
-                      collate_fn=make_collate(tokenizer, ctx['max_q'], ctx['max_p']))
+                      collate_fn=collate or make_collate(tokenizer, ctx['max_q'],
+                                                         ctx['max_p']))
 
 
 def write_trainer_summary(path, payload):
@@ -375,8 +368,38 @@ def main():
         # gradient_checkpointing_enable() on the wrapper hits Tevatron's own broken
         # override (see train_inbatch.py:37-46). The paper encoder wraps RobertaModel
         # the same way. This is the memory fix that makes batch 64 at q1024/p1024 fit.
-        (model.roberta if paper else model.encoder).gradient_checkpointing_enable()
+        # The BGE arm's GradCache step runs several passes per step: non-reentrant.
+        (model.roberta if paper else model.encoder).gradient_checkpointing_enable(
+            **({} if paper else
+               {'gradient_checkpointing_kwargs': {'use_reentrant': False}}))
         print("[Trainer] gradient checkpointing enabled", flush=True)
+
+    # BGE arm = MaxP: every document is up to model.max_passages passages and scores as
+    # its best one in the loss, through the step every MaxP arm shares. Rounds must
+    # have been mined under the same representation.
+    from ance_mining import is_maxp
+    maxp_collate = gc = contract = None
+    maxp = is_maxp(ctx)
+    if maxp:
+        from ance_mining import maxp_contract, training_data_root
+        from maxp_training import ClsEncoder, known_positives, make_grad_cache, write_contract
+        from maxp_training import make_collate as make_maxp_collate
+        from utils.helpers import load_config, _load_qrels, _load_corpus_lookup
+        from utils.maxp import check_contract
+        config = load_config()
+        contract = maxp_contract(ctx, config, args.model_name_or_path)
+        root = training_data_root(ctx)
+        records = (json.loads(line) for f in sorted(
+            (root / ctx['args']['mixture_dir']).glob("*.jsonl"))
+            for line in open(f) if line.strip())
+        known = known_positives(records, _load_qrels(root / ctx['args']['train_qrels_file']),
+                                _load_corpus_lookup(root / ctx['args']['corpus_file']))
+        maxp_collate = make_maxp_collate(tokenizer, ctx['max_q'], ctx['max_p'],
+                                         config['model']['max_passages'], known)
+        maxp_encoder = ClsEncoder(model.encoder).train()
+
+        def require_round_contract(meta, what):
+            check_contract(meta.get('representation'), contract, what)
 
     batch_size    = ctx['args']['batch_size']
     logging_steps = ctx['args']['logging_steps']       # also the round-poll interval
@@ -392,8 +415,10 @@ def main():
     # is NOT a refresh. `latest_committed_round` ignores it by design.
     print(f"[Trainer] Loading initial round from {work_root}", flush=True)
     initial_dir, initial_meta = read_round(work_root, INITIAL_ROUND, run_id=args.run_id)
+    if contract is not None:
+        require_round_contract(initial_meta, "round initial")
     train_dataloader = make_dataloader(initial_dir, tokenizer, ctx,
-                                       batch_size, generator)
+                                       batch_size, generator, maxp_collate)
     train_iter  = iter(train_dataloader)
     last_ann_no = 0
     rounds = [{'ann_no': INITIAL_ROUND, 'checkpoint': initial_meta.get('checkpoint'),
@@ -425,9 +450,14 @@ def main():
         warmup_steps = int(args.max_steps * ctx['args']['warmup_ratio'])
     scheduler, horizon = build_schedule(optimizer, warmup_steps, args.max_steps,
                                         args.scheduler_max_steps)
+    if maxp:
+        from maxp_training import train_step as maxp_train_step
+        gc = make_grad_cache(maxp_encoder, ctx['args']['gc_q_chunk_size'],
+                             ctx['args']['gc_p_chunk_size'], ctx['temperature'])
 
     log_path = output_dir / TRAINING_LOG_NAME
-    mixture_dir = Path(ctx['processed_dir']) / ctx['args']['mixture_dir']
+    from ance_mining import training_data_root
+    mixture_dir = training_data_root(ctx) / ctx['args']['mixture_dir']
     probe_triples = probe_triples_from_mixture(sorted(mixture_dir.glob("*.jsonl")))
 
     def _probe(phase, step):
@@ -489,11 +519,13 @@ def main():
                 # training to max_steps on stale negatives -- the P-ANCE-01 failure.
                 # read_round raises RoundError and the run ends here.
                 data_dir, meta = read_round(work_root, ann_no, run_id=args.run_id)
+                if contract is not None:
+                    require_round_contract(meta, f"round {ann_no}")
                 print(f"[Trainer] Step {global_step}: round {ann_no} "
                       f"(checkpoint-{meta.get('checkpoint_step')}) — swapping",
                       flush=True)
                 train_dataloader = make_dataloader(data_dir, tokenizer, ctx,
-                                                   batch_size, generator)
+                                                   batch_size, generator, maxp_collate)
                 train_iter  = iter(train_dataloader)
                 if ann_no > last_ann_no + 1:
                     # Latest-only consumption: rounds published while this one was
@@ -534,19 +566,19 @@ def main():
             q, pos, neg = ({k: v.cuda() for k, v in b.items()} for b in batch)
             with torch.autocast('cuda', dtype=torch.bfloat16, enabled=bf16):
                 loss = pairwise_nll(model(**q), model(**pos), model(**neg))
+            # Checks, backwards, clips, rejects a non-finite norm, then steps. The
+            # returned norm is the PRE-clipping one -- the diagnostic value.
+            loss_value, grad_norm = optimization_step(
+                model, optimizer, scheduler, loss,
+                max_grad_norm=ctx['args']['max_grad_norm'], step=global_step)
+        elif maxp:
+            # MaxP (maxp_training.train_step): GradCache runs its own backward, then
+            # the same finite checks, pre-clipping norm, clip and step.
+            loss_value, grad_norm = maxp_train_step(
+                gc, maxp_encoder, optimizer, scheduler, batch,
+                ctx['args']['max_grad_norm'], global_step)
         else:
-            # TrainCollator hands back the flat (query, passage) pair Tevatron's own
-            # trainer passes to DenseModel.forward. No reshaping: forward recovers the
-            # group width from p_reps.size(0) // q_reps.size(0).
-            q_batch, p_batch = ({k: v.cuda() for k, v in b.items()} for b in batch)
-            with torch.autocast('cuda', dtype=torch.bfloat16, enabled=bf16):
-                loss = model(query=q_batch, passage=p_batch).loss
-
-        # Checks, backwards, clips, rejects a non-finite norm, then steps. The
-        # returned norm is the PRE-clipping one -- the diagnostic value.
-        loss_value, grad_norm = optimization_step(
-            model, optimizer, scheduler, loss,
-            max_grad_norm=ctx['args']['max_grad_norm'], step=global_step)
+            raise RuntimeError("the BGE arm runs MaxP; set model.max_passages > 1")
         global_step += 1
         rounds[-1]['consumed_steps'] += 1
         interval_loss_sum += loss_value
@@ -582,6 +614,8 @@ def main():
             # encoder AND the projection head into one weight file.
             (model.save_pretrained if paper else model.save)(str(ckpt))
             tokenizer.save_pretrained(str(ckpt))
+            if contract is not None:
+                write_contract(ckpt, contract)
             torch.save(scheduler.state_dict(), ckpt / "scheduler.pt")
             # optimizer.pt LAST: is_valid_checkpoint() reads it as the validity flag.
             torch.save(optimizer.state_dict(), ckpt / "optimizer.pt")
@@ -604,6 +638,8 @@ def main():
 
     (model.save_pretrained if paper else model.save)(str(output_dir))
     tokenizer.save_pretrained(str(output_dir))
+    if contract is not None:
+        write_contract(output_dir, contract)
     print("[Trainer] Training complete.", flush=True)
 
 

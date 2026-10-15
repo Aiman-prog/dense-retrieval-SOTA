@@ -696,11 +696,14 @@ def test_ec_encode_paths_pooling_consistency():
     train/eval pooling-mismatch failure mode."""
     helpers_src = (project_root / 'src' / 'utils' / 'helpers.py').read_text()
     eval_src    = (project_root / 'src' / 'evaluation' / 'evaluate.py').read_text()
-    for nm, src in [("helpers.py", helpers_src), ("evaluate.py", eval_src)]:
-        assert "--pooling"   in src, f"{nm}: encode call missing --pooling"
-        assert "--normalize" in src, f"{nm}: encode call missing --normalize"
-        assert "config['model']" in src and "pooling" in src and "normalize" in src, \
-            f"{nm}: --pooling/--normalize not sourced from config['model']"
+    assert "--pooling" in helpers_src and "--normalize" in helpers_src, \
+        "helpers.py: encode call missing --pooling/--normalize"
+    assert "config['model']" in helpers_src, \
+        "helpers.py: --pooling/--normalize not sourced from config['model']"
+    # evaluate.py encodes MaxP passages in-process (utils.maxp.encode_ids: CLS + L2),
+    # and representation_contract refuses any config that is not cls + normalize.
+    assert "representation_contract(config" in eval_src and "encode_ids(" in eval_src, \
+        "evaluate.py: MaxP encode no longer bound to the config's representation"
     import yaml
     with open(project_root / 'config' / 'config.yaml') as f:
         cfg = yaml.safe_load(f)

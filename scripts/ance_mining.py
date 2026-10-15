@@ -18,12 +18,12 @@ so "fewer" is not representable. A query that cannot supply its negatives is a
 negative -- from a positive, from a duplicate, or from a uniform corpus draw -- would
 silently change the negative distribution ANCE exists to define.
 
-Candidate ids are NOT deduplicated at selection time. FirstP puts exactly one vector
-per corpus row in the index and the preprocessor canonicalizes docids, so a repeated
-id would mean the pickle and the corpus disagree -- a per-round
-`assert_corpus_ids_unique` says so once instead of every query quietly papering over
-it. The reference dedups (`run_ann_data_gen.py:381-383`) because MaxP puts several
-chunk vectors under one document id; that index does not exist here.
+Under FirstP (the MS MARCO paper arm) candidate ids are NOT deduplicated at selection
+time: one vector per corpus row, so a repeated id would mean the pickle and the corpus
+disagree, which a per-round `assert_corpus_ids_unique` says once. The BGE arm is MaxP:
+up to `model.max_passages` vectors per document under its parent id
+(`assert_passage_index`), ranked as documents by `utils.maxp.search_docs` before
+selection, as the reference dedups (`run_ann_data_gen.py:381-383`).
 
 **Sharding** follows `run_ann_data_gen.py:281-295`. Every training query is encoded,
 then the COMPLETE embedding array is sliced into `ann_chunk_factor` contiguous
@@ -53,6 +53,7 @@ project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root / 'src'))
 
 from utils.helpers import atomic_write, get_latest_marker_no  # noqa: E402
+from utils.maxp import search_docs, check_contract, representation_contract  # noqa: E402
 
 
 ROUND_META_NAME = "round_meta.json"
@@ -65,6 +66,51 @@ class RoundError(RuntimeError):
 
 class SamplingFailure(RuntimeError):
     """A query could not supply its ANN negatives without fabricating one."""
+
+
+# ---- MaxP (BGE arm) -----------------------------------------------------------
+
+def is_maxp(ctx):
+    """MaxP when the run's effective model config declares more than one passage per
+    document; the MS MARCO paper arm always stays FirstP."""
+    if (ctx.get('args') or {}).get('paper_fidelity'):
+        return False
+    return int((ctx.get('model_cfg') or {}).get('max_passages', 1)) > 1
+
+
+def training_data_root(ctx):
+    """Where this recipe's mixture and derived corpus/queries/qrels live: the
+    versioned training dir for the BRIGHT mixture, `processed/` for MS MARCO."""
+    from utils.helpers import get_path
+    if (ctx.get('args') or {}).get('setup_mode') == 'tevatron_msmarco':
+        return get_path("processed")
+    return get_path("training")
+
+
+def maxp_contract(ctx, config, model_dir):
+    """The representation this BGE run mines, trains and checks rounds against."""
+    from utils.helpers import require_training_data
+    _, data_sha = require_training_data(training_data_root(ctx))
+    return representation_contract(config, model_dir, data_sha256=data_sha)
+
+
+def assert_passage_index(parents, ordinals, max_passages):
+    """Every parent holds passages 0..k-1, contiguous, with 1 <= k <= max_passages.
+
+    The MaxP counterpart of `assert_corpus_ids_unique`, which stays for FirstP: a
+    gap, a repeat or an over-long run means the pickle and the corpus disagree.
+    """
+    expected, n_docs, prev = 0, 0, None
+    for parent, ordinal in zip(parents, ordinals):
+        if parent != prev:
+            if ordinal != 0:
+                raise RoundError(f"{parent}: first passage has ordinal {ordinal}, not 0")
+            n_docs, prev, expected = n_docs + 1, parent, 0
+        if ordinal != expected or ordinal >= max_passages:
+            raise RoundError(f"{parent}: passage ordinal {ordinal} out of order or "
+                             f"beyond max_passages={max_passages}")
+        expected += 1
+    return n_docs
 
 
 # ---- corpus / query preconditions -------------------------------------------
@@ -199,7 +245,7 @@ def build_round_records(mixture_files, mined_negs, corpus_lookup, *, n_negs,
 
 def mine_from_index(index, corpus_ids, q_data, mixture_files, qrels_dict, *,
                     n_negs, mining_depth, rng, ann_no=0, chunk_factor=1,
-                    search_batch_size=8192, phase=None):
+                    search_batch_size=8192, phase=None, max_passages=1):
     """Search the ANN index and select negatives for this round's query shard.
 
     Called by the orchestrator's initial mine and by the Inferencer's refresh mine,
@@ -218,10 +264,27 @@ def mine_from_index(index, corpus_ids, q_data, mixture_files, qrels_dict, *,
     if search_batch_size < 1:
         raise ValueError('search_batch_size must be positive')
     phase = phase or (lambda name: None)
-    blocks = [index.search(np.asarray(q_data[0][i:min(i + search_batch_size, end)],
-                                     dtype=np.float32), mining_depth)[1]
-              for i in range(start, end, search_batch_size)]
-    indices = np.concatenate(blocks) if blocks else np.empty((0, mining_depth), dtype=int)
+    if max_passages > 1:
+        # MaxP: the index holds passages under their parent ids. Rank PARENTS -- the
+        # mining depth counts distinct documents, before positives are filtered --
+        # through the same retrieval evaluation uses. Upstream samples passage hits
+        # first and dedups after (run_ann_data_gen.py:381-383), which lets a document
+        # with several retrieved passages be sampled more often; ranking parents
+        # first is the deliberate adaptation.
+        ranked = []
+        for i in range(start, end, search_batch_size):
+            block = np.asarray(q_data[0][i:min(i + search_batch_size, end)],
+                               dtype=np.float32)
+            ranked += search_docs(index, block, corpus_ids, [mining_depth] * len(block),
+                                  max_passages)
+        candidates_of = lambda row: list(ranked[row])
+    else:
+        blocks = [index.search(np.asarray(q_data[0][i:min(i + search_batch_size, end)],
+                                         dtype=np.float32), mining_depth)[1]
+                  for i in range(start, end, search_batch_size)]
+        indices = (np.concatenate(blocks) if blocks
+                   else np.empty((0, mining_depth), dtype=int))
+        candidates_of = lambda row: [corpus_ids[j] for j in indices[row] if j >= 0]
     row_of = {qid: i for i, qid in enumerate(shard_ids)}
     encoded = set(all_qids)
 
@@ -245,7 +308,7 @@ def mine_from_index(index, corpus_ids, q_data, mixture_files, qrels_dict, *,
         row = row_of.get(qid)
         if row is None:
             continue                      # another shard's query, mined another round
-        candidates = [corpus_ids[j] for j in indices[row] if j >= 0]
+        candidates = candidates_of(row)
         try:
             mined[qid] = select_ance_negatives(qid, candidates, positives,
                                                n_negs=n_negs, rng=rng)
@@ -282,9 +345,13 @@ def encode_and_mine(checkpoint, staging, *, corpus_file, query_file, mixture_fil
     # Paper: "recomputes the encodings of the entire corpus". The timeout is the stall
     # detector -- it raises, the process exits nonzero, and the orchestrator terminates
     # the trainer rather than letting it finish on stale negatives.
+    maxp = is_maxp(ctx)
+    contract = maxp_contract(ctx, config, checkpoint) if maxp else None
+    # passed only under MaxP, so the FirstP call is unchanged
+    extra = {'maxp': True, 'data_sha256': contract['data_sha256']} if maxp else {}
     phase("encode_corpus")
     encode_to_pickle(checkpoint, corpus_file, staging / "corpus.pkl", False, ctx,
-                     config, timeout=timeout)
+                     config, timeout=timeout, **extra)
     if hasattr(phase, 'merge_encoder'):
         phase.merge_encoder('corpus', staging / 'corpus.pkl')
     # ALL training queries are encoded before any shard is selected, which is the
@@ -292,7 +359,7 @@ def encode_and_mine(checkpoint, staging, *, corpus_file, query_file, mixture_fil
     # cheaper and is NOT the same computation.
     phase("encode_query")
     encode_to_pickle(checkpoint, query_file, staging / "query.pkl", True, ctx,
-                     config, timeout=timeout)
+                     config, timeout=timeout, **extra)
     if hasattr(phase, 'merge_encoder'):
         phase.merge_encoder('query', staging / 'query.pkl')
 
@@ -301,9 +368,18 @@ def encode_and_mine(checkpoint, staging, *, corpus_file, query_file, mixture_fil
         staging / 'corpus.pkl', backend=ctx['args'].get('faiss_backend', 'cpu'),
         batch_size=ctx['args'].get('faiss_batch_size', 8192))
     del corpus_embs                    # FAISS copied them; 27 GiB on MS MARCO
-    assert_corpus_ids_unique(corpus_ids)
     with open(staging / "query.pkl", 'rb') as handle:
         q_data = pickle.load(handle)
+    max_passages = 1
+    if maxp:
+        with open(staging / "corpus.pkl", 'rb') as handle:
+            _, _, ordinals, corpus_contract = pickle.load(handle)
+        check_contract(corpus_contract, contract, "corpus encode")
+        check_contract(q_data[3], contract, "query encode")
+        max_passages = contract['max_passages']
+        assert_passage_index(corpus_ids, ordinals, max_passages)
+    else:
+        assert_corpus_ids_unique(corpus_ids)
 
     # Paper Eq. 13: D^-_ANCE = ANN_{f(q,d)} \ D^+. Search and selection share one
     # phase because mine_from_index does both in one pass over the shard.
@@ -313,7 +389,10 @@ def encode_and_mine(checkpoint, staging, *, corpus_file, query_file, mixture_fil
         n_negs=ctx['args']['train_group_size'] - 1,
         mining_depth=ctx['args']['mining_depth'], rng=rng,
         ann_no=ann_no, chunk_factor=ctx['args']['ann_chunk_factor'],
-        search_batch_size=ctx['args'].get('faiss_batch_size', 8192), phase=phase)
+        search_batch_size=ctx['args'].get('faiss_batch_size', 8192), phase=phase,
+        max_passages=max_passages)
+    if maxp:
+        shard['representation'] = contract     # lands in every round's meta
     return index, corpus_ids, mined, failures, shard_qids, shard
 
 

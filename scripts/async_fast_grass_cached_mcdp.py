@@ -123,6 +123,20 @@ def canonicalize_positives(train_items, qrels_dict, corpus_lookup, log=print):
     return out, stats
 
 
+def grass_data_root(config):
+    """Where the GRASS training mixture and derived corpus/qrels live.
+
+    MaxP (model.max_passages > 1) reads the versioned training dir, whose manifest
+    proves the original unsplit data; P=1 keeps `processed/`.
+    """
+    from utils.helpers import get_path, require_training_data
+    if int(config['model'].get('max_passages', 1)) > 1:
+        root = get_path("training")
+        require_training_data(root)
+        return root
+    return get_path("processed")
+
+
 def build_async_cfg(config, ctx, steps_per_epoch):
     """Runtime cfg for the async miner/orchestrator from ``training.async_fast_grass``.
 
@@ -146,6 +160,15 @@ def build_async_cfg(config, ctx, steps_per_epoch):
     cfg['lambda_val'] = float(cfg['lambda_val'])
     cfg['query_max_len'] = config['model']['query_max_len']
     cfg['passage_max_len'] = config['model']['passage_max_len']
+    # MaxP: documents are up to max_passages passages in the cache, the miner and the
+    # trainer alike; every cache state and checkpoint carries the contract.
+    cfg['max_passages'] = int(config['model'].get('max_passages', 1))
+    if cfg['max_passages'] > 1:
+        from utils.helpers import require_training_data
+        from utils.maxp import representation_contract
+        _, data_sha = require_training_data(grass_data_root(config))
+        cfg['representation'] = representation_contract(config, ctx['base_model'],
+                                                        data_sha256=data_sha)
     cfg['steps_per_epoch'] = int(steps_per_epoch)
     cfg['total_steps'] = cfg['steps_per_epoch'] * cfg['num_epochs']
 

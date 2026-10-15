@@ -32,7 +32,7 @@ from utils.helpers import (
 )
 from data.preprocessor import MIXTURE_FILES, MSMARCO_ONLY_FILES, require_mixture_files
 from ance_mining import (build_round_records, encode_and_mine,
-                         latest_committed_round, publish_round)
+                         latest_committed_round, publish_round, training_data_root)
 
 # Upstream EvalDevQuery (run_ann_data_gen.py:397-425) searches to 100 and keeps the
 # first 50 distinct document ids per query.
@@ -147,7 +147,7 @@ def main():
     corpus_lookup = _load_corpus_lookup(args.corpus_file)
     corpus_sha    = _sha256(args.corpus_file)
 
-    mixture_dir = get_path("processed") / ctx['args']['mixture_dir']
+    mixture_dir = training_data_root(ctx) / ctx['args']['mixture_dir']
     expected = (MSMARCO_ONLY_FILES if ctx['args']['setup_mode'] == 'tevatron_msmarco'
                 else MIXTURE_FILES)
     mixture_files = list(require_mixture_files(mixture_dir, expected))

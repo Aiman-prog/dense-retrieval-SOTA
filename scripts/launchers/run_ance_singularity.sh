@@ -15,7 +15,9 @@
 # --- Environment Setup ---
 source scripts/launchers/runtime_provenance.sh || exit 1
 export DATA_BASE_DIR="/scratch/${USER}/dense-retrieval-SOTA"
-export PYTHONPATH="/home/${USER}/dense-retrieval-SOTA/src:${PYTHONPATH}"
+# The submitting checkout (sbatch --chdir), never a hardcoded one: an isolated
+# checkout must import its own src/, not the main tree's.
+export PYTHONPATH="$PWD/src:$PWD/scripts:${PYTHONPATH:-}"
 export APPTAINER_CACHEDIR=/scratch/${USER}/.apptainer
 
 # Offline Mode
@@ -30,6 +32,10 @@ export OMP_NUM_THREADS=16            # Matches cpus-per-task for FAISS speed
 # Container path
 CONTAINER="/scratch/${USER}/containers/pytorch_2.1.sif"
 
+# ANCE_INITIAL_ROUND=DIR   adopt a round 0 prepared with --prepare-initial DIR (one GPU,
+#                          outside this job); refused unless its identity, MaxP
+#                          representation included, matches this run.
+
 # --- Run ANCE Pipeline in Container ---
 echo "🚀 Starting Iterative ANCE Loop..."
 echo "📋 ANCE will iteratively: train → encode → mine → repeat"
@@ -38,7 +44,8 @@ singularity exec --nv \
     --bind /scratch/${USER}:/scratch/${USER} \
     --bind /home/${USER}:/home/${USER} \
     ${CONTAINER} \
-    python -u scripts/train_ance.py --recipe ance
+    python -u scripts/train_ance.py --recipe ance \
+        ${ANCE_INITIAL_ROUND:+--initial-round "$ANCE_INITIAL_ROUND"}
 
 EXIT_CODE=$?
 

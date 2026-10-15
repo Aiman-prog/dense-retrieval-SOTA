@@ -52,6 +52,7 @@ from async_fast_grass_cached_mcdp import (  # noqa: E402
     steps_per_epoch, QueryMCReservoir, MaintenanceDriver,
     maintain_interval_cached_mcdp, canonicalize_positives,
     UnresolvablePositivesError, validate_refresh_schedule, format_refresh_report,
+    grass_data_root,
 )
 from async_fast_grass_handoff import (  # noqa: E402
     initial_paths, write_ready_initial, latest_committed_round,
@@ -99,12 +100,16 @@ def _preflight_paths():
 
     Returns ``(corpus_file, qrels_file, missing)``.
     """
-    processed = get_path("processed")
+    from utils.helpers import TRAINING_DATA_MANIFEST
+    maxp = int(load_config()['model'].get('max_passages', 1)) > 1
+    processed = get_path("training" if maxp else "processed")
     corpus_file = processed / "reasonir_corpus.jsonl"
     qrels_file = processed / "train_qrels.txt"
     mixture_dir = processed / "training_mixture"
     required = (corpus_file, qrels_file, mixture_dir,
-                *(mixture_dir / name for name in SOURCE_FILES.values()))
+                *(mixture_dir / name for name in SOURCE_FILES.values()),
+                # MaxP reads only validated data: its manifest is an input too
+                *((processed / TRAINING_DATA_MANIFEST,) if maxp else ()))
     missing = [str(p) for p in required
                if not p.exists()]
     return corpus_file, qrels_file, missing
@@ -122,7 +127,14 @@ def _preflight(corpus_file, qrels_file, debug=False, manifest=None, config=None,
     """
     corpus_lookup = _load_corpus_lookup(corpus_file)
     qrels_dict = _load_qrels(qrels_file)
-    train_items = run_fast_grass._load_train_items(debug=debug)
+    maxp = int((config or load_config())['model'].get('max_passages', 1)) > 1
+    if maxp:
+        from utils.helpers import require_training_data
+        manifest_data, _ = require_training_data(Path(corpus_file).parent)
+        print(f"  training data    : {Path(corpus_file).parent} (validated manifest, "
+              f"{sum(manifest_data['mixture_rows'].values()):,} rows, 0 chunk ids)")
+    train_items = run_fast_grass._load_train_items(debug=debug,
+                                                   root=Path(corpus_file).parent)
 
     print("\n" + "=" * 66)
     print("  ASYNC FAST-GRASS — PREFLIGHT (no GPU, no regeneration)")
@@ -138,8 +150,23 @@ def _preflight(corpus_file, qrels_file, debug=False, manifest=None, config=None,
     # The stale pickle supplies the initial H docid sample. It is a hard failure deep
     # inside build_initial_round, so catch it here rather than after the job starts.
     stale_pkl = get_path("temp_grass") / "stale_index" / "corpus.pkl"
-    if stale_pkl.exists():
-        print(f"  stale index      : found ({stale_pkl})")
+    if maxp:
+        # MaxP draws the initial H sample from the corpus's own docid order (what the
+        # stale pickle's order was), so no stale vectors are needed or read.
+        print("  stale index      : not used (MaxP: docids from the corpus order)")
+    elif stale_pkl.exists():
+        # Existing is not enough: its docids must still be the CURRENT corpus's. An index
+        # built before the corpus was re-derived resolves in build_initial_round as a bare
+        # KeyError 4 minutes into a 2-GPU allocation (jobs 307950-2, a Jun 26 index against
+        # an Aug 26 corpus that re-keyed every msmarco docid).
+        if stale_pkl.stat().st_mtime < corpus_file.stat().st_mtime:
+            print(f"  ❌ stale index is OLDER than the corpus it indexes:\n"
+                  f"       index  {stale_pkl}\n"
+                  f"       corpus {corpus_file}\n"
+                  f"     Rebuild it: sbatch scripts/launchers/run_refresh_stale_index_singularity.sh")
+            print("=" * 66)
+            return 2
+        print(f"  stale index      : found, newer than corpus ({stale_pkl})")
     else:
         print(f"  ❌ stale index MISSING at {stale_pkl}. Async Fast-GRASS does not "
               f"rebuild the corpus index; build it once via run_fast_grass.py.")
@@ -371,7 +398,13 @@ def build_initial_round(root, cfg, ctx, config, train_items, qid_to_text,
         shutil.rmtree(stale, ignore_errors=True)
     p['training_data'].mkdir(parents=True, exist_ok=True)
 
-    stale_embs, c_ids = _load_stale_docids(cfg)
+    if int(cfg.get('max_passages', 1)) > 1:
+        # MaxP: the initial H sample comes from the corpus docid order, which is the
+        # order the stale pickle held; its vectors were placeholders that the MC
+        # states below replace, so no stale index is read.
+        stale_embs, c_ids = None, list(corpus_lookup)
+    else:
+        stale_embs, c_ids = _load_stale_docids(cfg)
     base_model = ctx['base_model']
     tokenizer = AutoTokenizer.from_pretrained(base_model)
     dtype = torch.bfloat16 if device.type == 'cuda' else torch.float32
@@ -387,7 +420,8 @@ def build_initial_round(root, cfg, ctx, config, train_items, qid_to_text,
          f"T={T} times with the base model")
     t0 = time.perf_counter()
     cache, init_stats = NegativeCache.init_cached_mcdp(
-        stale_embs, c_ids, corpus_lookup, model, tokenizer, cfg, device)
+        stale_embs, c_ids, corpus_lookup, model, tokenizer, cfg, device,
+        dim=model.config.hidden_size)
     t_init = time.perf_counter() - t0
     del stale_embs
     _log(f"initial cache built in {t_init:.1f}s | Z_mc="
@@ -508,8 +542,10 @@ def main():
 
     from data.preprocessor import require_derived_artifacts
     from data.preprocessor import MIXTURE_FILES, require_mixture_files
-    corpus_file, _query_file, qrels_file = require_derived_artifacts()
-    require_mixture_files(get_path("processed") / "training_mixture", MIXTURE_FILES)
+    data_root = grass_data_root(config)
+    maxp = int(config['model'].get('max_passages', 1)) > 1
+    corpus_file, _query_file, qrels_file = require_derived_artifacts(output_dir=data_root)
+    require_mixture_files(data_root / "training_mixture", MIXTURE_FILES)
 
     # Detect GPUs BEFORE restricting visibility; subprocesses get their own pin.
     n_gpus = torch.cuda.device_count()
@@ -531,6 +567,8 @@ def main():
     _log(f"{n_gpus} GPU(s) | trainer -> GPU {trainer_gpu} | miner -> GPU {miner_gpu}")
 
     root_name = "async_mining" + (f"_{args.run_suffix}" if args.run_suffix else "")
+    if maxp:
+        root_name += "_maxp"      # never a FirstP/chunked run's root, which stays as is
     root = get_path("temp_fast_grass") / root_name
     root.mkdir(parents=True, exist_ok=True)
 
@@ -540,6 +578,11 @@ def main():
     # resume numbering after them — mixing two runs' data in one model.
     existing = latest_committed_round(root)
     has_initial = initial_paths(root)['ready'].exists()
+    if maxp and (args.fresh or existing > 0 or has_initial):
+        # A MaxP run never wipes a previous run's handoff data: no --fresh.
+        raise RuntimeError(f"async handoff root {root} is occupied or --fresh was "
+                           f"given; a MaxP run never wipes a root. Move it aside or "
+                           f"use a new --run_suffix.")
     if existing > 0 or has_initial:
         if not args.fresh:
             raise RuntimeError(
@@ -553,7 +596,7 @@ def main():
         shutil.rmtree(root, ignore_errors=True)
         root.mkdir(parents=True, exist_ok=True)
 
-    train_items = run_fast_grass._load_train_items(debug=args.debug)
+    train_items = run_fast_grass._load_train_items(debug=args.debug, root=data_root)
     if args.debug:
         train_items = train_items[:512]
     qid_to_text = {it['query_id']: it['query'] for it in train_items}
@@ -588,6 +631,9 @@ def main():
             "(" + "; ".join(refresh_errors) + ")")
 
     output_model_dir = get_path("models") / ctx['args']['model_name']
+    if maxp and output_model_dir.is_dir() and any(output_model_dir.iterdir()):
+        raise RuntimeError(f"{output_model_dir} is not empty; a MaxP run never clears "
+                           f"a directory. Move it aside or use a new --run_suffix.")
     output_model_dir.mkdir(parents=True, exist_ok=True)
     # A leftover high-numbered checkpoint from a previous run would permanently
     # shadow every new save and pin the miner to dead weights (train_ance.py:185).

@@ -147,8 +147,10 @@ def collect_results(model_path, domains, config, *, attempt=None, result_dir=Non
             invalid.append(domain)
             continue
 
-        # The FirstP control evaluate.py scores from each document's passage 0.
-        firstp = {f'firstp_{m}': d.get('firstp_metrics', {}).get(m) for m in metrics}
+        # The controls evaluate.py scores from the same vectors: FirstP (passage 0)
+        # and centered MaxP. Never the primary score.
+        firstp = {f'{v}_{m}': (d.get(f'{v}_metrics') or {}).get(m)
+                  for v in ('firstp', 'centered') for m in metrics}
         rows.append({'domain': domain, 'num_queries': _num_queries(domain), **metrics,
                      **firstp})
     return rows, invalid
@@ -387,10 +389,18 @@ def main():
     print("-" * 72)
     print(f"  {'MACRO':<22} {_fmt(macro_recall):>9} {_fmt(macro):>9} "
           f"{_fmt(macro_mrr):>9}   over {len(rows)} domains")
-    firstp_macro = {f'macro_firstp_{m}': _macro(f'firstp_{m}')
-                    for m in ('recall_1000', 'ndcg_cut_10', 'recip_rank')}
-    print(f"  {'FirstP control':<22} "
-          + " ".join(f"{_fmt(v):>9}" for v in firstp_macro.values()))
+    names = ('recall_1000', 'ndcg_cut_10', 'recip_rank')
+    firstp_macro = {f'macro_{v}_{m}': _macro(f'{v}_{m}')
+                    for v in ('firstp', 'centered') for m in names}
+    # Pony stays in the primary 12-domain macro; this row is the labelled sensitivity.
+    rest = [r for r in rows if r['domain'] != 'pony']
+    firstp_macro.update({f'macro_no_pony_{m}': (sum(r[m] for r in rest) / len(rest)
+                                                if rest and len(rest) < len(rows) else None)
+                         for m in names})
+    for label, key in (('FirstP control', 'firstp'), ('centered MaxP', 'centered'),
+                       ('11 domains, no pony', 'no_pony')):
+        print(f"  {label:<22} "
+              + " ".join(f"{_fmt(firstp_macro[f'macro_{key}_{m}']):>9}" for m in names))
     print(f"  PRIMARY ({primary_metric}): {_fmt(primary_score)}")
     print("=" * 72)
 

@@ -46,7 +46,8 @@ class TrecEvalWrapper:
 
     def evaluate(self, 
                  run_results: Dict[str, Dict[str, float]], 
-                 metrics={"ndcg_cut_10", "recall_1000", "recip_rank"}) -> Dict[str, float]:
+                 metrics={"ndcg_cut_10", "recall_1000", "recip_rank"},
+                 per_query: bool = False):
         """
         Calculate metrics for the given run results.
         
@@ -55,7 +56,8 @@ class TrecEvalWrapper:
             metrics: Set of metrics to calculate.
             
         Returns:
-            Dictionary with average scores (e.g., {'ndcg_cut_10': 0.45})
+            Dictionary with average scores (e.g., {'ndcg_cut_10': 0.45}); with
+            ``per_query``, also ``{qid: {metric: value}}`` for every judged query.
 
         The average is taken over the JUDGED queries -- every query in the qrels --
         not over the rows pytrec_eval returned. pytrec_eval emits a zero row for a
@@ -88,4 +90,7 @@ class TrecEvalWrapper:
                       for qid in self.qrels]
             final_metrics[metric] = sum(values) / len(values) if values else 0.0
 
+        if per_query:
+            return final_metrics, {qid: {m: results_per_query.get(qid, {}).get(m, 0.0)
+                                         for m in metrics} for qid in self.qrels}
         return final_metrics

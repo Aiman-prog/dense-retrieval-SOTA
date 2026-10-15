@@ -36,7 +36,7 @@ def linear_decay(start, end, progress):
     return start + (end - start) * p
 
 
-def score_cached_mcdp(q_mc, Z_mc, lambda_val, chunk_size=None):
+def score_cached_mcdp(q_mc, Z_mc, lambda_val, chunk_size=None, passage_mask=None):
     """Cached-MCDP score of query MC states against a bank of document MC states.
 
     ``q_mc`` ``[T, B_query, D]``, ``Z_mc`` ``[T, B_doc, D]``. For pass ``t``::
@@ -59,16 +59,26 @@ def score_cached_mcdp(q_mc, Z_mc, lambda_val, chunk_size=None):
     Free function so ``NegativeCache.score_cached_mcdp`` (over ``H``) and
     recertification (over a candidate bank) share one implementation, and so tests
     can score raw synthetic tensors without building a cache.
+
+    **MaxP.** A 4-D ``Z_mc [T, B_doc, P, D]`` holds up to ``P`` passage states per
+    document, ``passage_mask [B_doc, P]`` marking the valid ones. Then, per pass ``t``,
+    ``s_t(q, d) = max over valid p of q_mc[t] . Z_mc[t, d, p]`` -- the document's
+    MaxP score under that dropout sample -- and ``s_hat``/``sigma`` are the moments of
+    THOSE over ``t``. Not MaxP over mean states: the max of a mean is not the mean of
+    per-pass maxima, and sigma would no longer be the uncertainty of the score used.
     """
-    if q_mc.dim() != 3 or Z_mc.dim() != 3:
-        raise ValueError(f"expected [T,B,D] tensors, got q_mc{tuple(q_mc.shape)} "
-                         f"Z_mc{tuple(Z_mc.shape)}")
+    maxp = Z_mc.dim() == 4
+    if q_mc.dim() != 3 or Z_mc.dim() not in (3, 4):
+        raise ValueError(f"expected q_mc [T,B,D] and Z_mc [T,B,(P,)D], got "
+                         f"q_mc{tuple(q_mc.shape)} Z_mc{tuple(Z_mc.shape)}")
+    if maxp and (passage_mask is None or tuple(passage_mask.shape) != tuple(Z_mc.shape[1:3])):
+        raise ValueError(f"a 4-D Z_mc{tuple(Z_mc.shape)} needs passage_mask [B_doc, P]")
     if q_mc.shape[0] != Z_mc.shape[0]:
         raise ValueError(f"T mismatch: q_mc has {q_mc.shape[0]} passes, Z_mc has "
                          f"{Z_mc.shape[0]}")
-    if q_mc.shape[2] != Z_mc.shape[2]:
+    if q_mc.shape[2] != Z_mc.shape[-1]:
         raise ValueError(f"dim mismatch: q_mc D={q_mc.shape[2]}, "
-                         f"Z_mc D={Z_mc.shape[2]}")
+                         f"Z_mc D={Z_mc.shape[-1]}")
 
     T, B_query, _ = q_mc.shape
     B_doc = Z_mc.shape[1]
@@ -81,12 +91,20 @@ def score_cached_mcdp(q_mc, Z_mc, lambda_val, chunk_size=None):
     with torch.no_grad():
         for start in range(0, B_doc, step):
             end = min(start + step, B_doc)
-            Zc = Z_mc[:, start:end, :]
+            Zc = Z_mc[:, start:end]
             # [T, B_query, C] — exact two-pass mean/std per chunk (T is small),
             # numerically safer than accumulating sum / sum-of-squares.
-            S = torch.stack(
-                [(q_mc[t].to(Zc.dtype) @ Zc[t].t()).float() for t in range(T)],
-                dim=0)
+            if maxp:
+                C, P = Zc.shape[1], Zc.shape[2]
+                invalid = ~passage_mask[start:end].unsqueeze(0)          # [1, C, P]
+                S = torch.stack(
+                    [(q_mc[t].to(Zc.dtype) @ Zc[t].reshape(C * P, -1).t()).float()
+                     .reshape(B_query, C, P).masked_fill(invalid, float('-inf'))
+                     .amax(dim=-1) for t in range(T)], dim=0)
+            else:
+                S = torch.stack(
+                    [(q_mc[t].to(Zc.dtype) @ Zc[t].t()).float() for t in range(T)],
+                    dim=0)
             s_hat[:, start:end] = S.mean(dim=0)
             sigma[:, start:end] = S.std(dim=0, unbiased=False)
 
@@ -215,6 +233,8 @@ class NegativeCache:
         # EMA/sequential estimator; set by init_cached_mcdp / attach_mc_states.
         self.Z_mc = None
         self.T = None
+        # MaxP: [B_doc, P] valid-passage mask for a 4-D Z_mc; None in P=1 mode.
+        self.passage_mask = None
 
     @classmethod
     def init_cached_mcdp(cls, stale_embs, c_ids, corpus_lookup, model, tokenizer,
@@ -237,11 +257,8 @@ class NegativeCache:
         cache = cls.init_uniform(stale_embs, c_ids, cfg, device, dim=dim, dtype=dtype)
         T = int(cfg['T'])
         texts = [corpus_lookup[d] for d in cache.docids]
-        Z_mc, enc = encode_mc(model, tokenizer, texts, T, device,
-                              cfg.get('passage_max_len', 512),
-                              cache._miner_mc_batch_size(cfg),
-                              dtype=cache.Z_student.dtype)
-        cache.attach_mc_states(Z_mc)
+        Z_mc, mask, enc = cache._encode_mc_docs(texts, model, tokenizer, T, cfg, device)
+        cache.attach_mc_states(Z_mc, mask)
         cache.last_refreshed_step[:] = 0
         stats = {
             'init_docs': len(texts),
@@ -252,14 +269,22 @@ class NegativeCache:
         }
         return cache, stats
 
-    def attach_mc_states(self, Z_mc):
+    def attach_mc_states(self, Z_mc, passage_mask=None):
         """Install ``Z_mc`` and re-point ``Z_student`` at ``Z_mean = mean_t(Z_mc)``.
 
-        Used by ``init_cached_mcdp`` and by ``load_state`` on restart.
+        Used by ``init_cached_mcdp`` and by ``load_state`` on restart. A 4-D
+        ``[T, B_doc, P, D]`` (MaxP) needs its ``passage_mask [B_doc, P]``; a 3-D one
+        is P=1 mode and takes none.
         """
-        if Z_mc.dim() != 3 or Z_mc.shape[1] != self.B_doc:
+        if Z_mc.dim() not in (3, 4) or Z_mc.shape[1] != self.B_doc:
             raise ValueError(
-                f"Z_mc must be [T, B_doc={self.B_doc}, D], got {tuple(Z_mc.shape)}")
+                f"Z_mc must be [T, B_doc={self.B_doc}, (P,) D], got {tuple(Z_mc.shape)}")
+        if (Z_mc.dim() == 4) != (passage_mask is not None):
+            raise ValueError("a 4-D (MaxP) Z_mc needs passage_mask; a 3-D one takes none")
+        if passage_mask is not None and tuple(passage_mask.shape) != tuple(Z_mc.shape[1:3]):
+            raise ValueError(f"passage_mask {tuple(passage_mask.shape)} does not match "
+                             f"Z_mc {tuple(Z_mc.shape)}")
+        self.passage_mask = passage_mask
         self.Z_mc = Z_mc.detach()
         self.Z_mc.requires_grad_(False)
         self.T = int(Z_mc.shape[0])
@@ -268,6 +293,26 @@ class NegativeCache:
         self.Z_student = Z_mean
         self.Z_student.requires_grad_(False)
         self.Z_teacher = None      # cached-MCDP is teacher-free
+
+    def _encode_mc_docs(self, texts, model, tokenizer, T, cfg, device):
+        """``T`` dropout passes over ``texts`` -> ``(Z, passage_mask, stats)``.
+
+        ``cfg['max_passages'] > 1`` (MaxP) gives ``[T, n, P, D]`` and a ``[n, P]`` mask
+        through ``utils.maxp.encode_docs_maxp``; otherwise ``[T, n, D]`` and no mask,
+        exactly as before.
+        """
+        P = int(cfg.get('max_passages', 1))
+        dtype = self.Z_mc.dtype if self.Z_mc is not None else self.Z_student.dtype
+        if P > 1:
+            from utils.maxp import encode_docs_maxp
+            return encode_docs_maxp(model, tokenizer, texts,
+                                    max_len=cfg.get('passage_max_len', 512),
+                                    max_passages=P, batch_size=self._miner_mc_batch_size(cfg),
+                                    device=device, T=T, dtype=dtype)
+        Z, enc = encode_mc(model, tokenizer, texts, T, device,
+                           cfg.get('passage_max_len', 512),
+                           self._miner_mc_batch_size(cfg), dtype=dtype)
+        return Z, None, enc
 
     @property
     def is_cached_mcdp(self):
@@ -302,11 +347,18 @@ class NegativeCache:
         sample = np.sort(rng.choice(n_corpus, size=B_doc, replace=False))
         docids = [c_ids[i] for i in sample]
 
-        embs = stale_embs[sample]
-        if not torch.is_tensor(embs):
-            embs = torch.as_tensor(np.asarray(embs))
-        embs = torch.nn.functional.normalize(embs.to(device).float(), dim=-1)
-        embs = embs.to(dtype=dtype)
+        if stale_embs is None:
+            # Cached-MCDP from the corpus docid order alone: attach_mc_states replaces
+            # these placeholder states with real dropout passes before any use.
+            if dim is None:
+                raise ValueError("init_uniform without stale_embs needs dim")
+            embs = torch.zeros(B_doc, int(dim), device=device, dtype=dtype)
+        else:
+            embs = stale_embs[sample]
+            if not torch.is_tensor(embs):
+                embs = torch.as_tensor(np.asarray(embs))
+            embs = torch.nn.functional.normalize(embs.to(device).float(), dim=-1)
+            embs = embs.to(dtype=dtype)
         if dim is None:
             dim = embs.shape[1]
         with_teacher = cfg.get('uncertainty', 'ema') == 'ema'
@@ -343,7 +395,12 @@ class NegativeCache:
         Needs no teacher, so it works regardless of estimator.
         """
         with torch.no_grad():
-            s = q_student @ self.Z_student.t()
+            if self.Z_student.dim() == 3:              # MaxP mean states [B, P, D]
+                B, P = self.Z_student.shape[:2]
+                s = (q_student @ self.Z_student.reshape(B * P, -1).t()).reshape(
+                    -1, B, P).masked_fill(~self.passage_mask, float('-inf')).amax(-1)
+            else:
+                s = q_student @ self.Z_student.t()
         self.cache_score_pairs += int(q_student.shape[0]) * self.B_doc
         return s
 
@@ -376,7 +433,8 @@ class NegativeCache:
                 "score_cached_mcdp() requires a cached-MCDP cache; call "
                 "init_cached_mcdp()/attach_mc_states() first")
         g, s_hat, sigma = score_cached_mcdp(q_mc, self.Z_mc, lambda_val,
-                                            chunk_size=chunk_size)
+                                            chunk_size=chunk_size,
+                                            passage_mask=self.passage_mask)
         self.cache_score_pairs += int(q_mc.shape[1]) * self.B_doc
         return g, s_hat, sigma
 
@@ -790,11 +848,13 @@ class NegativeCache:
             if len(refresh_slots):
                 slot_list = refresh_slots.tolist()
                 texts = [corpus_lookup[self.docids[s]] for s in slot_list]
-                Zr, enc = encode_mc(student, tokenizer, texts, T, device,
-                                    cfg.get('passage_max_len', 512),
-                                    self._miner_mc_batch_size(cfg),
-                                    dtype=self.Z_mc.dtype)
-                self.Z_mc[:, refresh_slots, :] = Zr
+                Zr, mr, enc = self._encode_mc_docs(texts, student, tokenizer, T, cfg,
+                                                   device)
+                # states and mask move together: every passage slot is rewritten,
+                # so a document that got shorter leaves no stale passage behind
+                self.Z_mc[:, refresh_slots] = Zr
+                if mr is not None:
+                    self.passage_mask[refresh_slots] = mr
                 # in place, so the Z_student -> Z_mean alias stays valid
                 self.Z_student[refresh_slots] = Zr.float().mean(dim=0).to(
                     self.Z_student.dtype)
@@ -850,9 +910,8 @@ class NegativeCache:
             return out
 
         cand_texts = [corpus_lookup[d] for d in cand]
-        Zc, enc = encode_mc(student, tokenizer, cand_texts, T, device,
-                            cfg.get('passage_max_len', 512),
-                            self._miner_mc_batch_size(cfg), dtype=self.Z_mc.dtype)
+        Zc, mc, enc = self._encode_mc_docs(cand_texts, student, tokenizer, T, cfg,
+                                           device)
         out['num_recertified_candidates'] = len(cand)
         out['maintenance_docs_encoded'] = len(cand)
         out['maintenance_examples_encoded'] = enc['examples_encoded']
@@ -861,7 +920,8 @@ class NegativeCache:
         # recertify with the SAME mean+uncertainty score as ordinary mining.
         # Uses the free function directly so recertification does NOT inflate
         # cache_score_pairs — it is a maintenance cost, not a mining cost.
-        g, _s_hat, _sigma = score_cached_mcdp(q_res, Zc, cfg['lambda_val'])
+        g, _s_hat, _sigma = score_cached_mcdp(q_res, Zc, cfg['lambda_val'],
+                                              passage_mask=mc)
         for r, qid in enumerate(res_qids):
             pos = qrels_dict.get(qid)
             if not pos:
@@ -881,11 +941,13 @@ class NegativeCache:
 
         for slot, ci in zip(slots.tolist(), chosen):
             # R_doc deferred: no registry.admit(evicted, ...) here.
-            self.Z_mc[:, slot, :] = Zc[:, ci, :]     # reuse — no second encode
+            self.Z_mc[:, slot] = Zc[:, ci]           # reuse — no second encode
+            if mc is not None:                       # every passage slot rewritten,
+                self.passage_mask[slot] = mc[ci]     # with the docid, in one commit
             # _insert writes Z_student[slot] (== Z_mean[slot]) in place and resets
             # the new slot's utility/history with timestamp = step.
             self._insert(slot, cand[ci],
-                         Zc[:, ci, :].float().mean(dim=0).to(self.Z_student.dtype),
+                         Zc[:, ci].float().mean(dim=0).to(self.Z_student.dtype),
                          None, step)
 
         out['num_replace'] = len(chosen)
@@ -943,6 +1005,12 @@ class NegativeCache:
             'numpy_bit_generator_state': self.rng.bit_generator.state,
             'torch_generator_state': self._gen.get_state().clone(),
             'registry_deferred': True,   # R_doc not implemented in Phase 1
+            # MaxP: P and the valid-passage mask (None / 1 in P=1 mode), plus the
+            # representation contract the states were encoded under.
+            'max_passages': int(self.Z_mc.shape[2]) if self.Z_mc.dim() == 4 else 1,
+            'passage_mask': (None if self.passage_mask is None
+                             else self.passage_mask.detach().to('cpu')),
+            'representation': self.cfg.get('representation'),
         }
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -972,6 +1040,8 @@ class NegativeCache:
     @classmethod
     def load_state(cls, path, cfg, device, *, expect_T=None, expect_B_doc=None,
                    expect_dim=None, expect_schema=None, mean_atol=1e-2):
+        # P and the representation are always checked against cfg: a MaxP run must
+        # never resume from a legacy (P=1) cache, nor the reverse.
         """Load a persisted cached-MCDP cache, validating BEFORE any device move.
 
         ``torch.load`` runs with ``map_location='cpu'`` and EVERY check below runs on
@@ -1012,13 +1082,27 @@ class NegativeCache:
                 raise ValueError(f"cache state {name} mismatch: file has {value}, "
                                  f"expected {expected}")
 
+        P, want_P = int(state.get('max_passages', 1)), int(cfg.get('max_passages', 1))
+        if P != want_P:
+            raise ValueError(f"cache state holds {P} passage(s) per document, this run "
+                             f"uses {want_P}: a cache from another representation is "
+                             f"never reused")
+        if cfg.get('representation') is not None:
+            from utils.maxp import check_contract
+            check_contract(state.get('representation'), cfg['representation'],
+                           f"cache state {path}")
+        mask = state.get('passage_mask')
+        lead = (B_doc, P) if P > 1 else (B_doc,)
         Z_mc, Z_mean = state['Z_mc'], state['Z_mean']
-        if tuple(Z_mc.shape) != (T, B_doc, dim):
+        if tuple(Z_mc.shape) != (T, *lead, dim):
             raise ValueError(f"cache state Z_mc shape {tuple(Z_mc.shape)} does not "
-                             f"match T={T}, B_doc={B_doc}, dim={dim}")
-        if tuple(Z_mean.shape) != (B_doc, dim):
+                             f"match T={T}, B_doc={B_doc}, P={P}, dim={dim}")
+        if tuple(Z_mean.shape) != (*lead, dim):
             raise ValueError(f"cache state Z_mean shape {tuple(Z_mean.shape)} does "
-                             f"not match B_doc={B_doc}, dim={dim}")
+                             f"not match B_doc={B_doc}, P={P}, dim={dim}")
+        if (P > 1) != (mask is not None) or (
+                mask is not None and tuple(mask.shape) != (B_doc, P)):
+            raise ValueError(f"cache state passage_mask does not match P={P}")
         if Z_mean.dtype != Z_mc.dtype:
             raise ValueError(f"cache state dtype mismatch: Z_mc {Z_mc.dtype} vs "
                              f"Z_mean {Z_mean.dtype}")
@@ -1057,7 +1141,8 @@ class NegativeCache:
         rng = np.random.default_rng()
         rng.bit_generator.state = state['numpy_bit_generator_state']
         cache = cls(docids, recomputed.to(device), None, cfg, device, dim, rng)
-        cache.attach_mc_states(Z_mc.to(device))
+        cache.attach_mc_states(Z_mc.to(device),
+                               None if mask is None else mask.to(device))
         for name, _dtype in cls._STATE_META_TENSORS:
             setattr(cache, name, state[name].to(device))
         cache.cache_score_pairs = int(state.get('cache_score_pairs', 0))

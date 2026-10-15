@@ -441,6 +441,9 @@ def run_grass_pipeline(stale_idx, c_ids, corpus_lookup, qrels_dict,
 
 def main():
     """Standalone entry point. Sets up shared state, then runs Algorithm 1."""
+    if int(load_config()['model'].get('max_passages', 1)) > 1:
+        raise SystemExit("naive GRASS is not migrated to MaxP "
+                         "(model.max_passages > 1); only async Fast-GRASS is.")
     parser = argparse.ArgumentParser()
     parser.add_argument('--recipe',       default='grass')
     parser.add_argument('--uncertainty',  choices=['mc_dropout', 'ema'],
