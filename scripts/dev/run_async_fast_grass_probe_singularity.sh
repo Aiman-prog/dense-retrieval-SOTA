@@ -47,12 +47,21 @@ PROBE_LAMBDA_GRID="${PROBE_LAMBDA_GRID:-0,0.1,0.2,0.3,0.5,0.7,1.0}"
 PROBE_SEEDS="${PROBE_SEEDS:-3}"
 PROBE_MAX_QUERIES="${PROBE_MAX_QUERIES:-2048}"
 PROBE_QUERY_BATCH="${PROBE_QUERY_BATCH:-128}"
+# SIGMA FORENSICS (post-hoc). Blank keeps the original zero-staleness dosage regime.
+# Set all three to measure sigma as the RUN actually saw it: a trained checkpoint
+# scoring against the bank that run mined against, plus a freshly rebuilt bank for
+# comparison. See CONSOLIDATION_STATUS / limitations for why that distinction matters.
+PROBE_CHECKPOINT="${PROBE_CHECKPOINT:-}"
+PROBE_CACHE_STATE="${PROBE_CACHE_STATE:-}"
+PROBE_COMPARE_FRESH="${PROBE_COMPARE_FRESH:-}"
+PROBE_SPREAD_SAMPLE="${PROBE_SPREAD_SAMPLE:-}"
 
 mkdir -p logs
 
 echo "🔬 Cached-MCDP lambda dosage probe"
 echo "   recipe=${ASYNC_FG_RECIPE} | manifest=${ASYNC_FG_MANIFEST:-<full mixture>}"
 echo "   grid=${PROBE_LAMBDA_GRID} | seeds=${PROBE_SEEDS} | queries=${PROBE_MAX_QUERIES}"
+echo "   checkpoint=${PROBE_CHECKPOINT:-<base>} | cache=${PROBE_CACHE_STATE:-<fresh>} | compare_fresh=${PROBE_COMPARE_FRESH:-off}"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader || true
 
 # CPU smoke of the probe itself before touching the GPU
@@ -77,7 +86,11 @@ singularity exec --nv \
         --lambda_grid "${PROBE_LAMBDA_GRID}" \
         --seeds "${PROBE_SEEDS}" \
         --max_queries "${PROBE_MAX_QUERIES}" \
-        --query_batch_size "${PROBE_QUERY_BATCH}"
+        --query_batch_size "${PROBE_QUERY_BATCH}" \
+        ${PROBE_CHECKPOINT:+--checkpoint $PROBE_CHECKPOINT} \
+        ${PROBE_CACHE_STATE:+--cache_state $PROBE_CACHE_STATE} \
+        ${PROBE_COMPARE_FRESH:+--compare_fresh} \
+        ${PROBE_SPREAD_SAMPLE:+--spread_sample}
 RUN_EXIT=$?
 
 echo "=========================================="

@@ -11,11 +11,11 @@ differences between them are attributable to the uncertainty term alone rather t
 different dropout sample. Our EMA runs already showed ``lambda=1`` behaving like
 ``lambda=0``, so an inert term is not hypothetical.
 
-**REGIME CAVEAT — read before quoting any number.** This runs on a base checkpoint with a
-freshly built ``Z_mc``, i.e. ZERO cache staleness. The ``sigma`` measured here is pure
-dropout noise; during training the cached document states are stale relative to the model
-and sigma's scale shifts. The flip-rate bands below are approximate **dosage
-calibration**, not transferable constants, and say nothing about retrieval quality.
+**REGIME CAVEAT — read before quoting any number.** Without ``--cache_state`` the ``Z_mc``
+is built fresh, so ``sigma`` is pure dropout noise and the flip-rate bands are dosage
+calibration, not transferable constants. With it, sigma carries a finished run's real cache
+staleness instead (``--compare_fresh`` quantifies that gap). The emitted ``regime_caveat``
+field says which applies.
 Whether uncertainty helps is decided by the pilot arms and their BRIGHT evaluation, never
 here. **Do not quote any Recall/NDCG claim from this script.**
 
@@ -70,11 +70,20 @@ LOW_BAND = (0.10, 0.20)      # half-open [lo, hi)
 MEDIUM_BAND = (0.20, 0.35)   # closed   [lo, hi]
 MAX_FLIP_SD = 0.05
 
-REGIME_CAVEAT = (
-    "Measured on a base checkpoint with a freshly built Z_mc (zero cache staleness). "
-    "sigma here is pure dropout noise; mid-training it is also model-staleness. These "
-    "flip-rate bands are dosage calibration only and imply nothing about retrieval "
-    "quality — that is decided by the pilot arms and their BRIGHT evaluation.")
+# The caveat is about STALENESS, so it keys on --cache_state alone: a trained checkpoint
+# with a freshly built Z_mc still has zero cache staleness. Which checkpoint was loaded is
+# already recorded in report['checkpoint'], so the prose does not restate it.
+REGIME_CAVEAT_FRESH = (
+    "Measured against a freshly built Z_mc (zero cache staleness). sigma here is pure "
+    "dropout noise; mid-training it is also model-staleness. These flip-rate bands are "
+    "dosage calibration only and imply nothing about retrieval quality — that is decided "
+    "by the pilot arms and their BRIGHT evaluation.")
+
+REGIME_CAVEAT_STALE = (
+    "Measured against a finished run's own saved Z_mc, so sigma carries real cache "
+    "staleness, not just dropout noise — the post-hoc forensic regime, not dosage "
+    "calibration. Flip rates here describe that run's selection behaviour and still imply "
+    "nothing about retrieval quality.")
 
 
 # torch.quantile() rejects inputs above 2**24 elements. The probe's sigma tensor is
@@ -121,6 +130,7 @@ def probe_grid(cache, Z_mc, student, tokenizer, qids, qid_to_text, qrels_dict,
                       'sum_ratio': 0.0, 'n_ratio': 0, 'leaked': 0}
            for l in lambdas}
     sigma_chunks = []
+    margin_chunks = []          # A2: the gap sigma has to close, kept per query
 
     for start in range(0, len(qids), int(query_batch_size)):
         batch_qids = qids[start:start + int(query_batch_size)]
@@ -140,6 +150,8 @@ def probe_grid(cache, Z_mc, student, tokenizer, qids, qid_to_text, qrels_dict,
         finite = sigma[torch.isfinite(sigma)]
         if finite.numel():
             sigma_chunks.append(finite.float().cpu())
+        if margin is not None:
+            margin_chunks.append(margin.detach().float().cpu())
 
         for lam in lambdas:
             lam = float(lam)
@@ -186,7 +198,101 @@ def probe_grid(cache, Z_mc, student, tokenizer, qids, qid_to_text, qrels_dict,
         'sigma_all_zero': bool(float(all_sigma.abs().max()) == 0.0),
         'sigma_nonfinite': bool(not torch.isfinite(all_sigma).all()),
     }
+    # A2 -- the tie-band ceiling. `margin` is the top-1/top-2 score gap that the
+    # uncertainty bonus has to close to change a selection. If that gap is routinely
+    # smaller than sigma's own spread, then lambda can only ever reorder documents the
+    # score could not separate, and a null result is STRUCTURAL rather than a dosage
+    # failure. Reported as a distribution, not just the mean ratio above.
+    if margin_chunks:
+        all_margin = torch.cat(margin_chunks).reshape(-1)
+        sig_p50 = sigma_stats['sigma_p50']
+        sigma_stats['margin'] = {
+            'margin_p10': _quantile(all_margin, 0.1),
+            'margin_p50': float(all_margin.median()),
+            'margin_p90': _quantile(all_margin, 0.9),
+            'margin_mean': float(all_margin.mean()),
+            'n_queries': int(all_margin.numel()),
+            # what fraction of decisions sit inside a band one sigma wide
+            'frac_margin_below_sigma_p50': float(
+                (all_margin < sig_p50).float().mean()) if sig_p50 > 0 else None,
+        }
+    else:
+        sigma_stats['margin'] = None
     return out, sigma_stats
+
+
+def compare_fresh_vs_stale(cache, Z_stale, Z_fresh, student, tokenizer, qids,
+                           qid_to_text, qrels_dict, T, lambdas, m, cfg, device,
+                           seed, query_batch_size=128, pairs_per_chunk=50_000):
+    """A1 -- is the sigma measured DURING training the same signal as a fresh one?
+
+    The run's cached document states turned over 0.77 times across the whole run, so
+    ``Z_mc`` is very nearly the round-0 (base model) bank while the queries are encoded
+    by the current student. This asks whether that matters: it scores ONE query MC draw
+    against the stale bank and against a bank freshly built from the same checkpoint on
+    the same docids, then compares the two sigmas.
+
+    A low correlation means the training-time sigma is largely an artefact of cache
+    staleness rather than the model's uncertainty about the pair -- which would make the
+    lambda null a measurement problem, not a property of uncertainty. A high correlation
+    means staleness is not the explanation and the null stands on its own.
+
+    Both banks are scored from the SAME ``q_mc`` draw, so any difference is attributable
+    to the document states alone rather than to a different dropout sample.
+    """
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    gen = np.random.default_rng(seed)
+    sx, sy = [], []
+    agree = {float(l): {'same': 0, 'n': 0} for l in lambdas}
+    chunk = cfg.get('score_chunk_size')
+
+    for start in range(0, len(qids), int(query_batch_size)):
+        batch_qids = qids[start:start + int(query_batch_size)]
+        texts = [qid_to_text[q] for q in batch_qids]
+        q_mc, _ = encode_queries_mc(student, tokenizer, texts, T, device, cfg)
+
+        _g1, s_st, sig_st = score_cached_mcdp(q_mc, Z_stale, 0.0, chunk_size=chunk)
+        _g2, s_fr, sig_fr = score_cached_mcdp(q_mc, Z_fresh, 0.0, chunk_size=chunk)
+        s_st = cache.mask_positives(s_st.clone(), batch_qids, qrels_dict, inplace=True)
+        s_fr = cache.mask_positives(s_fr.clone(), batch_qids, qrels_dict, inplace=True)
+
+        ok = torch.isfinite(sig_st) & torch.isfinite(sig_fr)
+        if bool(ok.any()):
+            a = sig_st[ok].float().reshape(-1).cpu()
+            b = sig_fr[ok].float().reshape(-1).cpu()
+            # subsample: the full [B_q, B_doc] pair set is ~4M per chunk and only the
+            # correlation is wanted, not the raw tensors.
+            if a.numel() > pairs_per_chunk:
+                idx = torch.from_numpy(
+                    gen.choice(a.numel(), size=pairs_per_chunk, replace=False))
+                a, b = a[idx], b[idx]
+            sx.append(a)
+            sy.append(b)
+
+        for lam in lambdas:
+            lam = float(lam)
+            sel_st = torch.topk(s_st + lam * sig_st, k=m, dim=1).indices[:, 0]
+            sel_fr = torch.topk(s_fr + lam * sig_fr, k=m, dim=1).indices[:, 0]
+            agree[lam]['same'] += int((sel_st == sel_fr).sum())
+            agree[lam]['n'] += len(batch_qids)
+
+    if not sx:
+        return None
+    X, Y = torch.cat(sx), torch.cat(sy)
+    xm, ym = X.mean(), Y.mean()
+    den = torch.sqrt(((X - xm) ** 2).sum() * ((Y - ym) ** 2).sum())
+    pearson = float(((X - xm) * (Y - ym)).sum() / den) if float(den) > 0 else None
+    return {
+        'n_pairs_sampled': int(X.numel()),
+        'sigma_stale_mean': float(X.mean()),
+        'sigma_fresh_mean': float(Y.mean()),
+        'sigma_scale_ratio_fresh_over_stale': (float(Y.mean() / X.mean())
+                                               if float(X.mean()) != 0 else None),
+        'pearson_sigma_stale_vs_fresh': pearson,
+        'top1_agreement': {str(l): (v['same'] / max(v['n'], 1))
+                           for l, v in agree.items()},
+    }
 
 
 def aggregate_grid(per_seed, lambdas, m, n_queries, T, B_doc):
@@ -349,6 +455,29 @@ def _print(report):
     print(f"  selected MEDIUM    : {s['selected_medium']}  "
           f"(band {s['medium_band']} satisfied={s['band_satisfied']['medium']})")
     print(f"  nonzero arms to run: {s['n_arms']}")
+    mg = (a.get('sigma') or {}).get('margin')
+    if mg:
+        # A2: how much room does sigma actually have to work in?
+        print("-" * 78)
+        print(f"  top1-top2 score gap p10/p50/p90 : {mg['margin_p10']:.6f} / "
+              f"{mg['margin_p50']:.6f} / {mg['margin_p90']:.6f}   "
+              f"(n={mg['n_queries']:,})")
+        if mg.get('frac_margin_below_sigma_p50') is not None:
+            print(f"  gap narrower than median sigma  : "
+                  f"{mg['frac_margin_below_sigma_p50']:.1%} of queries  "
+                  f"<- sigma can only ever reorder THESE")
+    fv = a.get('fresh_vs_stale')
+    if fv:
+        # A1: is the training-time sigma the same signal as a fresh one?
+        print("-" * 78)
+        pe = fv['pearson_sigma_stale_vs_fresh']
+        print(f"  STALE vs FRESH sigma (n={fv['n_pairs_sampled']:,} pairs)")
+        print(f"    pearson r                     : "
+              f"{'n/a' if pe is None else f'{pe:.4f}'}")
+        print(f"    mean stale / mean fresh       : {fv['sigma_stale_mean']:.6f} / "
+              f"{fv['sigma_fresh_mean']:.6f}")
+        for lam, ag in sorted(fv['top1_agreement'].items(), key=lambda x: float(x[0])):
+            print(f"    top-1 agreement @ lambda={float(lam):<4} : {ag:.1%}")
     for r in s['rejected']:
         print(f"  ✗ lambda={r['lambda_val']}: {'; '.join(r['rejected_because'])}")
     for n in s['notes']:
@@ -357,7 +486,7 @@ def _print(report):
     for line in _verdict(a):
         print(f"  • {line}")
     print("-" * 78)
-    print("  REGIME CAVEAT: " + REGIME_CAVEAT)
+    print("  REGIME CAVEAT: " + a['regime_caveat'])
     print("=" * 78)
 
 
@@ -409,7 +538,7 @@ def run_probe(cache, Z_mc, student, tokenizer, qids, qid_to_text, qrels_dict,
     return {
         'kind': 'cached_mcdp_lambda_dosage_probe',
         'report_only': True,
-        'regime_caveat': REGIME_CAVEAT,
+        'regime_caveat': REGIME_CAVEAT_FRESH,
         'recipe': recipe,
         'lambda_grid': [float(l) for l in lambdas],
         'm': m, 'T': T, 'B_doc': cache.B_doc,
@@ -507,7 +636,19 @@ def run_real(args):
     train_items, _mmeta = maybe_apply_manifest(
         train_items, args.manifest, log=lambda m: print(f"[dosage-probe] {m}"))
     qid_to_text = {it['query_id']: it['query'] for it in train_items}
-    qids = list(qid_to_text)[:args.max_queries]
+    _all_qids = list(qid_to_text)
+    if (args.spread_sample and args.max_queries
+            and args.max_queries < len(_all_qids)):
+        # The mixture is HQ-first on disk, so a raw prefix is an HQ-ONLY sample. With no
+        # manifest available (the pilot's was built against the pre-Aug-26 mixture and is
+        # gone), an even stride over the whole list is proportional to every source by
+        # construction, and is deterministic -- no RNG, so two probe runs compare.
+        stride = len(_all_qids) / float(args.max_queries)
+        qids = [_all_qids[int(i * stride)] for i in range(args.max_queries)]
+        print(f"[dosage-probe] strided sample: {len(qids)} of {len(_all_qids)} "
+              f"queries (stride {stride:.1f})", flush=True)
+    else:
+        qids = _all_qids[:args.max_queries]
 
     batch_size = ctx['args'].get('batch_size', 64)
     spe = steps_per_epoch(len(train_items), batch_size)
@@ -518,24 +659,56 @@ def run_real(args):
     T = int(cfg['T'])
 
     base = ctx['base_model']
+    # The TOKENIZER always comes from the base model: a mid-run checkpoint dir holds
+    # weights only, and the vocabulary never changed during training.
+    ckpt = args.checkpoint or base
     tok = AutoTokenizer.from_pretrained(base)
     dtype = torch.bfloat16 if device.type == 'cuda' else torch.float32
-    student = AutoModel.from_pretrained(base, torch_dtype=dtype).to(device).eval()
+    student = AutoModel.from_pretrained(ckpt, torch_dtype=dtype).to(device).eval()
     for p in student.parameters():
         p.requires_grad_(False)
     for mod in student.modules():
         if isinstance(mod, torch.nn.Dropout):
             mod.p = cfg.get('mc_dropout_p', 0.3)
 
-    cache = NegativeCache.init_uniform(stale_embs, c_ids, cfg, device)
-    del stale_embs
-    gc.collect()
-    Z_mc, _ = init_Z_mc(cache, corpus_lookup, student, tok, T, cfg, device)
+    if args.cache_state:
+        # The bank the run ACTUALLY mined against, staleness and all. Loading it is the
+        # whole point: rebuilding would measure a zero-staleness regime the run never saw.
+        cache = NegativeCache.load_state(args.cache_state, cfg, device, expect_T=T)
+        cfg['B_doc'] = cache.B_doc
+        Z_mc = cache.Z_mc
+        del stale_embs
+        gc.collect()
+        print(f"[dosage-probe] loaded cache state {args.cache_state} "
+              f"(B_doc={cache.B_doc}, T={cache.T})", flush=True)
+    else:
+        cache = NegativeCache.init_uniform(stale_embs, c_ids, cfg, device)
+        del stale_embs
+        gc.collect()
+        Z_mc, _ = init_Z_mc(cache, corpus_lookup, student, tok, T, cfg, device)
 
     report = run_probe(cache, Z_mc, student, tok, qids, qid_to_text, qrels_dict,
                        T, args.lambda_grid, cfg['m'], cfg, device, args.seeds,
                        args.query_batch_size, recipe=args.recipe)
+    if args.compare_fresh:
+        # Clone FIRST: init_Z_mc -> attach_mc_states mutates the cache in place, so the
+        # stale bank is gone the moment the fresh one is built.
+        Z_stale = cache.Z_mc.clone()
+        print("[dosage-probe] building a FRESH Z_mc from the same checkpoint "
+              "for the stale-vs-fresh comparison...", flush=True)
+        Z_fresh, _fstats = init_Z_mc(cache, corpus_lookup, student, tok, T, cfg, device)
+        report['fresh_vs_stale'] = compare_fresh_vs_stale(
+            cache, Z_stale, Z_fresh, student, tok, qids, qid_to_text, qrels_dict,
+            T, args.lambda_grid, cfg['m'], cfg, device, seed=100,
+            query_batch_size=args.query_batch_size)
+        del Z_stale, Z_fresh
+        gc.collect()
+
     report['mode'] = 'real'
+    report['checkpoint'] = str(ckpt)
+    report['cache_state'] = str(args.cache_state) if args.cache_state else None
+    if args.cache_state:
+        report['regime_caveat'] = REGIME_CAVEAT_STALE
     report['base_model'] = str(base)
     report['mc_dropout_p'] = cfg.get('mc_dropout_p')
     report['manifest'] = str(args.manifest) if args.manifest else None
@@ -584,6 +757,20 @@ def main():
     ap.add_argument('--max_queries', type=int, default=2048, help='query sample size')
     ap.add_argument('--query_batch_size', type=int, default=128,
                     help='queries scored at once; bounds the [T, B_q, B_doc] buffer')
+    ap.add_argument('--checkpoint', default=None,
+                    help='trained checkpoint to score with; default is the base model. '
+                         'The tokenizer still comes from the base model.')
+    ap.add_argument('--cache_state', default=None,
+                    help="the run's persisted cache_state_N.pt, so sigma is measured "
+                         'against the bank the run actually mined against rather than '
+                         'a freshly built one')
+    ap.add_argument('--compare_fresh', action='store_true',
+                    help='also build a fresh Z_mc from --checkpoint and report how far '
+                         'the stale sigma has drifted from it (A1)')
+    ap.add_argument('--spread_sample', action='store_true',
+                    help='sample --max_queries evenly across the WHOLE mixture instead '
+                         'of taking a prefix. The mixture is HQ-first on disk, so the '
+                         'prefix is HQ-only; use this whenever no manifest is given.')
     ap.add_argument('--B_doc', type=int, default=None)
     ap.add_argument('--T', type=int, default=None)
     ap.add_argument('--m', type=int, default=None)

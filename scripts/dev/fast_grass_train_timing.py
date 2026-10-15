@@ -290,13 +290,21 @@ def run_real(args):
                                         weight_decay=weight_decay)
         print("[train-timing] AdamW8bit enabled", flush=True)
     else:
-        if hasattr(student, 'gradient_checkpointing_enable'):
+        # Gradient checkpointing trades compute for activation memory; it does NOT change
+        # the gradients, so turning it off is score-neutral and purely a speed/memory
+        # question. `run_async_fast_grass_train.py` enables it unconditionally in this
+        # same `else` arm, so measuring both settings here is what decides whether a
+        # future run can drop it. CLAUDE.md records 60.09 GiB peak WITH it at p1024, so
+        # an OOM at q1024 is a plausible outcome and a valid answer.
+        gc_on = not args.no_gradient_checkpointing
+        if gc_on and hasattr(student, 'gradient_checkpointing_enable'):
             try:
                 student.gradient_checkpointing_enable()
             except Exception:
-                pass
+                gc_on = False
         optimizer = AdamW(student.parameters(), lr=lr, weight_decay=weight_decay)
-        print("[train-timing] AdamW + gradient checkpointing", flush=True)
+        print(f"[train-timing] AdamW + gradient checkpointing "
+              f"{'ON' if gc_on else 'OFF'}", flush=True)
     student.train()
 
     loss_fn = TemperatureScaledContrastiveLoss(temperature=temperature)
@@ -379,6 +387,7 @@ def run_real(args):
         'passage_max_len': p_max,
         'enc_batch_size': enc_bs,
         'compiled': (not args.no_compile) and device.type == 'cuda',
+        'gradient_checkpointing': not args.no_gradient_checkpointing,
         'bnb_adamw8bit': _BNB_AVAILABLE and device.type == 'cuda',
         'warmup_steps': args.warmup_steps,
         'timed_steps': len(times),
@@ -504,6 +513,10 @@ def main():
                     help='subset the mixture (tiny real sanity run, e.g. 128)')
     ap.add_argument('--no_compile', action='store_true',
                     help='disable torch.compile (debug / non-Triton env)')
+    ap.add_argument('--no_gradient_checkpointing', action='store_true',
+                    help='disable gradient checkpointing. Score-neutral (identical '
+                         'gradients) but uses far more activation memory; this is the '
+                         'speed/memory measurement, so expect a possible OOM at q1024.')
     ap.add_argument('--no_checkpoint_probe', action='store_true',
                     help='skip the one-off checkpoint-write timing probe (the '
                          'speed estimate then excludes async checkpoint I/O)')
